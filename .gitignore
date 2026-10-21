@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.log
+.venv/
+.venv-policy/
+runs/
+__pycache__/
+vendor/
+methods/
+protocols/
+artifacts/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.pytest_cache/
+.DS_Store
+Thumbs.db
+# Local machine validation/history is not part of the source release.
+UPGRADE_NOTES.md

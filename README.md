@@ -1,0 +1,168 @@
+# 具身工坊 · MuJoCo 机械臂工作台
+
+**Embodied Agent Studio** is a local MuJoCo workbench for vision agents, VLA/WAM
+policies and composable decision systems. It supports reproducible paired trials,
+optional trajectory videos, per-call telemetry and experiment analysis. The tested
+setup is Windows with Python 3.13 and Node.js 22.12+. Source code is MIT licensed;
+robot models and policy weights retain their upstream licenses.
+
+[安装与运行](#新环境安装windows) · [组合策略与 RSI](RSI_WORKBENCH.md) · [策略接口](POLICY_PROTOCOL.md) · [模型来源](MODEL_SOURCES.md) · [参与贡献](CONTRIBUTING.md)
+
+网页工作台内嵌本地 MuJoCo 原生渲染，并支持视觉 Agent 接管：每轮读取三路同步 RGB 图像与机械臂状态，输出下一步绝对末端位姿，由本地 IK 与执行器完成动作。
+
+## 已接入
+
+- **Franka Panda**：7 个机械臂关节、双指平行夹爪，8 个执行器。
+- **SO-101**：5 个机械臂关节、1 个夹爪关节，6 个执行器，包含模型自带的腕部相机。
+- **RM65 + GaiaHand**：官方 URDF 与网格组合，6 个臂关节和 15 个独立手指关节；公开资源不是 Gaia Hand 20，安装变换和伺服参数为仿真设置。
+- 实际 MuJoCo 3.13.0 动力学：2 ms 步长，重力、碰撞、自由物体接触。
+- 关节滑块分别显示执行器目标和实际关节状态。Panda 夹爪目标用百分比表示，实际开度用毫米表示。
+- 暂停、继续、单步、速度调节、接触点与力、关节轴、碰撞模型、重力开关。
+- 关节与夹爪动作序列、机械臂归位、自由落体测试。
+- 可配置 Codex 本机登录、OpenAI Responses、OpenAI 兼容 Chat Completions、Claude Messages。
+- 前方、侧方、腕部三路同步相机；下一步绝对位姿、执行误差与每轮反馈可在页面查看。
+- 六种场景：桌面操作、多物体分拣、方块堆叠、抽屉操作、障碍搬运、插销装配；左侧选择场景、任务和随机种子后点击“应用场景”。
+- “策略模型”支持默认 SmolVLA、用户自定义 VLA/WAM；“方法对比”运行同一初始状态下的配对试验；“运行日志”查看和下载推理及执行记录。
+
+布局生成会按物体和设施的水平占地尺寸预留 12 mm 间距（SO-101 按比例缩放），种子随机偏移保持在 ±25 mm 内。抽屉场景的蓝块已移到把手前方的空区，避免初始穿模；无法生成满足间距的布局时会明确报错。相同种子在当前场景版本下可复现，已有日志中的历史布局保留原样。
+
+SO-101 默认归位姿态已抬高，避免夹爪与抽屉柜顶初始碰撞。归位、演示和自由落体快捷按钮在窄窗口仍保留；运动未到位时显示关节偏差与当前接触对象，Agent 下一轮也能读取这些原因。SO-101 的 5 个机械臂自由度不能实现任意位置与姿态组合，不可达的末端目标会明确拒绝。
+
+## 策略模型、对比与日志
+
+新增 **RSI 实验室（0.5）**：主 Agent、决策器和动作策略可以分别配置；支持自定义 Agent HTTP 接口，以及单决策、串联复核和加权投票。方法配方可登记父子版本，在冻结的开发／验证／测试种子下运行配对实验，按验证门槛晋升或回退。新 Agent、策略与组合任务会保存真实三路图像和逐物理步状态，可查看图像序列、加载已记录状态并下载完整任务 ZIP。操作和协议见 [RSI_WORKBENCH.md](RSI_WORKBENCH.md)。当前提供研究基础机制，尚未自动生成子代或训练权重。
+
+默认 SmolVLA 使用独立 `.venv-policy` 环境、官方 LeRobot 实现和 `lerobot/smolvla_base` 权重。首次安装运行 `安装策略环境.cmd`（需要 uv）；当前电脑默认安装 CPU 版 PyTorch，使策略推理与 MuJoCo 在现有内存条件下共存。GPU 环境可运行 `安装策略环境.cmd cuda` 并在策略配置中选择 CUDA，需要足够的系统内存与显存。切换 **SO-101**，选择“策略模型”，可先运行一个动作块。基础权重没有在这些仿真任务上微调，接通推理不等于已具备可靠抓取能力。模型配置可改为匹配 SO-101 映射的微调权重，默认动作标定见 [策略协议](POLICY_PROTOCOL.md)。
+
+本机 SmolVLA 在任务结束、停止或出错后会退出工作台启动的推理进程，释放模型及运行时内存；同一组对比试验期间保持加载，整组结束后释放。下次任务自动重启服务并从本地缓存加载权重。用户自行启动的外部服务不由工作台关闭。暂停且无操作时，MuJoCo 保留已渲染画面；视角变化、单步和继续仿真会重新绘制。
+
+自定义 VLA 和 WAM 需要实际推理服务。配置完整预测地址、模型名和可选密钥，协议同样接收三路图像与本体状态，返回关节动作块或绝对末端位姿。WAM 暂无内置权重。
+
+“方法对比”选择机器人、同一场景任务、方法、种子和每次仿真时间上限。每个种子先稳定场景，再保存 MuJoCo 完整积分状态，各方法恢复同一份状态后**依次**运行。相同初始状态编号会显示在表格中。推理时物理暂停；比较记录仿真耗时、墙钟耗时、推理次数及平均耗时。模型加载预热不计入各方法试验时间；方法各自的轮数／动作块上限仍有效并写入日志。表格可导出 CSV。
+
+场景评价要求条件连续满足 0.3 秒。放置、堆叠、插销任务还要求物体低速且已脱离机器人接触；抽屉要求拉出指定距离。评价器使用物理真值，模型观察不含这些真值。模型自行报告完成与评价器成功分别记录。界面显示“成功 / 有效试验”和错误数，少量试验不代表泛化成功率。
+
+所有新 Agent、策略和对比运行都保存到 `runs/<运行编号>/`。`events.jsonl` 包含接口实际返回的模型输出、动作、实际执行、耗时、用量和错误；`summary.json` 保存配置和结果；对比子试验另有最终场景图。开启推理时保存服务实际返回的推理文字或摘要，未返回则标记不可用，不推测缺失内容。密钥、图像 base64、加密推理内容不写入日志。服务重启后日志仍可查看；模型密钥仅在服务内存中，重启需重新填写。测试夹具日志保存在临时目录。
+
+运行前可勾选“保存轨迹视频”，默认关闭。Agent、策略、组合方法和两类对比实验均支持；对比中的每个子试验分别保存 `trajectory.mp4`。视频记录当前主视角的真实 MuJoCo 画面，以仿真时间 20 FPS 播放，推理暂停不重复录帧；结束、出错或手动停止后封装已录内容，可在运行日志和对应试验中播放、下载，完整 ZIP 也包含视频。需要本机 FFmpeg（含 libx264）；找不到编码器或录制失败时显示具体错误，物理任务继续且其余日志保留。
+
+### 实验结果与分析（0.6）
+
+运行面板实时显示墙钟用时、累计模型调用耗时及当前请求等待时间。墙钟包含观察、推理、动作与清理；调用耗时包含网络、排队和服务处理，接口未提供内部计时的情况下不能当作纯 GPU 推理时间。仿真时间仍单独显示。
+
+打开顶部“实验结果与分析”即可筛选已完成、未达成、失败和停止记录，查看每次运行的视频、总用时、错误、原始 JSONL，以及每轮模型公开输出和服务返回的推理文字／摘要。逐轮曲线分别显示接口报告的输出 tokens 与调用耗时。未返回用量或推理文字的轮次标记为缺失；历史日志不补造这些信息。
+
+跨实验分析需选择同一模型、任务与方法类型，按推理强度汇总每次实验的累计输出 tokens 和累计调用耗时，展示均值、样本数及缺失数。批实验通过子试验记录统计实际调用，避免父子记录重复计数。研究中还应固定机器人、场景、种子集和预算；这些图用于描述已运行样本，不自动建立推理强度与效果的因果关系。
+
+自由视图支持左键旋转、右键／中键／Shift＋左键拖动平移、滚轮缩放。点击预设视角或“恢复默认视角”可复位。该交互只改变主展示相机，不改变 Agent 的三路相机或物理状态。
+
+## 视觉 Agent 使用
+
+1. 在右侧“Agent 接管”中点击模型卡片。默认使用 **Codex 本机登录 + gpt-6-astra + low**。
+2. 可选择或输入 `gpt-6-astra`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 等当前账号可用的模型 ID。不会自动换用其他模型。
+3. 点击“末端抬高 2 cm”示例，先用“仅执行一轮”观察完整流程；输入框发送按钮则连续运行，默认最多 4 轮。
+4. “停止接管”会终止未完成请求、丢弃未执行输出并暂停物理。暂停、重置、切换机械臂也会取消接管。网页关闭不会自动停止任务，但任务受轮数和超时限制。
+
+Codex 通过项目依赖中的 CLI 0.155.1 复用原有 ChatGPT 登录，不读取、复制或导出登录令牌。该版本独立于电脑上的全局 CLI，避免旧版不支持 Astra。单轮采用临时目录、只读沙箱、禁用 shell、应用与 hooks，使用三张附件和 JSON Schema 输出；终止后清理临时图片。该机器的 WebSocket 连接曾超时，因此此适配器显式使用官方 HTTPS Responses 传输。调用消耗当前账号 Codex 用量。若换电脑，需要先通过 Codex CLI 登录；`CODEX_CLI_PATH` 可指定原生 CLI 路径。
+
+API 模式可填写服务地址、API Key、模型名称；Key 只保存在本机后端内存，不写入网页存储或文件。切换服务地址或协议会清除旧密钥。重启后需重新配置。兼容适配器可以对接 DeepSeek 等兼容协议的服务，但**所选模型必须支持多图像输入**；文本模型不适用本闭环，不会静默省略图像或改成文字规划。API 适配器已通过本地 HTTP 契约测试，实际账号可用性、视觉能力需用对应 Key 验证。
+
+DeepSeek 官方的 `deepseek-flash` **支持图像输入**：选择“OpenAI 兼容”、地址 `https://api.deepseek.com`（或 `/v1`），填写模型名与 Key。工作台会明确传入思考开关和推理强度，默认开启思考、低强度；也可关闭思考以缩短响应。其他兼容端点不自动附加 DeepSeek 专用参数。依据：[图像理解](https://api-docs.deepseek.com/zh-cn/guides/vision/)、[思考模式](https://api-docs.deepseek.com/guides/thinking_mode/)。
+
+API 模式的“单轮输出上限”默认 **16384 tokens**，接受不少于 512 的整数，工作台不再设置固定最大值；实际支持范围由所选模型和服务校验。推理模型的思考与最终动作共用输出预算；该值与“连续任务最多轮数”不同，不影响 Codex CLI，Codex 的生成限制由 CLI 和模型管理。`finish_reason=length` 表示输出或上下文长度触限，不能据此判断视觉能力。此时暂停任务、保留服务返回的用量、拒绝执行截断结果；可提高输出上限、降低推理强度，DeepSeek 还可关闭思考后重新运行。不会自动重试或额外消耗调用。依据：[DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)。
+
+### 控制契约
+
+```text
+三路 RGB + 机械臂状态 → 模型选择一个绝对 TCP 位姿
+                    → 本地 IK → 执行器动力学 → 实际末端反馈 → 下一轮观察
+```
+
+- 输入：同一物理时刻的 front / side / wrist 图像、相机外参、视场角、实际关节位置与速度、关节范围、实际 TCP 位姿、夹爪状态和最近执行反馈。模型输入中不包含方块真实坐标、物体 6D 位姿、关键点或 3D value map。
+- 输出：`status`（move/done/blocked）、`frame: world`、`position_m: [x,y,z]`、`quaternion_wxyz: [w,x,y,z]`、`gripper_open`（0 闭合，1 张开）、`duration_s`、简短动作说明。位置和姿态均为世界系绝对值。
+- 观察和推理期间暂停物理，执行时恢复。IK 在独立的 MuJoCo 数据副本上使用 site Jacobian 求解；执行只改控制目标，不直接改写机械臂 qpos。
+- 每轮平移最多 Panda 0.12 m / SO-101 0.0504 m，旋转最多 35°，关节变化最多 0.65 rad；动作时长 0.5–4 s。位姿、单位四元数、关节限制和桌面高度均校验。
+- 执行到位标准：Panda 6 mm / SO-101 2.52 mm 的位置误差、0.05 rad 姿态误差，且关节速度小于 0.05 rad/s。页面分别显示模型动作与实际误差。模型返回 done 仅标为“模型判断已完成”。
+- SO-101 只有 5 个机械臂自由度，无法实现任意 6D 位姿。不可达动作被拒绝，原因在下一轮反馈给模型重新选择。
+- 当前是局部 IK 与关节插值控制，没有碰撞规避路径规划，也未对视觉抓取成功率做实验验证；MuJoCo 会计算运动途中的实际接触。仅连接仿真，不接真实硬件。
+
+协议参考：[Codex 非交互调用](https://learn.chatgpt.com/docs/non-interactive-mode)、[OpenAI 模型 ID](https://developers.openai.com/api/docs/models)、[图像输入](https://developers.openai.com/api/docs/guides/images-vision)、[结构化输出](https://developers.openai.com/api/docs/guides/structured-outputs)、[Claude Messages](https://platform.claude.com/docs/en/api/python/messages/create)、[DeepSeek 兼容接口](https://api-docs.deepseek.com/)。
+
+## 已安装环境启动
+
+安装依赖、下载模型并构建前端后，在项目目录执行：
+
+```powershell
+npm start
+```
+
+打开 [本地工作台](http://127.0.0.1:8000)。这一个服务即可提供构建后的网页和真实仿真。关闭服务会停止仿真。已运行服务时无需重复启动。
+
+也可以双击 `启动MuJoCo工作台.cmd`。出现地址后在浏览器打开；保留启动窗口。
+
+开发时另开终端执行 `npm run dev`，访问 [开发工作台](http://127.0.0.1:5173)，它通过本地代理连接同一 MuJoCo 服务。修改 Python 后需要重启仿真服务；修改网页后重新构建用于正式启动的网页。
+
+## 快捷命令接口
+
+- `机械臂归位`
+- `张开夹爪` / `闭合夹爪`
+- `运行关节演示`
+- `关节1转到30度`（按当前模型检查关节编号和范围）
+- `暂停仿真` / `继续仿真`
+
+以上固定命令通过 `/api/command` 的 `instruction` 操作保留；页面 Agent 输入框用于视觉任务。命令只修改执行器控制目标，随后调用 `mj_step` 推进物理。重置与自由落体实验会明确初始化相应状态。
+
+## 新环境安装（Windows）
+
+需要 Python 3.13、Node.js 22.12+、Git 和可用的 OpenGL 图形驱动。录制视频还需要安装含 `libx264` 的 [FFmpeg](https://ffmpeg.org/download.html)，并将 `ffmpeg`、`ffprobe` 加入 PATH。以下为已验证的 Windows PowerShell 安装路径；其他系统暂未完成端到端验证。
+
+```powershell
+git clone https://github.com/shank000/embodied-agent-studio.git
+cd embodied-agent-studio
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt
+git clone --depth 1 --filter=blob:none --sparse https://github.com/google-deepmind/mujoco_menagerie.git vendor/mujoco_menagerie
+git -C vendor/mujoco_menagerie fetch --depth 1 origin 822c2d8f877dd166c5b7d3c9f7e3c3b6589473b7
+git -C vendor/mujoco_menagerie checkout 822c2d8f877dd166c5b7d3c9f7e3c3b6589473b7
+git -C vendor/mujoco_menagerie sparse-checkout set franka_emika_panda robotstudio_so101
+# 下载 RM65 + GaiaHand 的上游模型（运行全部模型测试需要）
+.venv/Scripts/python tools/download_robot_models.py
+npm ci
+npm run build
+npm test
+npm start
+```
+
+模型来自 MuJoCo Menagerie，保留原始 LICENSE，来源与场景调整见 [MODEL_SOURCES.md](MODEL_SOURCES.md)。针对中文 Windows 路径，网格通过 MuJoCo 官方虚拟文件系统载入。
+
+`vendor/`、虚拟环境和权重不随源码分发。RM65 上游许可尚未明确，下载脚本直接从厂商仓库获取，使用与再分发须遵循厂商条款。工作台自身源码的 MIT 许可不涵盖这些第三方资产。项目也不包含本地 `runs/`、`methods/`、`protocols/`、凭据和机器验证记录。
+
+## 架构与范围
+
+- `server/simulation.py`：载入原始 MJCF/网格，添加工作台和自由方块，控制与推进 MuJoCo。
+- `server/app.py`：单独线程拥有物理状态和 OpenGL 上下文，按顺序处理控制请求；提供 JPEG 实时流和状态接口。
+- `server/agent.py`：模型配置、Codex/API 接入、观察—动作循环、停止与错误反馈。
+- `server/control.py`：绝对 TCP 动作契约、局部 IK 与关节限制。
+- `src/main.js`：显示原生渲染流与实际遥测，提交控制请求；没有客户端机械臂动画或物体绑定。
+- `tests/test_simulation.py`：使用真实模型测试关节响应、重力与接触、夹爪、动作收敛、命令校验、暂停/单步及原生渲染与模型切换。
+
+网页内嵌的是 MuJoCo 原生渲染输出与网页仿真控制面板，桌面 GLFW 窗口没有被重挂载到浏览器中。模型为开源仿真描述，未按某台实体机械臂做参数标定。
+
+验证：`npm test` 包含真实模型动力学、两种机械臂 IK、同步相机、外部模型边界替身驱动的真实闭环、推理取消和三种 API 的本地 HTTP 契约测试。`tests/live_agent_smoke.py` 是单独的付费/额度消耗测试：显式运行它才会实际调用 Astra 并执行一个末端动作，不包含在普通测试中。
+
+## 本地接口
+
+- `GET /api/state`：物理时间、关节目标/实际值、末端位置、接触数量、任务状态。
+- `GET /api/runs?limit=100&offset=0`：持久化实验记录，含错误、取消与服务中断。
+- `GET /api/runs/{id}/analysis`：逐调用文本、推理摘要、用量、耗时、视频引用与子试验。
+- `GET /api/experiments/analysis`：按模型、任务、方法类型与实际推理强度分组；排除运行中记录的均值，并避免父子实验重复计数。
+- `GET /api/stream`：MuJoCo 原生渲染的 MJPEG 流。
+- `POST /api/command`：控制接口，例如 `{"action":"instruction","text":"关节1转到30度"}`。
+- `GET/POST /api/agent/config`：读取不含密钥的配置 / 应用配置。
+- `POST /api/agent/start`：`{"task":"保持姿态，将末端抬高 2 厘米","one_round":true}`。
+- `POST /api/agent/stop`：取消接管并暂停。
+- `POST /api/agent/observe`：手动采集同步观察；接管期间自动采集。
+- `GET /api/agent/camera/{front|side|wrist}`：最近一次观察的相机图像。
+- `GET /docs`：本地 API 文档。
+
+服务只监听 `127.0.0.1`。网页与接口操作同一个仿真实例。断开网页连接不会停止后端仿真；暂停按钮或关闭服务可停止物理推进。

@@ -1,0 +1,7 @@
+# Separate from MuJoCo. Install CPU wheels first; CUDA is an optional installation.
+torch==2.10.0
+torchvision==0.25.0
+lerobot[smolvla]==0.6.1
+safetensors==0.8.0
+fastapi==0.141.1
+uvicorn==0.53.0

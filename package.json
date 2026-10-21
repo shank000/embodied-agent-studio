@@ -1,0 +1,17 @@
+{
+  "name": "embodied-agent-studio",
+  "private": true,
+  "version": "0.6.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "start": ".venv\\Scripts\\python.exe -m uvicorn server.app:app --host 127.0.0.1 --port 8000",
+    "test": ".venv\\Scripts\\python.exe -m unittest discover -s tests -p test_*.py -v"
+  },
+  "devDependencies": {
+    "@openai/codex": "0.155.1",
+    "vite": "^7.1.0"
+  }
+}
