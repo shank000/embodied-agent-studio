@@ -32,7 +32,8 @@ from .comparison import ComparisonController, ComparisonStart
 from .scenes import SCENES, TASKS
 from .runlog import list_runs, run_folder
 from .analysis import analyze_run, analyze_experiments
-from .run_management import rename_run, delete_run, restore_run, RunInUseError
+from .run_management import rename_run, delete_run, restore_run, batch_delete_runs, RunInUseError
+from .model_capabilities import discover_model_capabilities
 from .artifacts import MethodRecipe, register_method, list_methods, get_method, verify_method
 from .composition import CompositionController, CompositionStart
 from .research import (ResearchProtocol, ResearchExperiment, ResearchController, register_protocol,
@@ -337,6 +338,14 @@ async def configure_agent(body: AgentConfig, request: Request):
         except ValueError as exc: raise HTTPException(400, str(exc)) from exc
 
 
+@app.post('/api/agent/model-capabilities')
+async def agent_model_capabilities(body: AgentConfig, request: Request):
+    local_request(request)
+    if body.provider == agent.config.provider and body.base_url == agent.config.base_url and not body.api_key.get_secret_value():
+        body.api_key = agent.config.api_key
+    return await discover_model_capabilities(body)
+
+
 @app.post('/api/agent/start')
 async def start_agent(body: AgentStart, request: Request):
     local_request(request)
@@ -446,6 +455,18 @@ async def runs(limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge
 class RunRename(BaseModel):
     model_config = ConfigDict(extra='forbid')
     name: str = Field(max_length=160)
+
+
+class RunBatchDelete(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    run_ids: list[str] = Field(min_length=1, max_length=1000)
+
+
+@app.post('/api/runs/batch-delete')
+async def batch_delete_run_records(body: RunBatchDelete, request: Request):
+    local_request(request)
+    try: return batch_delete_runs(body.run_ids)
+    except ValueError as exc: raise HTTPException(400, str(exc)) from exc
 
 
 def manage_run(operation, run_id, *args):

@@ -89,7 +89,7 @@ class ProviderContracts(unittest.TestCase):
         with patch('openai.AsyncOpenAI', side_effect=lambda **kwargs: AsyncOpenAI(**{**kwargs, 'base_url': self.base_url})):
             for thinking in ('enabled', 'disabled'):
                 with self.subTest(thinking=thinking):
-                    action, _ = self.call(self.config(base_url='https://api.deepseek.com/v1', deepseek_thinking=thinking))
+                    action, _ = self.call(self.config(base_url='https://api.deepseek.com/v1', deepseek_thinking=thinking, reasoning='low'))
                     self.assertEqual(action.model_dump(), ACTION)
                     body = self.server.received[-1][1]
                     self.assertEqual(body['max_tokens'], 16384)
@@ -99,6 +99,30 @@ class ProviderContracts(unittest.TestCase):
                     self.assertEqual(len([p for p in body['messages'][-1]['content'] if p['type'] == 'image_url']), 3)
                     if thinking == 'enabled': self.assertEqual(body['reasoning_effort'], 'low')
                     else: self.assertNotIn('reasoning_effort', body)
+
+    def test_native_effort_is_transmitted_without_global_level_mapping(self):
+        for provider in ('openai', 'compatible', 'anthropic', 'custom'):
+            with self.subTest(provider=provider):
+                config = self.config(provider=provider, reasoning='max', reasoning_native=True,
+                    base_url=self.base_url+'/agent' if provider=='custom' else self.base_url)
+                self.call(config)
+                body = self.server.received[-1][1]
+                actual = body['reasoning']['effort'] if provider=='openai' else body['output_config']['effort'] if provider=='anthropic' else body['model_settings']['reasoning'] if provider=='custom' else body['reasoning_effort']
+                self.assertEqual(actual, 'max')
+        self.call(self.config(reasoning='vendor-future-level', reasoning_native=True))
+        self.assertEqual(self.server.received[-1][1]['reasoning_effort'], 'vendor-future-level')
+
+    def test_service_default_omits_native_effort_and_legacy_recipes_keep_old_meaning(self):
+        for provider in ('openai', 'compatible', 'anthropic'):
+            for native in (False, True):
+                with self.subTest(provider=provider, native=native):
+                    self.call(self.config(provider=provider, reasoning=None, reasoning_native=native))
+                    body = self.server.received[-1][1]
+                    for field in ('reasoning', 'reasoning_effort', 'output_config'): self.assertNotIn(field, body)
+        for provider in ('compatible', 'anthropic'):
+            self.call(self.config(provider=provider, reasoning='high'))
+            body = self.server.received[-1][1]
+            self.assertNotIn('reasoning_effort', body); self.assertNotIn('output_config', body)
 
     def test_large_output_budget_is_transmitted_to_each_api_provider(self):
         budget = 262144

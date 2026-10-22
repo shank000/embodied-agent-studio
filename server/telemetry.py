@@ -96,11 +96,12 @@ def note_response(data):
 
 def effective_reasoning(settings):
     provider = settings.get('provider')
-    if provider == 'anthropic': return 'not_requested'
+    if provider == 'anthropic' and not settings.get('reasoning_native'): return 'not_requested'
     if provider == 'compatible':
-        if urlsplit(settings.get('base_url', '')).hostname != 'api.deepseek.com': return 'provider_default'
-        if settings.get('deepseek_thinking') == 'disabled': return 'off'
-    return settings.get('reasoning')
+        deepseek = urlsplit(settings.get('base_url', '')).hostname == 'api.deepseek.com'
+        if not deepseek and not settings.get('reasoning_native'): return 'provider_default'
+        if deepseek and settings.get('deepseek_thinking') == 'disabled': return 'off'
+    return settings.get('reasoning') or 'provider_default'
 
 
 def track_inference(phase):

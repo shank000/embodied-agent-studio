@@ -124,7 +124,8 @@ function renderAgent(){
   const names={idle:'等待任务',observing:'采集观察',thinking:'模型决策中',executing:'正在执行',verified:'评价器确认成功',model_done:'模型判断已完成',blocked:'模型无法继续',error:'调用或执行失败',stopped:'接管已停止',round_complete:'本轮已结束',limit:'已达轮数上限'};
   $('#agent-status').textContent=names[agent.status]||agent.status;
   $('#agent-message').textContent=agent.message;
-  $('#agent-round').textContent=`${agent.round} / ${agent.max_rounds||agentConfig?.max_rounds||4} 轮`;
+  const roundLimit=Object.hasOwn(agent,'max_rounds')?agent.max_rounds:agentConfig?.max_rounds;
+  $('#agent-round').textContent=roundLimit==null?`${agent.round} 轮 · 不限轮数`:`${agent.round} / ${roundLimit} 轮`;
   renderRunTimer($('#agent-run-time'),agent);
   renderRunVideo($('#agent-video'),agent.run_id,agent.video);
   document.querySelectorAll('[data-stage]').forEach(el=>el.classList.toggle('active',el.dataset.stage===agent.status));
@@ -186,7 +187,36 @@ $('#example-task').addEventListener('click',()=>{$('#command').value='保持夹�
 $('#agent-stop').addEventListener('click',async()=>{try{await agentApi('stop',{});await poll();}catch(error){toast(error.message);}});
 $('#capture-observation').addEventListener('click',async()=>{busy=true;enableControls();try{await agentApi('observe',{});await poll();}catch(error){toast(error.message);}finally{busy=false;enableControls();}});
 const providerNames={codex:'Codex · 本机登录',openai:'OpenAI · Responses API',compatible:'兼容服务 · Chat Completions',anthropic:'Claude · Messages API',custom:'自定义 Agent 服务'};
-function updateConfigSummary(){if(!agentConfig)return;$('#agent-model-name').textContent=agentConfig.model;$('#agent-provider-name').textContent=providerNames[agentConfig.provider];$('#agent-run-budget').textContent=`最多 ${agentConfig.max_rounds} 轮`;}
+function updateConfigSummary(){if(!agentConfig)return;$('#agent-model-name').textContent=agentConfig.model;$('#agent-provider-name').textContent=providerNames[agentConfig.provider];$('#agent-run-budget').textContent=agentConfig.max_rounds==null?'不限制轮数':`最多 ${agentConfig.max_rounds} 轮`;}
+let capabilityGeneration=0,capabilityTimer=null,capabilityLoading=false;
+function selectedReasoning(){return $('#config-reasoning').value==='__manual'?$('#config-custom-reasoning').value.trim()||null:$('#config-reasoning').value||null;}
+function reasoningFields(){
+  const manual=$('#config-reasoning').value==='__manual';$('#custom-reasoning-field').hidden=!manual;
+  const disabled=$('#config-reasoning').disabled;$('#config-custom-reasoning').disabled=disabled||!manual;$('#config-custom-reasoning').required=manual&&!disabled;
+}
+function renderModelCapabilities(capability,previous){
+  const select=$('#config-reasoning');select.replaceChildren();
+  const add=(value,label)=>{const option=document.createElement('option');option.value=value;option.textContent=label;select.append(option);};
+  add('',capability.default_level?`服务默认（${capability.default_level}）`:'服务默认');
+  for(const level of capability.levels||[])add(level,level);
+  if(capability.levels==null)add('__manual','手动填写 · 能力尚未确认');
+  const known=(capability.levels||[]).includes(previous);
+  if(previous&&known)select.value=previous;
+  else if(previous&&capability.levels==null){select.value='__manual';$('#config-custom-reasoning').value=previous;}
+  else select.value='';
+  const source={codex_models_cache:'本机 Codex 模型目录',service_metadata:'服务模型元数据',deepseek_models_api:'DeepSeek 模型元数据',anthropic_models_api:'Claude 模型元数据',official_docs_2026_10_22:'官方文档配置',unavailable:'尚未确认',unknown:'尚未确认'}[String(capability.source).replaceAll('-','_')]||capability.source||'尚未确认';
+  $('#model-capability-help').textContent=[capability.message,`来源：${source}`,previous&&!known&&capability.levels!=null?`原配置 ${previous} 不在当前模型的能力清单中，请重新选择；当前为服务默认。`:'',capability.source_url?`文档：${capability.source_url}`:'','这些等级是各模型的原生参数，不代表跨模型统一的推理量。'].filter(Boolean).join(' ');
+  providerFields();
+}
+async function refreshModelCapabilities(previous=selectedReasoning()){
+  clearTimeout(capabilityTimer);const generation=++capabilityGeneration,model=$('#config-model').value.trim();
+  if(!model){capabilityLoading=false;$('#refresh-model-capabilities').disabled=false;renderModelCapabilities({levels:null,source:'unknown',message:'请先填写模型 ID。'},null);return;}
+  capabilityLoading=true;$('#refresh-model-capabilities').disabled=true;providerFields();$('#model-capability-help').textContent='正在读取模型能力（不发起推理调用）…';
+  try{const capability=await agentApi('model-capabilities',{provider:$('#config-provider').value,model,base_url:$('#config-base-url').value.trim(),api_key:$('#config-api-key').value});if(generation===capabilityGeneration)renderModelCapabilities(capability,previous);}
+  catch(error){if(generation===capabilityGeneration)renderModelCapabilities({levels:null,source:'unknown',message:`读取失败：${error.message}。可使用服务默认，或按服务文档手动填写。`},previous);}
+  finally{if(generation===capabilityGeneration){capabilityLoading=false;$('#refresh-model-capabilities').disabled=false;providerFields();}}
+}
+function scheduleModelCapabilities(){clearTimeout(capabilityTimer);capabilityGeneration++;capabilityLoading=true;$('#refresh-model-capabilities').disabled=true;providerFields();capabilityTimer=setTimeout(()=>refreshModelCapabilities(),450);}
 function providerFields(){
   const provider=$('#config-provider').value;
   let deepseek=false;
@@ -195,18 +225,23 @@ function providerFields(){
   $('#api-budget-fields').hidden=['codex','custom'].includes(provider);
   $('#output-budget-help').hidden=['codex','custom'].includes(provider);
   $('#deepseek-thinking-field').hidden=!deepseek;
-  $('#reasoning-field').hidden=!['codex','openai'].includes(provider)&&!deepseek;
-  $('#config-reasoning').disabled=deepseek&&$('#config-deepseek-thinking').value==='disabled';
+  $('#reasoning-field').hidden=false;
+  $('#config-reasoning').disabled=capabilityLoading||(deepseek&&$('#config-deepseek-thinking').value==='disabled');
+  reasoningFields();
   $('#provider-help').textContent=provider==='codex'?'使用本机 Codex CLI 的现有登录，无需 API Key。每轮调用计入当前账号的 Codex 用量。':provider==='custom'?'接入你自己的 Agent 或编排服务，填写完整 POST 地址与服务模型 ID。使用 embodied-agent-v1 协议接收三路图像和输出契约；本机服务可不填 Key，远程服务使用 HTTPS 和专用 Key。':'请填写该服务的准确模型 ID 和 API 地址。模型需支持多图输入。API Key 仅存于本机服务内存，重启后需重新填写。';
   if(deepseek)$('#provider-help').textContent='deepseek-flash 支持图像输入。思考模式和推理强度会传给 DeepSeek 官方接口。API Key 仅存于本机服务内存，重启后需重新填写。';
   else if(provider==='compatible')$('#provider-help').textContent='适用于支持多图输入和 JSON 输出的 OpenAI 兼容模型服务。模型 ID 可自定义；密钥仅保存在本机服务内存。';
 }
-$('#config-base-url').addEventListener('input',providerFields);
+$('#config-base-url').addEventListener('input',()=>{providerFields();scheduleModelCapabilities();});
+$('#config-model').addEventListener('input',scheduleModelCapabilities);
+$('#config-api-key').addEventListener('change',scheduleModelCapabilities);
+$('#config-reasoning').addEventListener('change',reasoningFields);
+$('#refresh-model-capabilities').addEventListener('click',()=>refreshModelCapabilities());
 $('#config-deepseek-thinking').addEventListener('change',providerFields);
-$('#config-provider').addEventListener('change',()=>{const provider=$('#config-provider').value;$('#config-base-url').value=provider==='custom'?'http://127.0.0.1:8020/agent':provider==='anthropic'?'https://api.anthropic.com':provider==='compatible'?'https://api.deepseek.com':'https://api.openai.com/v1';$('#config-api-key').value='';if(['anthropic','compatible','custom'].includes(provider)){$('#config-model').value='';$('#config-model').placeholder=provider==='custom'?'填写自定义 Agent 服务模型 ID':'填写支持多图输入的模型 ID';}else $('#config-model').value='gpt-6-astra';providerFields();});
-$('#agent-settings').addEventListener('click',async()=>{try{agentConfig=await agentApi('config');const c=agentConfig;$('#config-provider').value=c.provider;$('#config-model').value=c.model;$('#config-base-url').value=c.base_url;$('#config-reasoning').value=c.reasoning;$('#config-deepseek-thinking').value=c.deepseek_thinking??'enabled';$('#config-output-tokens').value=c.max_output_tokens??16384;$('#config-rounds').value=c.max_rounds;$('#config-timeout').value=c.timeout_s;$('#config-api-key').value='';$('#config-api-key').placeholder=c.has_api_key?'当前地址已有密钥，留空保留':'仅保留在本机服务内存中';$('#config-error').hidden=true;providerFields();$('#agent-config-dialog').showModal();}catch(error){toast(error.message);}});
+$('#config-provider').addEventListener('change',()=>{const provider=$('#config-provider').value;$('#config-base-url').value=provider==='custom'?'http://127.0.0.1:8020/agent':provider==='anthropic'?'https://api.anthropic.com':provider==='compatible'?'https://api.deepseek.com':'https://api.openai.com/v1';$('#config-api-key').value='';if(['anthropic','compatible','custom'].includes(provider)){$('#config-model').value='';$('#config-model').placeholder=provider==='custom'?'填写自定义 Agent 服务模型 ID':'填写支持多图输入的模型 ID';}else $('#config-model').value='gpt-6-astra';providerFields();refreshModelCapabilities(null);});
+$('#agent-settings').addEventListener('click',async()=>{try{agentConfig=await agentApi('config');const c=agentConfig;$('#config-provider').value=c.provider;$('#config-model').value=c.model;$('#config-base-url').value=c.base_url;$('#config-deepseek-thinking').value=c.deepseek_thinking??'enabled';$('#config-output-tokens').value=c.max_output_tokens??16384;$('#config-rounds').value=c.max_rounds??'';$('#config-timeout').value=c.timeout_s;$('#config-api-key').value='';$('#config-api-key').placeholder=c.has_api_key?'当前地址已有密钥，留空保留':'仅保留在本机服务内存中';$('#config-error').hidden=true;providerFields();$('#agent-config-dialog').showModal();refreshModelCapabilities(c.reasoning);}catch(error){toast(error.message);}});
 $('#close-agent-config').addEventListener('click',()=>$('#agent-config-dialog').close());
-$('#agent-config-form').addEventListener('submit',async event=>{event.preventDefault();try{agentConfig=await agentApi('config',{provider:$('#config-provider').value,model:$('#config-model').value.trim(),base_url:$('#config-base-url').value.trim(),api_key:$('#config-api-key').value,reasoning:$('#config-reasoning').value,deepseek_thinking:$('#config-deepseek-thinking').value,max_output_tokens:Number($('#config-output-tokens').value),max_rounds:Number($('#config-rounds').value),timeout_s:Number($('#config-timeout').value)});$('#config-api-key').value='';updateConfigSummary();$('#agent-config-dialog').close();toast('模型配置已应用。');}catch(error){$('#config-error').textContent=error.message;$('#config-error').hidden=false;}});
+$('#agent-config-form').addEventListener('submit',async event=>{event.preventDefault();try{if(capabilityLoading)throw new Error('模型能力正在读取，请稍候再应用。');agentConfig=await agentApi('config',{provider:$('#config-provider').value,model:$('#config-model').value.trim(),base_url:$('#config-base-url').value.trim(),api_key:$('#config-api-key').value,reasoning:selectedReasoning(),reasoning_native:true,deepseek_thinking:$('#config-deepseek-thinking').value,max_output_tokens:Number($('#config-output-tokens').value),max_rounds:Number($('#config-rounds').value)||null,timeout_s:Number($('#config-timeout').value)});$('#config-api-key').value='';updateConfigSummary();$('#agent-config-dialog').close();toast('模型配置已应用。');}catch(error){$('#config-error').textContent=error.message;$('#config-error').hidden=false;}});
 agentApi('config').then(config=>{agentConfig=config;updateConfigSummary();}).catch(()=>{});
 initResearch({operate,toast,selectTab});
 initRsi({operate,toast,selectTab});

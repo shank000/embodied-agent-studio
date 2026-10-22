@@ -5,6 +5,7 @@ import asyncio
 import base64
 from copy import deepcopy
 import json
+from itertools import count
 import os
 from pathlib import Path
 import shutil
@@ -27,11 +28,19 @@ class AgentConfig(BaseModel):
     model: str = Field(default='gpt-6-astra', min_length=1, max_length=120, pattern=r'^[\w./:-]+$')
     base_url: str = 'https://api.openai.com/v1'
     api_key: SecretStr = SecretStr('')
-    reasoning: Literal['low', 'medium', 'high', 'xhigh'] = 'low'
+    reasoning: str | None = Field(default=None, min_length=1, max_length=64, pattern=r'^[A-Za-z0-9_.-]+$')
+    # Older adapters ignored effort for Anthropic/generic compatible services.
+    # Preserve that meaning for saved recipes; new UI configurations opt in.
+    reasoning_native: bool = False
     deepseek_thinking: Literal['enabled', 'disabled'] = 'enabled'
     max_output_tokens: int = Field(default=16384, ge=512, strict=True)
-    max_rounds: int = Field(default=4, ge=1, le=30)
+    max_rounds: int | None = Field(default=None, ge=1, strict=True)
     timeout_s: int = Field(default=120, ge=15, le=300)
+
+    @field_validator('max_rounds', mode='before')
+    @classmethod
+    def unlimited_rounds(cls, value):
+        return None if isinstance(value, int) and not isinstance(value, bool) and value == 0 else value
 
     @field_validator('base_url')
     @classmethod
@@ -166,9 +175,10 @@ async def codex_action(config, prompt, cameras, *, response_type=PoseAction,
                      '-c', 'model_providers.robot_openai={name="OpenAI",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
                      '-c', 'skills.max_context_tokens=1', '--disable', 'shell_snapshot',
                      '-c', 'project_doc_max_bytes=0', '-c', 'approval_policy="never"',
-                     '-c', f'model_reasoning_effort="{config.reasoning}"',
                      '--model', config.model, '--output-schema', str(schema),
                      '--output-last-message', str(output), '--cd', folder]
+        if config.reasoning is not None:
+            arguments += ['-c', f'model_reasoning_effort="{config.reasoning}"']
         for camera in cameras:
             path = directory / f'{camera["name"]}.jpg'
             path.write_bytes(base64.b64decode(camera['image_base64']))
@@ -252,10 +262,11 @@ async def api_action(config, prompt, cameras, *, response_type=PoseAction,
         async with AsyncAnthropic(api_key=key, base_url=config.base_url, timeout=config.timeout_s, max_retries=0) as client:
             system = system_prompt.replace('Output exactly one JSON object matching the provided schema. Do not use tools, shell or files.',
                 f'Submit exactly one action using {tool_name}. Do not use other tools, shell or files.')
+            options = {'output_config': {'effort': config.reasoning}} if config.reasoning_native and config.reasoning is not None else {}
             response = await client.messages.create(model=config.model, max_tokens=config.max_output_tokens, system=system,
                 tools=[{'name': tool_name, 'description': 'Submit the next robot action or subgoal.', 'input_schema': schema}],
                 tool_choice={'type': 'auto', 'disable_parallel_tool_use': True},
-                messages=[{'role': 'user', 'content': content}])
+                messages=[{'role': 'user', 'content': content}], **options)
         actions = [item for item in response.content if item.type == 'tool_use' and item.name == tool_name]
         model_output({'provider': 'anthropic', 'model': config.model, 'stop_reason': response.stop_reason,
                       'text': [item.text for item in response.content if item.type == 'text'],
@@ -273,7 +284,7 @@ async def api_action(config, prompt, cameras, *, response_type=PoseAction,
                     'image_url': 'data:image/jpeg;base64,' + camera['image_base64'], 'detail': 'high'}])
             response = await client.responses.create(model=config.model, instructions=system_prompt,
                 input=[{'role': 'user', 'content': content}], store=False, max_output_tokens=config.max_output_tokens,
-                reasoning={'effort': config.reasoning},
+                **({'reasoning': {'effort': config.reasoning}} if config.reasoning is not None else {}),
                 text={'format': {'type': 'json_schema', 'name': schema_name, 'strict': True, 'schema': schema}})
             usage = response.usage.model_dump() if response.usage else None
             model_output({'provider': 'openai', 'model': config.model, 'status': response.status, 'content': response.output_text, 'usage': usage,
@@ -290,7 +301,9 @@ async def api_action(config, prompt, cameras, *, response_type=PoseAction,
         # Keep vendor-specific fields off other OpenAI-compatible endpoints.
         if uses_deepseek(config):
             options['extra_body'] = {'thinking': {'type': config.deepseek_thinking}}
-            if config.deepseek_thinking == 'enabled': options['reasoning_effort'] = config.reasoning
+            if config.deepseek_thinking == 'enabled' and config.reasoning is not None: options['reasoning_effort'] = config.reasoning
+        elif config.reasoning_native and config.reasoning is not None:
+            options['reasoning_effort'] = config.reasoning
         response = await client.chat.completions.create(model=config.model, max_tokens=config.max_output_tokens,
             response_format={'type': 'json_object'},
             messages=[{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': content}], **options)
@@ -316,6 +329,11 @@ class AgentController:
         if self.state['active']: raise ValueError('请先停止当前 Agent 任务，再修改模型。')
         if config.provider == self.config.provider and config.base_url == self.config.base_url and not config.api_key.get_secret_value():
             config.api_key = self.config.api_key
+        if config.reasoning_native and config.reasoning is not None:
+            from .model_capabilities import cached_model_capabilities
+            capability = cached_model_capabilities(config)
+            if capability.get('levels') is not None and config.reasoning not in capability['levels']:
+                raise ValueError('当前模型支持的推理强度为：' + ('、'.join(capability['levels']) or '无可配置等级') + '。可选择服务默认。')
         if config.provider == 'codex': config.api_key = SecretStr('')
         self.config = config
         return self.public_config()
@@ -382,7 +400,8 @@ class AgentController:
             recording = True
             await self.worker.execute({'action': 'record_start', 'log': log})
             await self.worker.execute({'action': 'run_limits', 'duration_s': self.state['max_sim_time_s'], 'evaluator_stop': self.state['evaluator_stop']})
-            for number in range(1, self.state['max_rounds'] + 1):
+            for number in count(1):
+                if self.state['max_rounds'] is not None and number > self.state['max_rounds']: break
                 with self.worker.lock: current = self.worker.snapshot.copy()
                 if current['time'] - initial_state['time'] >= self.state['max_sim_time_s']:
                     self.state.update(status='limit', message='已达到本次任务的仿真时间上限。'); return

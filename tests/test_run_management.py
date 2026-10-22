@@ -11,7 +11,7 @@ from unittest.mock import patch
 import httpx
 
 from server.analysis import analyze_experiments, analyze_run
-from server.run_management import record_labels, primary_models, read_run_record
+from server.run_management import batch_delete_runs, record_labels, primary_models, read_run_record
 from server.runlog import RunLog, list_runs
 
 
@@ -164,6 +164,50 @@ class RunManagementTests(unittest.TestCase):
         self.assertEqual(len(visible), 1); self.assertEqual(len(trash), 2)
         self.assertTrue(all(row['deleted_at'] for row in trash)); self.assertFalse(visible[0]['deleted_at'])
         self.assertEqual({row['run_id'] for row in self.call('GET', '/api/runs').json()}, {log.id for log in logs[4:]})
+
+    def test_batch_delete_reports_partial_results_without_changing_live_or_parent_evidence(self):
+        completed = self.log('batch-completed')
+        cancelled = self.log('batch-cancelled', complete=False)
+        cancelled.finish({'status': 'cancelled'})
+        active = self.log('batch-active', complete=False)
+        child = self.log('protected-child')
+        parent = self.log(None, kind='comparison', complete=False, rows=[{'run_id': child.id}])
+        (completed.folder/'trajectory.mp4').write_bytes(b'batch-video-retention-fixture')
+        evidence = {path: path.read_bytes() for log in (completed, cancelled, active, child, parent)
+                    for path in log.folder.iterdir() if path.is_file()}
+        missing = '20260102T030405-0000000000'
+        response = self.call('POST', '/api/runs/batch-delete', json={'run_ids': [
+            completed.id, active.id, cancelled.id, child.id, missing, '../outside', completed.id]})
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result['deleted'], [completed.id, cancelled.id])
+        failures = {item['run_id']: item['detail'] for item in result['failed']}
+        self.assertEqual(set(failures), {active.id, child.id, missing, '../outside'})
+        self.assertIn('正在运行', failures[active.id]); self.assertIn('批量实验', failures[child.id])
+        self.assertIn('不存在', failures[missing]); self.assertIn('无效日志编号', failures['../outside'])
+        self.assertEqual({row['run_id'] for row in list_runs(deleted=True)}, {completed.id, cancelled.id})
+        for path, content in evidence.items(): self.assertEqual(path.read_bytes(), content)
+        for log in (active, child, parent): self.assertFalse((log.folder/'record.json').exists())
+        self.assertEqual(analyze_experiments(model='batch-completed')['groups'], [])
+        for log in (completed, cancelled):
+            self.assertEqual(self.call('POST', f'/api/runs/{log.id}/restore').status_code, 200)
+        self.assertEqual(list_runs(deleted=True), [])
+        self.assertEqual(analyze_experiments(model='batch-completed')['groups'][0]['output_tokens'], 3)
+
+    def test_batch_delete_rejects_invalid_request_before_mutating_records(self):
+        log = self.log()
+        for value in (None, [], 'not-a-list', [log.id]*1001, [log.id, 42]):
+            with self.subTest(value_type=type(value).__name__):
+                with self.assertRaises(ValueError): batch_delete_runs(value)
+                self.assertFalse((log.folder/'record.json').exists())
+        for payload in ({'run_ids': []}, {'run_ids': [log.id]*1001}, {'run_ids': [log.id, 42]},
+                        {'run_ids': [log.id], 'unknown': True}):
+            self.assertEqual(self.call('POST', '/api/runs/batch-delete', json=payload).status_code, 422)
+            self.assertFalse((log.folder/'record.json').exists())
+        rejected = self.call('POST', '/api/runs/batch-delete', json={'run_ids': [log.id]},
+                             headers={'Origin': 'https://attacker.example'})
+        self.assertEqual(rejected.status_code, 403)
+        self.assertFalse((log.folder/'record.json').exists())
 
     def test_mutation_rejects_remote_origin_invalid_name_and_path_without_touching_evidence(self):
         log = self.log()

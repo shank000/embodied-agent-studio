@@ -96,6 +96,23 @@ def delete_run(run_id):
         return _update(run_id, {'deleted_at': datetime.now(timezone.utc).isoformat()})
 
 
+def batch_delete_runs(run_ids):
+    """Move each eligible record to trash and report individual failures."""
+    if not isinstance(run_ids, list) or not 1 <= len(run_ids) <= 1000:
+        raise ValueError('每次批量删除请选择 1 至 1000 条实验记录。')
+    if any(not isinstance(run_id, str) for run_id in run_ids):
+        raise ValueError('实验记录编号必须是文字。')
+    deleted, failed = [], []
+    for run_id in dict.fromkeys(run_ids):
+        try:
+            delete_run(run_id)
+        except (ValueError, OSError) as exc:
+            failed.append({'run_id': run_id, 'detail': str(exc)})
+        else:
+            deleted.append(run_id)
+    return {'deleted': deleted, 'failed': failed}
+
+
 def restore_run(run_id):
     with MANAGEMENT_LOCK:
         return _update(run_id, {'deleted_at': None})
