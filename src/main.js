@@ -2,6 +2,9 @@ import './style.css';
 import './research.css';
 import {initResearch,renderResearch,renderRunVideo,renderRunTimer} from './research.js';
 import {initRsi,renderRsi} from './rsi.js';
+import {initLayout} from './layout.js';
+import {initRepair,renderRepair} from './repair.js';
+import {initMultiarm,renderMultiarm} from './multiarm.js';
 
 const icons={
   cube:'<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9M8 5.2l8 4.6"/>',
@@ -16,7 +19,7 @@ const icon=name=>`<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name]||''}
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.dataset.icon));
 document.querySelectorAll('[data-icon-before]').forEach(el=>el.insertAdjacentHTML('afterbegin',icon(el.dataset.iconBefore)));
 const $=s=>document.querySelector(s);
-let state=null, generation=-1, connected=false, busy=false, toastTimer, lastTaskKey='', lastEvent=0, frameStarted=false;
+let state=null, generation=-1, activeRobot='', connected=false, busy=false, toastTimer, lastTaskKey='', lastEvent=0, frameStarted=false;
 let agentConfig=null, lastObservation=-1, lastHistory='';
 const frame=$('#sim-frame');
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),3500);}
@@ -63,12 +66,12 @@ const actualText=a=>a.unit==='command'?`${(a.actual*2*1000).toFixed(1)} mm`:`${(
 
 function buildJoints(){
   const root=$('#joint-controls');root.replaceChildren();
-  state.actuators.forEach(a=>{
+  state.actuators.forEach((a,localIndex)=>{
     const row=document.createElement('div');row.className='joint-control';
     const header=document.createElement('div');header.className='joint-header';
     const label=document.createElement('label');label.htmlFor=`joint-${a.index}`;
     const finger=Object.entries({thumb:'拇指',index:'食指',middle:'中指',ring:'无名指',little:'小指'}).find(([key])=>a.name.includes(key));
-    const jointLabel=finger?`${finger[1]} · ${a.name.split('_').at(-1)}`:a.is_gripper?'夹爪':`关节 ${a.index+1}`;
+    const jointLabel=finger?`${finger[1]} · ${a.name.split('_').at(-1)}`:a.is_gripper?'夹爪':`关节 ${localIndex+1}`;
     label.innerHTML=`<b>${a.is_gripper?'G':String(a.index+1).padStart(2,'0')}</b><span>${jointLabel}<small>${a.name}</small></span>`;
     const output=document.createElement('output');output.id=`target-${a.index}`;output.textContent=targetText(a,a.target);header.append(label,output);
     const input=document.createElement('input');input.type='range';input.id=`joint-${a.index}`;input.min=String(Math.ceil(toDisplay(a,a.min)*10)/10);input.max=String(Math.floor(toDisplay(a,a.max)*10)/10);input.step='.1';input.value=String(toDisplay(a,a.target));input.setAttribute('aria-label',a.is_gripper?'夹爪目标':`关节 ${a.index+1} 目标角度`);
@@ -82,7 +85,7 @@ function buildJoints(){
   $('#actuator-count').textContent=`${state.nu} 个`;$('#mesh-count').textContent=`${state.meshes} 个`;$('#timestep').textContent=`${(state.timestep*1000).toFixed(1)} ms`;
     $('#model-source').href=state.source;$('#model-source').textContent='官方模型来源 ↗';$('#scene-name').textContent=state.name;
   document.querySelectorAll('[data-model]').forEach(el=>{const selected=el.dataset.model===state.model;el.classList.toggle('selected',selected);el.setAttribute('aria-pressed',String(selected));});
-  $('[data-view="wrist"]').hidden=!state.has_wrist_camera;$('#gripper-label').textContent=state.model==='panda'?'夹爪开度':'夹爪角度';lastTaskKey='';
+  $('[data-view="wrist"]').hidden=!state.has_wrist_camera;$('#gripper-label').textContent=state.model.includes('panda')?'夹爪开度':'夹爪角度';lastTaskKey='';
 }
 function renderTask(){
   const task=state.task,key=JSON.stringify(task.steps)+task.title,plan=$('#plan');
@@ -101,14 +104,14 @@ function renderTask(){
   $('#task-result').textContent=task.status==='failed'&&task.message?task.message:status[task.status]||task.status;
 }
 function renderState(){
-  if(state.generation!==generation){generation=state.generation;buildJoints();}
+  if(state.generation!==generation||state.active_robot!==activeRobot){generation=state.generation;activeRobot=state.active_robot;buildJoints();}
   $('#connection').innerHTML='<i></i>MuJoCo 已连接';$('#fps').textContent=`${state.fps.toFixed(0)} FPS`;$('#sim-time').textContent=`t = ${state.time.toFixed(3)} s`;
   const active=['running','settling'].includes(state.task.status);
   $('#scene-status').textContent=state.paused?'仿真已暂停':active?(state.task.steps[state.task.step]||'执行中'):'仿真运行中';
   $('#status-dot').classList.toggle('running',!state.paused);$('#robot-status').innerHTML=`<i></i>${state.paused?'已暂停':active?'执行中':'运行中'}`;
   $('#physics-rate').textContent=`${(1/state.timestep).toFixed(0)} Hz · ${state.steps} 步`;
   $('#position').textContent=state.tcp.map(v=>v.toFixed(3)).join(' / ');$('#contact-count').textContent=state.contacts;
-  $('#gripper-status').textContent=actualText(state.actuators.at(-1));$('#gripper-detail').textContent=state.model==='panda'?'两指间距（实际）':'夹爪关节（实际）';
+  $('#gripper-status').textContent=actualText(state.actuators.at(-1));$('#gripper-detail').textContent=state.model.includes('panda')?'两指间距（实际）':'夹爪关节（实际）';
   $('#frame-info').textContent=`渲染与物理帧 ${state.render_ms.toFixed(0)} ms`;
   $('#pause').innerHTML=icon(state.paused?'play':'pause')+(state.paused?'继续':'暂停');
   $('#speed').value=String(state.speed);$('#gravity').checked=state.gravity;
@@ -117,7 +120,7 @@ function renderState(){
   document.querySelectorAll('[data-view]').forEach(el=>{const selected=el.dataset.view===state.view;el.classList.toggle('selected',selected);el.setAttribute('aria-pressed',String(selected));});
   state.actuators.forEach(a=>{const input=$(`#joint-${a.index}`);if(input.dataset.editing!=='true'){input.value=String(toDisplay(a,a.target));$(`#target-${a.index}`).textContent=targetText(a,a.target);}$(`#actual-${a.index}`).textContent=`实际 ${actualText(a)}`;});
   if(state.events.length&&state.events.at(-1).id!==lastEvent){lastEvent=state.events.at(-1).id;const log=$('#event-log');log.replaceChildren();state.events.slice(-6).reverse().forEach(e=>{const row=document.createElement('p');row.className=e.kind;row.textContent=e.message;log.append(row);});}
-  renderTask();renderAgent();enableControls();renderResearch(state);renderRsi(state);
+  renderTask();renderAgent();enableControls();renderResearch(state);renderRsi(state);renderRepair(state);renderMultiarm(state,{disabled:!connected||busy});
 }
 function renderAgent(){
   const agent=state.agent;if(!agent)return;
@@ -245,6 +248,9 @@ $('#agent-config-form').addEventListener('submit',async event=>{event.preventDef
 agentApi('config').then(config=>{agentConfig=config;updateConfigSummary();}).catch(()=>{});
 initResearch({operate,toast,selectTab});
 initRsi({operate,toast,selectTab});
+initRepair({toast});
+initMultiarm({operate});
+initLayout({toast});
 // Camera gestures modify MuJoCo's camera. There is no client-side 3D simulation.
 let pointer=null,cameraPending={dx:0,dy:0,zoom:0,pan_dx:0,pan_dy:0},cameraSending=false;
 frame.title='左键拖动旋转；右键、中键或 Shift + 左键拖动平移；滚轮缩放。点击预设视角可复位。';

@@ -35,6 +35,7 @@ from .analysis import analyze_run, analyze_experiments
 from .run_management import rename_run, delete_run, restore_run, batch_delete_runs, RunInUseError
 from .model_capabilities import discover_model_capabilities
 from .pricing import catalog as price_catalog
+from .repair import RepairController, RepairConfig, RepairStart, secret_values
 from .artifacts import MethodRecipe, register_method, list_methods, get_method, verify_method
 from .composition import CompositionController, CompositionStart
 from .research import (ResearchProtocol, ResearchExperiment, ResearchController, register_protocol,
@@ -43,8 +44,9 @@ from .research import (ResearchProtocol, ResearchExperiment, ResearchController,
 
 class Command(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
-    action: Literal['load', 'scene', 'reset', 'pause', 'step', 'control', 'home', 'demo', 'stop', 'instruction', 'view', 'camera', 'speed', 'flags', 'gravity', 'drop']
-    model: Literal['panda', 'so101', 'rm65_gaia'] | None = None
+    action: Literal['load', 'scene', 'reset', 'pause', 'step', 'control', 'home', 'demo', 'stop', 'instruction', 'view', 'camera', 'speed', 'flags', 'gravity', 'drop', 'select_robot']
+    model: Literal['panda', 'so101', 'rm65_gaia', 'dual_panda', 'triple_panda'] | None = None
+    robot_id: str | None = Field(default=None, min_length=1, max_length=40)
     scene_id: str | None = None
     task_id: str | None = None
     seed: int | None = Field(default=None, ge=0, le=4294967295)
@@ -61,7 +63,7 @@ class Command(BaseModel):
 
     @model_validator(mode='after')
     def required_fields(self):
-        required = {'load': ['model'], 'scene': ['scene_id'], 'pause': ['value'], 'control': ['index', 'value'], 'instruction': ['text'],
+        required = {'select_robot':['robot_id'], 'load': ['model'], 'scene': ['scene_id'], 'pause': ['value'], 'control': ['index', 'value'], 'instruction': ['text'],
                     'view': ['view'], 'speed': ['value'], 'flags': ['flags'], 'gravity': ['value']}
         for name in required.get(self.action, []):
             if getattr(self, name) is None:
@@ -239,6 +241,7 @@ def resolve_research_method(method_id):
 
 composition = CompositionController(worker, method_resolver=resolve_research_method)
 research = ResearchController(worker, composition)
+repair = RepairController()
 
 
 def research_active():
@@ -259,7 +262,9 @@ async def lifespan(app):
         raise RuntimeError(worker.failure or 'MuJoCo 初始化超时。')
     await price_catalog.start()
     try: yield
-    finally: await price_catalog.close()
+    finally:
+        await price_catalog.close()
+        await repair.stop()
     await stop_research()
     await comparison.stop()
     await policy.stop()
@@ -287,6 +292,7 @@ async def state():
     snapshot['comparison'] = comparison.snapshot()
     snapshot['research'] = composition.snapshot()
     snapshot['experiment'] = research.snapshot()
+    snapshot['repair'] = repair.snapshot()
     snapshot['registry'] = read_registry()
     return snapshot
 
@@ -323,13 +329,102 @@ async def command(body: Command, request: Request):
         elif (agent.state['active'] or policy.state['active'] or comparison.state['active'] or research_active()) and body.action not in ('view', 'camera', 'flags'):
             raise HTTPException(409, '自动控制正在运行，请先停止后再手动操作。')
         message = await worker.execute(body.model_dump(exclude_none=True))
-        if body.action in ('reset', 'load', 'scene'): agent.reset_observation(); policy.reset_observation()
+        if body.action in ('reset', 'load', 'scene', 'select_robot'): agent.reset_observation(); policy.reset_observation()
     return {'ok': True, 'message': message}
 
 
 @app.get('/api/agent/config')
 async def agent_config():
     return agent.public_config()
+
+
+@app.get('/api/repair/config')
+async def repair_config():
+    return repair.public_config()
+
+
+@app.post('/api/repair/config')
+async def configure_repair(body: RepairConfig, request: Request):
+    local_request(request)
+    async with repair.lock:
+        try: return repair.configure(body)
+        except ValueError as exc: raise HTTPException(400, str(exc)) from exc
+
+
+@app.get('/api/repair/state')
+async def repair_state():
+    return repair.snapshot()
+
+
+@app.post('/api/repair/model-capabilities')
+async def repair_model_capabilities(body: RepairConfig, request: Request):
+    local_request(request)
+    if body.provider == repair.config.provider and body.base_url == repair.config.base_url and not body.api_key.get_secret_value():
+        body.api_key = repair.config.api_key
+    return await discover_model_capabilities(body)
+
+
+@app.get('/api/repair/sources')
+async def repair_sources():
+    return [row for row in list_runs(limit=None) if row.get('kind') != 'repair' and row.get('status') in ('error', 'interrupted', 'blocked')][:100]
+
+
+@app.post('/api/repair/start')
+async def start_repair(body: RepairStart, request: Request):
+    local_request(request)
+    async with repair.lock:
+        sensitive = [agent.config.api_key.get_secret_value(), *(config.api_key.get_secret_value() for config in policy.configs.values())]
+        sensitive.extend(secret_values(composition.runtime_credentials))
+        try: return await repair.start(body, secrets=sensitive)
+        except (ValueError, FileNotFoundError) as exc: raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/api/repair/stop')
+async def stop_repair(request: Request):
+    local_request(request)
+    async with repair.lock: return await repair.stop()
+
+
+def ensure_idle_for_repair():
+    if agent.state['active'] or policy.state['active'] or comparison.state['active'] or research_active():
+        raise HTTPException(409, '请先停止正在运行的机械臂实验，再验证或应用代码修复。')
+
+
+def ensure_no_repair_validation():
+    if repair.state.get('status') == 'validating' and repair.state.get('active'):
+        raise HTTPException(409, '正在验证模型接入代码，请等待验证完成或停止验证后再运行实验。')
+
+
+class RepairValidation(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    allow_local_code_execution: Literal[True]
+
+
+@app.post('/api/repair/validate')
+async def validate_repair(body: RepairValidation, request: Request):
+    local_request(request)
+    async with agent.lock, repair.lock:
+        ensure_idle_for_repair()
+        try: return await repair.validate(allow_local_code_execution=body.allow_local_code_execution)
+        except (ValueError, OSError) as exc: raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/api/repair/apply')
+async def apply_repair(request: Request):
+    local_request(request)
+    async with agent.lock, repair.lock:
+        ensure_idle_for_repair()
+        try: return repair.apply()
+        except (ValueError, OSError) as exc: raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/api/repair/rollback')
+async def rollback_repair(request: Request):
+    local_request(request)
+    async with agent.lock, repair.lock:
+        ensure_idle_for_repair()
+        try: return repair.rollback()
+        except (ValueError, OSError) as exc: raise HTTPException(400, str(exc)) from exc
 
 
 @app.post('/api/agent/config')
@@ -353,6 +448,7 @@ async def agent_model_capabilities(body: AgentConfig, request: Request):
 async def start_agent(body: AgentStart, request: Request):
     local_request(request)
     async with agent.lock:
+        ensure_no_repair_validation()
         if comparison.state['active'] or policy.state['active'] or research_active(): raise HTTPException(409, '请先停止正在运行的策略或实验任务。')
         try: return await agent.start(body)
         except ValueError as exc: raise HTTPException(400, str(exc)) from exc
@@ -402,6 +498,7 @@ async def configure_policy(body: PolicyConfig, request: Request):
 async def start_policy(body: PolicyStart, request: Request):
     local_request(request)
     async with agent.lock:
+        ensure_no_repair_validation()
         if agent.state['active'] or comparison.state['active'] or research_active(): raise HTTPException(409,'请先停止 Agent 或实验任务。')
         try: return await policy.start(body)
         except ValueError as exc: raise HTTPException(400,str(exc)) from exc
@@ -428,6 +525,7 @@ async def policy_camera(name: Literal['front','side','wrist']):
 async def start_comparison(body: ComparisonStart, request: Request):
     local_request(request)
     async with agent.lock:
+        ensure_no_repair_validation()
         if agent.state['active'] or policy.state['active'] or research_active(): raise HTTPException(409,'请先停止当前自动控制。')
         try: return await comparison.start(body)
         except ValueError as exc: raise HTTPException(400,str(exc)) from exc
@@ -628,6 +726,7 @@ async def method_credentials(method_id: str, body: dict, request: Request):
 async def start_research(body: CompositionStart, request: Request):
     local_request(request)
     async with agent.lock:
+        ensure_no_repair_validation()
         ensure_research_idle()
         try:
             return await composition.start(body.model_dump())
@@ -668,6 +767,7 @@ async def research_experiments():
 async def start_research_experiment(body: ResearchExperiment, request: Request):
     local_request(request)
     async with agent.lock:
+        ensure_no_repair_validation()
         ensure_research_idle()
         try:
             # Preflight version identity before allocating a batch.

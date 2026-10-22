@@ -116,7 +116,7 @@ def track_inference(phase):
             settings = config.model_dump(exclude={'api_key'}) if hasattr(config, 'model_dump') else dict(config)
             pricing = await quote_for_call(settings)
             effort = effective_reasoning(settings)
-            current_phase = 'planning' if getattr(kwargs.get('response_type'), '__name__', '') == 'PlannerOutput' else phase
+            current_phase = 'repair_diagnosis' if kwargs.get('schema_name') == 'workbench_repair' else 'planning' if getattr(kwargs.get('response_type'), '__name__', '') == 'PlannerOutput' else phase
             record = {'call_id': uuid4().hex, 'round': log.current_round, 'phase': current_phase,
                       'provider': settings.get('provider', settings.get('kind')), 'model': settings.get('model'),
                       'reasoning_effort': effort, 'configured_reasoning': settings.get('reasoning'), 'started_at': utc_now(),

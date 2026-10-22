@@ -27,7 +27,7 @@ PROTOCOL_ID = re.compile(r'^protocol-[0-9a-f]{24}$')
 def evaluation_contract():
     """Evaluator and physical environment are outside the candidate search space."""
     import mujoco
-    paths = ['server/scenes.py', 'server/simulation.py', 'server/robot_assets.py']
+    paths = ['server/scenes.py', 'server/simulation.py', 'server/robot_assets.py', 'server/multiarm.py']
     return {'mujoco': mujoco.__version__, 'files': {
         name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths},
         'input_condition': 'three_rgb_proprioception',

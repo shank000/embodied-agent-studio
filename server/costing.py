@@ -7,6 +7,8 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
+from .holiday_calendar import resolve_public_holiday
+
 
 MILLION = Decimal(1_000_000)
 
@@ -110,7 +112,7 @@ def _in_windows(minute, windows):
     return any(start <= minute < end if start <= end else minute >= start or minute < end for start, end in windows)
 
 
-def _rate_choices(call, quote, warnings):
+def _rate_choices(call, quote, warnings, resolution=None):
     peak, off = _mapping(quote.get('peak')), _mapping(quote.get('off_peak'))
     if not peak and not off: return [quote]
     if _mapping(quote.get('unsupported')).get('calendar') and not quote.get('holiday_region'):
@@ -128,7 +130,14 @@ def _rate_choices(call, quote, warnings):
         possible_peak = _in_windows(minute, quote['peak_utc']) and instant.weekday() in quote.get('peak_weekdays_utc', range(7))
         if not possible_peak: return [{**quote, **off}]
         if quote.get('holiday_region'):
-            warnings.append('该时段是否适用高峰价格取决于节假日日历；未配置官方日历，仅显示峰谷金额范围。')
+            calendar = resolve_public_holiday(instant, quote['holiday_region'])
+            if resolution is not None: resolution.update(calendar)
+            if calendar.get('known'):
+                tier = 'off_peak' if calendar['is_holiday'] else 'peak'
+                if resolution is not None: resolution['tier'] = tier
+                warnings.append(f"按 {calendar['year']} 年国务院全国放假安排核对，此次调用采用{'谷' if calendar['is_holiday'] else '峰'}价估算；实际扣费仍以服务商账单为准。")
+                return [{**quote, **(off if calendar['is_holiday'] else peak)}]
+            warnings.append(calendar['message'])
             return [{**quote, **off}, {**quote, **peak}]
         return [{**quote, **peak}]
     if quote.get('off_peak_utc') is not None:
@@ -184,7 +193,8 @@ def calculate_call_cost(call, quote):
     warnings = result['warnings']
     for key in ('message', 'refresh_error'):
         if quote.get(key): warnings.append(str(quote[key]))
-    warnings.extend(str(value) for value in _mapping(quote.get('unsupported')).values() if value)
+    warnings.extend(str(value) for key, value in _mapping(quote.get('unsupported')).items()
+                    if value and not (key == 'calendar' and quote.get('holiday_region')))
     if kind == 'local':
         result.update(status='complete', amount_usd=0., priced_calls=1, missing_calls=0)
         warnings.append('本地策略没有按 Token 收取的模型 API 费用；此处不包含本机算力、电费或运维成本。')
@@ -202,7 +212,12 @@ def calculate_call_cost(call, quote):
     if kind == 'reference': warnings.append('Codex 登录调用仅提供同等 API 用量参考金额，不代表订阅扣款或实际 API 费用。')
     try:
         components, input_total = _components(call, quote)
-        choices = _rate_choices(call, quote, warnings)
+        resolution = {}
+        choices = _rate_choices(call, quote, warnings, resolution)
+        if resolution:
+            result['calendar_resolution'] = resolution
+            if resolution.get('known'): result['calendar_sources'] = [{key: resolution[key] for key in
+                ('calendar_id', 'year', 'coverage', 'source_url', 'document_date', 'checked_at', 'interpretation')}]
         priced = [_price_components(components, rates, input_total, warnings) for rates in choices]
     except (ValueError, TypeError) as exc:
         warnings.append(str(exc)); result['warnings'] = list(dict.fromkeys(warnings)); return result
@@ -261,6 +276,8 @@ def aggregate_costs(costs, *, basis=None):
     for cost in costs:
         for source in cost.get('price_sources', []):
             if source not in result['price_sources']: result['price_sources'].append(deepcopy(source))
+        for source in cost.get('calendar_sources', []):
+            if source not in result.setdefault('calendar_sources', []): result['calendar_sources'].append(deepcopy(source))
     if result['total_calls'] == 0 and not result['missing_calls']:
         result.update(status='complete', amount_usd=0.)
     elif not result['missing_calls']:

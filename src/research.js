@@ -186,7 +186,7 @@ function resultIsActive(run){return !!run.active||run.status==='running';}
 function resultScope(){return $('#log-record-scope').value==='deleted';}
 function resultListPath(offset){return `runs?limit=${RESULTS_PAGE_SIZE}&offset=${offset}&deleted=${resultScope()}`;}
 function filteredResults(){return runs.filter(run=>($('#log-filter').value==='all'||run.kind===$('#log-filter').value)&&($('#log-status-filter').value==='all'||category(run)===$('#log-status-filter').value));}
-function runKinds(kind){return {agent:'视觉 Agent',policy:'策略模型',composition:'方法版本运行',comparison:'对比实验',research_experiment:'RSI 配对评测'}[kind]||kind;}
+function runKinds(kind){return {agent:'视觉 Agent',policy:'策略模型',composition:'方法版本运行',comparison:'对比实验',research_experiment:'RSI 配对评测',repair:'故障修复 Agent'}[kind]||kind;}
 function fillSelect(select,items,placeholder){const previous=select.value;select.replaceChildren();const first=document.createElement('option');first.value='';first.textContent=placeholder;select.append(first);for(const value of [...new Set(items.filter(Boolean))].sort()){const option=document.createElement('option');option.value=value;option.textContent=value;select.append(option);}if([...select.options].some(option=>option.value===previous))select.value=previous;}
 function mergeRunPages(...pages){const records=new Map();for(const page of pages)for(const run of page)if(!records.has(run.run_id))records.set(run.run_id,run);return [...records.values()].sort((a,b)=>a.run_id===b.run_id?0:a.run_id>b.run_id?-1:1);}
 function resultPagingState(){const button=$('#load-more-results');button.disabled=refreshingResults||!resultsHasMore;button.textContent=refreshingResults?'正在读取结果…':resultsHasMore?'加载更多结果':'已读取全部结果';}
@@ -303,23 +303,30 @@ function costBreakdownMarkup(rows){
   const components={input:'输入',input_tokens:'输入',uncached_input:'未缓存输入',input_uncached:'未缓存输入',cached_input:'缓存命中输入',input_cached:'缓存命中输入',cache_read:'缓存读取',cache_creation:'缓存写入',cache_write:'缓存写入',output:'输出',output_tokens:'输出',reasoning:'推理'};
   return `<div class="result-table-wrap"><table class="result-table cost-breakdown-table"><thead><tr><th>组成</th><th>Tokens</th><th>USD / 百万 tokens</th><th>估算金额 / USD</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${escape(components[row.component]||row.component||'未记录')}</td><td>${numberText(row.tokens)}</td><td>${escape(metric(row.rate_per_million)==null?'未记录':String(row.rate_per_million))}</td><td>${escape(moneyText(row.amount_usd))}</td></tr>`).join('')}</tbody></table></div>`;
 }
+function costDiagnosisText(cost){
+  if(metric(cost?.amount_min_usd)!=null&&metric(cost?.amount_max_usd)!=null)return '金额上下界来自尚未确定的计价条件，例如未覆盖年份的节假日日历；这不代表接口的 Token 用量一定缺失。';
+  if(cost?.status==='partial'||cost?.status==='unavailable')return '费用未完整估算的具体原因见下方：可能缺少接口实际用量、缓存明细或适用单价。取消前未返回的 usage 不会按 0 补算。';
+  if(cost?.calendar_sources?.length)return '已按有来源、限定年份的国务院全国放假安排核对峰谷条件；周末即使调休上班，也不作为周一至周五的高峰时段。';
+  return '';
+}
 function renderResultCost(cost){
   $('#result-cost-panel').hidden=false;const state={complete:'全部调用已估算',partial:'费用范围或部分估算',unavailable:'费用不可估算',reference:'API 等价参考'}[cost?.status]||'费用未记录';
   $('#result-cost-amounts').innerHTML=costAmountMarkup(cost);
   const basis={recorded_snapshot:'按每次调用保存的价格快照计算。',current_price_estimate:'历史记录未保存价格快照，按当前可用价格估算；不代表实验当时的价格。',mixed:'包含已保存的价格快照与按当前价格补算的历史调用。'}[cost?.basis]||'尚无可用计价依据。';
   const types=[['billable_calls','API 调用'],['reference_calls','订阅参考调用'],['local_calls','本地策略调用']].filter(([key])=>metric(cost?.[key])!=null).map(([key,label])=>`${label} ${numberText(cost[key])} 次`).join(' / ');
-  const calls=cost?.call_count_incomplete?`已计价 ${numberText(cost?.priced_calls)} 次 / 调用总数不完整（已知至少 ${numberText(cost?.total_calls)} 次） · 存在无法读取的调用记录`:`精确计价 ${numberText(cost?.priced_calls)} / ${numberText(cost?.total_calls)} 次调用${metric(cost?.missing_calls)==null?'':` · 未精确计价 ${numberText(cost.missing_calls)} 次`}`;
-  $('#result-cost-note').textContent=`${state} · ${calls}。${types?`${types}。`:''}${basis}费用按官方标价与接口返回用量估算，实际账单以服务商为准。`;
+  const calls=cost?.call_count_incomplete?`已估算 ${numberText(cost?.priced_calls)} 次 / 调用总数不完整（已知至少 ${numberText(cost?.total_calls)} 次） · 存在无法读取的调用记录`:`已确定单价与完整用量 ${numberText(cost?.priced_calls)} / ${numberText(cost?.total_calls)} 次调用${metric(cost?.missing_calls)==null?'':` · 尚未完整估算 ${numberText(cost.missing_calls)} 次`}`;
+  $('#result-cost-note').textContent=`${state} · ${calls}。${types?`${types}。`:''}${basis}${costDiagnosisText(cost)}费用按官方标价与接口返回用量估算，实际账单以服务商为准。`;
   $('#result-cost-warnings').replaceChildren();for(const warning of cost?.warnings||[]){const item=document.createElement('li');item.textContent=warning;$('#result-cost-warnings').append(item);}$('#result-cost-warnings').hidden=!cost?.warnings?.length;
   $('#result-cost-breakdown').innerHTML=costBreakdownMarkup(cost?.breakdown);
   $('#result-price-snapshots').innerHTML=cost?.price_sources?.length?cost.price_sources.map(source=>`<p class="research-note">${escape(source.provider||'接口未记录')} / ${escape(source.model||'模型未记录')} · 价格更新时间（本地）${escape(localPriceTime(source.updated_at))} · ${priceSourceLink(source.source_url)}</p>`).join(''):'<p class="research-note">本实验没有可追溯的价格来源记录。</p>';
+  if(cost?.calendar_sources?.length)$('#result-price-snapshots').insertAdjacentHTML('beforeend',cost.calendar_sources.map(source=>`<p class="research-note">节假日日历适用 ${escape(source.coverage||source.year)} 年 · 官方文件日期 ${escape(source.document_date)} · ${priceSourceLink(source.source_url,'国务院年度放假安排依据 ↗')}</p>`).join(''));
   renderPricingStatus();
 }
 function callCostMarkup(cost){
   if(!cost)return '<div class="call-cost"><strong>费用未记录</strong></div>';
   const status={complete:'费用估算',partial:'费用范围或部分估算',unavailable:'费用不可估算',reference:'API 等价参考'}[cost.status]||'费用估算';
   const pricing=cost.pricing||{},basis={recorded_snapshot:'调用时价格快照',current_price_estimate:'按当前可用价格补算',mixed:'快照与当前价格混合'}[cost.basis]||'';
-  return `<div class="call-cost"><strong>${escape(status)}</strong><div class="cost-amounts">${costAmountMarkup(cost)}</div>${basis||pricing.updated_at?`<p>${escape(basis)}${pricing.updated_at?` · 价格更新时间（本地）${escape(localPriceTime(pricing.updated_at))}`:''}</p>`:''}${pricing.source_url?priceSourceLink(pricing.source_url):''}${cost.warnings?.length?`<ul>${cost.warnings.map(warning=>`<li>${escape(warning)}</li>`).join('')}</ul>`:''}</div>`;
+  return `<div class="call-cost"><strong>${escape(status)}</strong><div class="cost-amounts">${costAmountMarkup(cost)}</div>${basis||pricing.updated_at?`<p>${escape(basis)}${pricing.updated_at?` · 价格更新时间（本地）${escape(localPriceTime(pricing.updated_at))}`:''}</p>`:''}<p>${escape(costDiagnosisText(cost))}</p>${pricing.source_url?priceSourceLink(pricing.source_url):''}${cost.calendar_resolution?.source_url?priceSourceLink(cost.calendar_resolution.source_url,'节假日判定依据 ↗'):''}${cost.warnings?.length?`<ul>${cost.warnings.map(warning=>`<li>${escape(warning)}</li>`).join('')}</ul>`:''}</div>`;
 }
 function renderPricingStatus(){
   const busy=pricingRefreshing||pricingState?.refreshing;$('#refresh-pricing').disabled=!!busy;$('#refresh-pricing').textContent=busy?'正在更新官方价格…':'刷新官方价格';

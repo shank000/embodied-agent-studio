@@ -7,6 +7,7 @@ import hashlib
 import math
 import re
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 
 import mujoco
@@ -15,6 +16,7 @@ from PIL import Image
 from .control import PoseAction, tcp_pose, rotation_error, solve_ik
 from .scenes import SCENES, TASKS, add_scene, TaskEvaluator
 from .robot_assets import rm65_gaia_xml
+from .multiarm import assemble_pandas
 
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / 'vendor' / 'mujoco_menagerie'
@@ -34,6 +36,9 @@ MODELS = {
                   'image': None, 'source': 'https://github.com/Stella-robot/GaiaHand',
                   'model_note': '官方公开 GaiaHand 15 关节版本；非 Gaia Hand 20。安装变换与伺服参数为仿真设置。'},
 }
+for _model, _count, _name in [('dual_panda', 2, '双 Panda'), ('triple_panda', 3, '三 Panda')]:
+    MODELS[_model] = {**MODELS['panda'], 'name': _name, 'robot_count': _count,
+                     'model_note': f'{_count} 台独立 Panda，共享 MuJoCo 物理世界；按 robot_id 选择控制臂。'}
 
 
 def make_model(model_id: str, scene_id='tabletop', seed=42):
@@ -48,6 +53,12 @@ def make_model(model_id: str, scene_id='tabletop', seed=42):
         root = ET.parse(path).getroot()
         assets = {mesh.get('file'): (path.parent / 'assets' / mesh.get('file')).read_bytes()
                   for mesh in root.findall('asset/mesh')}
+    if model_id in ('panda', 'dual_panda', 'triple_panda'):
+        hand = root.find(".//body[@name='hand']")
+        ET.SubElement(hand, 'site', name='studio_tcp', pos='0 0 .1034', size='.007', rgba='.2 .7 .4 1', group='4')
+        ET.SubElement(hand, 'camera', name='wrist_cam', pos='.045 0 .035', xyaxes='1 0 0 0 -1 0', fovy='75')
+        if config.get('robot_count', 1) > 1:
+            assemble_pandas(root, config['robot_count'])
     # MuJoCo's Windows file loader cannot open this workspace's Unicode path.
     # Pass the upstream mesh bytes through its supported virtual filesystem.
     root.find('compiler').set('meshdir', '')
@@ -75,8 +86,10 @@ def make_model(model_id: str, scene_id='tabletop', seed=42):
     def vector(values):
         return ' '.join(str(v * scale) for v in values)
     # Fixed calibrated views are independent of the user's interactive camera.
-    for name, eye in [('front', [.8, -1.05, .7]), ('side', [.8, .85, .65])]:
-        zaxis = np.array(eye) - np.array([.30, 0, .18])
+    multi = config.get('robot_count', 1) > 1
+    cameras = [('front', [1.65, -1.75, 1.35]), ('side', [1.65, 1.75, 1.35])] if multi else [('front', [.8, -1.05, .7]), ('side', [.8, .85, .65])]
+    for name, eye in cameras:
+        zaxis = np.array(eye) - np.array([.30, 0, .25 if multi else .18])
         zaxis /= np.linalg.norm(zaxis)
         xaxis = np.cross([0, 0, 1], zaxis); xaxis /= np.linalg.norm(xaxis)
         yaxis = np.cross(zaxis, xaxis)
@@ -88,15 +101,11 @@ def make_model(model_id: str, scene_id='tabletop', seed=42):
     ET.SubElement(world, 'light', pos=vector([-.4, -1.2, 2.5]), dir='.2 .4 -1', directional='true', diffuse='.40 .40 .40', specular='.05 .05 .05', castshadow='true')
     ET.SubElement(world, 'light', pos=vector([1, 1, 1.8]), dir='-.4 -.2 -1', directional='true', diffuse='.15 .15 .15', specular='0 0 0', castshadow='false')
     ET.SubElement(world, 'geom', name='studio_floor', type='plane', size='5 5 .05', pos=vector([0, 0, -.69]), material='studio_floor')
-    ET.SubElement(world, 'geom', name='workbench', type='box', size=vector([.8, .65, .035]), pos=vector([.25, 0, -.037]), rgba='.80 .85 .79 1', friction='1 .005 .0001')
+    ET.SubElement(world, 'geom', name='workbench', type='box', size=vector([.95, .85, .035] if multi else [.8, .65, .035]), pos=vector([.25, 0, -.037]), rgba='.80 .85 .79 1', friction='1 .005 .0001')
     for x in [-.4, .9]:
         for y in [-.5, .5]:
             ET.SubElement(world, 'geom', type='box', size=vector([.025, .025, .3]), pos=vector([x, y, -.375]), rgba='.33 .40 .35 1')
     add_scene(world, scale, scene_id, seed)
-    if model_id == 'panda':
-        hand = root.find(".//body[@name='hand']")
-        ET.SubElement(hand, 'site', name='studio_tcp', pos='0 0 .1034', size='.007', rgba='.2 .7 .4 1', group='4')
-        ET.SubElement(hand, 'camera', name='wrist_cam', pos='.045 0 .035', xyaxes='1 0 0 0 -1 0', fovy='75')
     return mujoco.MjModel.from_xml_string(ET.tostring(root, encoding='unicode'), assets)
 
 
@@ -133,41 +142,100 @@ class Simulation:
             self.renderer.close()
             self.renderer = None
         self.model, self.data = model, data
-        self.model_id, self.config = model_id, MODELS[model_id]
+        self.model_id, self.platform_config = model_id, MODELS[model_id]
         self.scene_id, self.seed, self.task_id = scene_id, seed, task_id
         self.generation += 1
         self.cam = mujoco.MjvCamera()
         mujoco.mjv_defaultCamera(self.cam)
         self.opt = mujoco.MjvOption()
         self.opt.geomgroup[3:] = 0
-        self.home_ctrl = np.array(self.config['home'] + ([0.]*15 if model_id == 'rm65_gaia' else [self.config['gripper_open']]), dtype=float)
-        self.site_id = model.site(self.config.get('tip_site', 'studio_tcp')).id
-        self.actuators = []
-        for index in range(model.nu):
-            is_gripper = index >= self.config['arm_dof']
-            joint_id = int(model.actuator_trnid[index, 0]) if not (is_gripper and model_id == 'panda') else model.joint('finger_joint1').id
-            control_range = model.actuator_ctrlrange[index].copy()
-            if model.actuator_trntype[index] == mujoco.mjtTrn.mjTRN_JOINT:
-                control_range[0] = max(control_range[0], model.jnt_range[joint_id, 0])
-                control_range[1] = min(control_range[1], model.jnt_range[joint_id, 1])
-            self.actuators.append({'index': index, 'name': mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id),
-                                   'is_gripper': is_gripper, 'min': float(control_range[0]), 'max': float(control_range[1]),
-                                   'qpos_index': int(model.jnt_qposadr[joint_id]),
-                                   'unit': 'command' if is_gripper and model_id == 'panda' else 'rad'})
+        count = self.platform_config.get('robot_count', 1)
+        robot_model = 'panda' if count > 1 else model_id
+        config = MODELS[robot_model]
+        home = config['home'] + ([0.]*15 if robot_model == 'rm65_gaia' else [config['gripper_open']])
+        self.home_ctrl = np.tile(np.array(home, dtype=float), count)
+        self.robots = {}
+        self.all_actuators = []
+        for number in range(count):
+            robot_id = f'arm{number+1}'
+            prefix = robot_id + '_' if count > 1 else ''
+            indices = list(range(number*len(home), (number+1)*len(home)))
+            actuators = []
+            for local_index, index in enumerate(indices):
+                is_gripper = local_index >= config['arm_dof']
+                panda_gripper = is_gripper and robot_model == 'panda'
+                joint_id = model.joint(prefix+'finger_joint1').id if panda_gripper else int(model.actuator_trnid[index, 0])
+                control_range = model.actuator_ctrlrange[index].copy()
+                if model.actuator_trntype[index] == mujoco.mjtTrn.mjTRN_JOINT:
+                    control_range[0] = max(control_range[0], model.jnt_range[joint_id, 0])
+                    control_range[1] = min(control_range[1], model.jnt_range[joint_id, 1])
+                item = {'index': index, 'name': mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id),
+                        'robot_id': robot_id, 'is_gripper': is_gripper,
+                        'min': float(control_range[0]), 'max': float(control_range[1]),
+                        'qpos_index': int(model.jnt_qposadr[joint_id]), 'dof_index': int(model.jnt_dofadr[joint_id]),
+                        'unit': 'command' if panda_gripper else 'rad'}
+                actuators.append(item)
+            self.robots[robot_id] = {'id': robot_id, 'name': f'Panda {number+1}' if count > 1 else config['name'],
+                'model': robot_model, 'config': config, 'prefix': prefix, 'actuators': actuators, 'indices': indices,
+                'site_id': model.site(prefix+config.get('tip_site', 'studio_tcp')).id,
+                'wrist_camera': prefix+'wrist_cam'}
+            self.all_actuators.extend(actuators)
+        self._activate_robot('arm1')
         self.reset(log=False)
         self.set_view('perspective')
         self.set_flags(self.flags)
         if self.render_enabled:
             self.renderer = mujoco.Renderer(model, height=640, width=960)
-        self.event(f"已加载 {self.config['name']}：{self.config['arm_dof']} 个机械臂关节 + {model.nu-self.config['arm_dof']} 个手部执行器，MuJoCo {mujoco.__version__}。")
+        self.event(f"已加载 {self.platform_config['name']}：{count} 台机械臂、共 {model.nu} 个执行器，MuJoCo {mujoco.__version__}。")
+
+    def _activate_robot(self, robot_id):
+        if robot_id not in self.robots:
+            raise ValueError(f'机械臂 {robot_id} 不存在；可选：{", ".join(self.robots)}。')
+        robot = self.robots[robot_id]
+        self.active_robot = robot_id
+        self.config, self.actuators, self.site_id = robot['config'], robot['actuators'], robot['site_id']
+        if self.view == 'wrist':
+            self.cam.fixedcamid = self.model.camera(robot['wrist_camera']).id
+
+    def select_robot(self, robot_id):
+        if robot_id not in self.robots:
+            raise ValueError('所选机械臂不存在。')
+        if robot_id != self.active_robot:
+            self.cancel_motion()
+            self._activate_robot(robot_id)
+            self.paused = True
+            self.generation += 1
+            self.event(f"当前控制臂：{self.robots[robot_id]['name']}；已暂停，其他机械臂保持各自控制目标。")
+        return {'active_robot': self.active_robot, 'generation': self.generation}
+
+    def active_home_target(self):
+        target = self.data.ctrl.copy()
+        indices = self.robots[self.active_robot]['indices']
+        target[indices] = self.home_ctrl[indices]
+        return target
+
+    @contextmanager
+    def control_robot(self, robot_id):
+        # Routing is part of one validated action, not an external scene change.
+        # Failed IK or malformed policy chunks must not switch the visible arm.
+        if self.motion is not None or self.task['status'] == 'settling':
+            raise ValueError('当前动作尚未完成，请先等待或停止。')
+        previous = self.active_robot
+        self._activate_robot(robot_id or previous)
+        try:
+            yield
+        except Exception:
+            self._activate_robot(previous)
+            raise
 
     def reset(self, log=True):
         mujoco.mj_resetData(self.model, self.data)
-        for item in self.actuators:
+        for item in self.all_actuators:
             index = item['index']
             if item['unit'] == 'command':
-                self.data.joint('finger_joint1').qpos[0] = .04
-                self.data.joint('finger_joint2').qpos[0] = .04
+                prefix = self.robots[item['robot_id']]['prefix']
+                self.data.joint(prefix+'finger_joint1').qpos[0] = .04
+                self.data.joint(prefix+'finger_joint2').qpos[0] = .04
             else:
                 self.data.qpos[item['qpos_index']] = self.home_ctrl[index]
         self.data.ctrl[:] = self.home_ctrl
@@ -191,11 +259,11 @@ class Simulation:
             if self.model.ncam == 0:
                 raise ValueError('此模型未配置腕部相机。')
             self.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-            self.cam.fixedcamid = self.model.camera('wrist_cam').id
+            self.cam.fixedcamid = self.model.camera(self.robots[self.active_robot]['wrist_camera']).id
         else:
             self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
             self.cam.lookat[:] = np.array([.24, 0, .30]) * self.config['scale']
-            self.cam.distance = 2.15 * self.config['scale']
+            self.cam.distance = (3.3 if len(self.robots) > 1 else 2.15) * self.config['scale']
             self.cam.azimuth = {'perspective': 135, 'top': 90, 'front': 90}[view]
             self.cam.elevation = {'perspective': -26, 'top': -89, 'front': -8}[view]
         self.view = view
@@ -212,7 +280,9 @@ class Simulation:
     def set_control(self, index, value, log=True):
         if not 0 <= index < self.model.nu:
             raise ValueError('执行器编号不存在。')
-        item = self.actuators[index]
+        item = self.all_actuators[index]
+        if item['robot_id'] != self.active_robot:
+            raise ValueError('执行器不属于当前控制臂，请先选择对应机械臂。')
         if not math.isfinite(value) or not item['min'] <= value <= item['max']:
             raise ValueError(f"{item['name']} 的控制范围是 {item['min']:.3f} 至 {item['max']:.3f}。")
         self.cancel_motion()
@@ -238,14 +308,14 @@ class Simulation:
         self.event(f'开始执行：{title}。')
 
     def home(self):
-        self.start_motion([{'name': '回到初始关节姿态', 'ctrl': self.home_ctrl.copy(), 'duration': 2.5}], '机械臂归位')
+        self.start_motion([{'name': '回到初始关节姿态', 'ctrl': self.active_home_target(), 'duration': 2.5}], '机械臂归位')
 
     def demo(self):
         poses = []
         for name, joint1, gripper in [('回到初始姿态', 0., self.config['gripper_open']), ('向左转动基座', .45, self.config['gripper_open']),
                                       ('闭合夹爪', .45, self.config['gripper_closed']), ('向右转动基座', -.45, self.config['gripper_closed']),
                                       ('张开夹爪', -.45, self.config['gripper_open']), ('返回初始姿态', 0., self.config['gripper_open'])]:
-            target = self.home_ctrl.copy(); target[0] = joint1
+            target = self.active_home_target(); target[self.actuators[0]['index']] = joint1
             self.set_hand_target(target, (gripper-self.config['gripper_closed'])/(self.config['gripper_open']-self.config['gripper_closed']))
             poses.append({'name': name, 'ctrl': target, 'duration': 2.0})
         self.start_motion(poses, '关节与夹爪演示')
@@ -270,7 +340,7 @@ class Simulation:
             index = int(match.group(1)) - 1
             if index >= self.config['arm_dof']:
                 raise ValueError(f"{self.config['name']} 只有 {self.config['arm_dof']} 个机械臂关节。")
-            self.set_control(index, math.radians(float(match.group(2))))
+            self.set_control(self.actuators[index]['index'], math.radians(float(match.group(2))))
         return '指令已交给 MuJoCo 控制接口。' + ('当前暂停，控制目标将在继续后执行。' if self.paused else '')
 
     def step(self):
@@ -309,7 +379,8 @@ class Simulation:
                 self.task['position_error_m'] = float(position_error)
                 self.task['orientation_error_rad'] = float(angle_error)
                 reached = position_error < .006 * self.config['scale'] and angle_error < .05
-            if reached and np.max(np.abs(self.data.qvel[:self.config['arm_dof']])) < .05:
+            velocity_ids = [a['dof_index'] for a in self.actuators if not a['is_gripper']]
+            if reached and np.max(np.abs(self.data.qvel[velocity_ids])) < .05:
                 self.task['status'] = 'complete'; self.event('动作完成：实际末端已达到目标容差。' if self.pose_goal else '动作完成：关节已收敛到目标姿态。', 'success')
             elif self.data.time > self.settle_deadline:
                 self.task['status'] = 'failed'
@@ -340,60 +411,66 @@ class Simulation:
             raise ValueError('机械臂已经切换，本轮动作已失效。')
         action = PoseAction.model_validate(payload['pose'])
         if action.status != 'move': raise ValueError('只有 move 动作可以进入 IK。')
-        joints = solve_ik(self, action)
-        ctrl = self.data.ctrl.copy()
-        ctrl[:self.config['arm_dof']] = joints
-        self.set_hand_target(ctrl, action.gripper_open)
-        if action.hand_joint_positions_rad is not None:
-            if self.model_id != 'rm65_gaia' or len(action.hand_joint_positions_rad) != 15:
-                raise ValueError('独立手指控制需要 RM65 + GaiaHand 的 15 个手部目标角度。')
-            for item, value in zip(self.actuators[6:], action.hand_joint_positions_rad):
-                if not item['min'] <= value <= item['max']: raise ValueError(f"手指关节 {item['name']} 超出范围。")
-            ctrl[6:] = action.hand_joint_positions_rad
-        self.start_motion([{'name': 'IK → 执行器 → 实际末端反馈', 'ctrl': ctrl, 'duration': action.duration_s}], 'Agent 末端动作')
-        self.pose_goal = action
-        return {'joint_targets_rad': joints.tolist(), 'target': action.model_dump()}
+        with self.control_robot(action.robot_id):
+            joints = solve_ik(self, action)
+            ctrl = self.data.ctrl.copy()
+            ctrl[[a['index'] for a in self.actuators[:self.config['arm_dof']]]] = joints
+            self.set_hand_target(ctrl, action.gripper_open)
+            if action.hand_joint_positions_rad is not None:
+                if self.robots[self.active_robot]['model'] != 'rm65_gaia' or len(action.hand_joint_positions_rad) != 15:
+                    raise ValueError('独立手指控制需要 RM65 + GaiaHand 的 15 个手部目标角度。')
+                for item, value in zip(self.actuators[6:], action.hand_joint_positions_rad):
+                    if not item['min'] <= value <= item['max']: raise ValueError(f"手指关节 {item['name']} 超出范围。")
+                    ctrl[item['index']] = value
+            self.start_motion([{'name': 'IK → 执行器 → 实际末端反馈', 'ctrl': ctrl, 'duration': action.duration_s}], 'Agent 末端动作')
+            self.pose_goal = action
+            return {'robot_id': self.active_robot, 'joint_targets_rad': joints.tolist(), 'target': action.model_dump()}
 
     def set_hand_target(self, ctrl, open_fraction):
-        if self.model_id == 'rm65_gaia':
+        if self.robots[self.active_robot]['model'] == 'rm65_gaia':
             for item in self.actuators[6:]:
                 suffix = item['name'].rsplit('_', 1)[-1]
                 closed = (.45 if 'thumb' in item['name'] else 0.) if suffix == '1' else min(1.1, item['max'])
                 ctrl[item['index']] = (1-open_fraction)*closed
         else:
-            ctrl[-1] = self.config['gripper_closed'] + open_fraction * (self.config['gripper_open']-self.config['gripper_closed'])
+            ctrl[self.actuators[-1]['index']] = self.config['gripper_closed'] + open_fraction * (self.config['gripper_open']-self.config['gripper_closed'])
 
     def policy_chunk(self, payload):
         if payload['generation'] != self.generation: raise ValueError('场景已变化，策略动作块失效。')
-        targets = np.asarray(payload['actions'], dtype=float)
-        dt = float(payload['dt_s'])
-        if targets.ndim != 2 or targets.shape[1] != self.model.nu or not 1 <= len(targets) <= 50 or not np.isfinite(targets).all():
-            raise ValueError(f'动作块必须为 1–50 帧、每帧 {self.model.nu} 个有限执行器目标。')
-        if payload['joint_names'] != [a['name'] for a in self.actuators]: raise ValueError('策略关节顺序与当前机器人不一致。')
-        if not .02 <= dt <= .5: raise ValueError('策略动作间隔应在 0.02–0.5 秒。')
-        lower = np.array([a['min'] for a in self.actuators]); upper = np.array([a['max'] for a in self.actuators])
-        clipped = 0; current = self.data.ctrl.copy(); poses = []
-        rate = np.array([255. if a['unit'] == 'command' else 2. for a in self.actuators])
-        for target in targets:
-            bounded = np.clip(target, np.maximum(lower, current-rate*dt), np.minimum(upper, current+rate*dt))
-            clipped += int(np.sum(np.abs(bounded-target) > 1e-8))
-            poses.append({'name': '策略动作块', 'ctrl': bounded, 'duration': dt}); current = bounded
-        self.start_motion(poses, '策略模型动作块'); self.motion['policy_chunk'] = True
-        return {'frames': len(poses), 'limited_targets': clipped, 'executed_targets': [p['ctrl'].tolist() for p in poses]}
+        with self.control_robot(payload.get('robot_id')):
+            targets = np.asarray(payload['actions'], dtype=float)
+            dt = float(payload['dt_s'])
+            if targets.ndim != 2 or targets.shape[1] != len(self.actuators) or not 1 <= len(targets) <= 50 or not np.isfinite(targets).all():
+                raise ValueError(f'动作块必须为 1–50 帧、每帧 {len(self.actuators)} 个有限执行器目标。')
+            if payload['joint_names'] != [a['name'] for a in self.actuators]: raise ValueError('策略关节顺序与当前机器人不一致。')
+            if not .02 <= dt <= .5: raise ValueError('策略动作间隔应在 0.02–0.5 秒。')
+            lower = np.array([a['min'] for a in self.actuators]); upper = np.array([a['max'] for a in self.actuators])
+            indices = self.robots[self.active_robot]['indices']
+            clipped = 0; current = self.data.ctrl[indices].copy(); poses = []
+            rate = np.array([255. if a['unit'] == 'command' else 2. for a in self.actuators])
+            for target in targets:
+                bounded = np.clip(target, np.maximum(lower, current-rate*dt), np.minimum(upper, current+rate*dt))
+                clipped += int(np.sum(np.abs(bounded-target) > 1e-8))
+                full = self.data.ctrl.copy(); full[indices] = bounded
+                poses.append({'name': '策略动作块', 'ctrl': full, 'duration': dt}); current = bounded
+            self.start_motion(poses, '策略模型动作块'); self.motion['policy_chunk'] = True
+            return {'robot_id': self.active_robot, 'frames': len(poses), 'limited_targets': clipped,
+                    'executed_targets': [p['ctrl'][indices].tolist() for p in poses]}
 
     def checkpoint(self):
         spec = mujoco.mjtState.mjSTATE_INTEGRATION
         values = np.empty(mujoco.mj_stateSize(self.model, spec))
         mujoco.mj_getState(self.model, self.data, values, spec)
-        identity = f'{self.model_id}:{self.scene_id}:{self.seed}:{self.task_id}'.encode() + values.tobytes()
+        identity = f'{self.model_id}:{self.scene_id}:{self.seed}:{self.task_id}:{self.active_robot}'.encode() + values.tobytes()
         return {'model': self.model_id, 'scene_id': self.scene_id, 'seed': self.seed, 'task_id': self.task_id,
+                'active_robot': self.active_robot,
                 'state': values.tolist(), 'state_id': hashlib.sha256(identity).hexdigest()[:16]}
 
     def trajectory_frame(self):
         spec = mujoco.mjtState.mjSTATE_INTEGRATION
         values = np.empty(mujoco.mj_stateSize(self.model, spec))
         mujoco.mj_getState(self.model, self.data, values, spec)
-        return {'time': float(self.data.time), 'integration_state': values.tolist(),
+        return {'time': float(self.data.time), 'active_robot': self.active_robot, 'integration_state': values.tolist(),
                 'qpos': self.data.qpos.tolist(), 'qvel': self.data.qvel.tolist(),
                 'ctrl': self.data.ctrl.tolist(), 'actuator_force': self.data.actuator_force.tolist(),
                 'contacts': int(self.data.ncon), 'evaluation': self.evaluator.snapshot()}
@@ -403,7 +480,10 @@ class Simulation:
         spec = mujoco.mjtState.mjSTATE_INTEGRATION
         if values.shape != (mujoco.mj_stateSize(self.model, spec),) or not np.all(np.isfinite(values)):
             raise ValueError('记录状态的维度或数值与当前模型不符。')
+        robot_id = frame.get('active_robot', 'arm1')
+        if robot_id not in self.robots: raise ValueError('记录中的控制臂与当前模型不符。')
         self.cancel_motion()
+        self._activate_robot(robot_id)
         self.paused = True
         mujoco.mj_setState(self.model, self.data, values, spec)
         mujoco.mj_forward(self.model, self.data)
@@ -417,6 +497,7 @@ class Simulation:
         if (self.model_id, self.scene_id, self.seed, self.task_id) != (checkpoint['model'], checkpoint['scene_id'], checkpoint['seed'], checkpoint['task_id']):
             self.load(checkpoint['model'], checkpoint['scene_id'], checkpoint['seed'], checkpoint['task_id'])
         self.cancel_motion()
+        self._activate_robot(checkpoint.get('active_robot', 'arm1'))
         mujoco.mj_setState(self.model, self.data, np.asarray(checkpoint['state']), mujoco.mjtState.mjSTATE_INTEGRATION)
         mujoco.mj_forward(self.model, self.data)
         self.generation += 1; self.paused = True; self.speed = 1.
@@ -432,7 +513,7 @@ class Simulation:
         pose = tcp_pose(self.model, self.data, self.site_id)
         observations = []
         options = mujoco.MjvOption(); options.geomgroup[3:] = 0
-        for name, camera in [('front', 'agent_front'), ('side', 'agent_side'), ('wrist', 'wrist_cam')]:
+        for name, camera in [('front', 'agent_front'), ('side', 'agent_side'), ('wrist', self.robots[self.active_robot]['wrist_camera'])]:
             camera_id = self.model.camera(camera).id
             self.renderer.update_scene(self.data, camera=camera_id, scene_option=options)
             pixels = self.renderer.render()
@@ -444,13 +525,14 @@ class Simulation:
                                  'fovy_deg': float(self.model.cam_fovy[camera_id])})
         arm = self.actuators[:self.config['arm_dof']]
         return {'generation': self.generation, 'time': float(self.data.time), 'robot': self.model_id,
+                'active_robot': self.active_robot, 'robots': self.robot_states(),
                 'arm_dof': self.config['arm_dof'], 'tcp': pose,
                 'joints': [{'name': a['name'], 'position_rad': float(self.data.qpos[a['qpos_index']]),
                             'velocity_rad_s': float(self.data.joint(a['name']).qvel[0]),
                             'limits_rad': [a['min'], a['max']]} for a in arm],
                 'gripper': {'mode': 'individual_hand_joints', 'joint_count': 15} if self.model_id == 'rm65_gaia' else {'position': float(self.data.qpos[self.actuators[-1]['qpos_index']]),
-                            'unit': 'm_per_finger' if self.model_id == 'panda' else 'rad',
-                            'target_open_fraction': float((self.data.ctrl[-1]-self.config['gripper_closed']) /
+                            'unit': 'm_per_finger' if self.robots[self.active_robot]['model'] == 'panda' else 'rad',
+                            'target_open_fraction': float((self.data.ctrl[self.actuators[-1]['index']]-self.config['gripper_closed']) /
                                                          (self.config['gripper_open']-self.config['gripper_closed']))},
                 'limits': {'translation_per_round_m': .12 * self.config['scale'], 'rotation_per_round_deg': 35,
                            'position_tolerance_m': .006 * self.config['scale'], 'orientation_tolerance_rad': .05},
@@ -476,6 +558,7 @@ class Simulation:
             self.playback = None
         if action == 'load': self.load(payload['model'], payload.get('scene_id'), payload.get('seed'), payload.get('task_id'))
         elif action == 'scene': self.load(self.model_id, payload['scene_id'], payload.get('seed'), payload.get('task_id'))
+        elif action == 'select_robot': return self.select_robot(payload['robot_id'])
         elif action == 'reset': self.reset()
         elif action == 'pause': self.paused = bool(payload['value'])
         elif action == 'render_suspend':
@@ -532,6 +615,28 @@ class Simulation:
         else: raise ValueError('未知仿真操作。')
         return '操作已完成。'
 
+    def robot_states(self):
+        result = []
+        for robot in self.robots.values():
+            config = robot['config']; actuators = robot['actuators']
+            hand = actuators[-1]
+            gripper = {'mode': 'individual_hand_joints', 'joint_count': 15} if robot['model'] == 'rm65_gaia' else {
+                'position': float(self.data.qpos[hand['qpos_index']]),
+                'unit': 'm_per_finger' if robot['model'] == 'panda' else 'rad',
+                'target_open_fraction': float((self.data.ctrl[hand['index']]-config['gripper_closed']) /
+                                             (config['gripper_open']-config['gripper_closed']))}
+            result.append({'id': robot['id'], 'name': robot['name'], 'model': robot['model'],
+                'active': robot['id'] == self.active_robot, 'arm_dof': config['arm_dof'],
+                'hand_dof': len(actuators)-config['arm_dof'],
+                'tcp': tcp_pose(self.model, self.data, robot['site_id']), 'gripper': gripper,
+                'joints': [{'name': a['name'], 'position_rad': float(self.data.qpos[a['qpos_index']]),
+                            'velocity_rad_s': float(self.data.qvel[a['dof_index']]),
+                            'limits_rad': [a['min'], a['max']]} for a in actuators[:config['arm_dof']]],
+                'actuators': [{**a, 'position': float(self.data.qpos[a['qpos_index']]),
+                    'actual': float(self.data.qpos[a['qpos_index']]), 'target': float(self.data.ctrl[a['index']]),
+                    'force': float(self.data.actuator_force[a['index']])} for a in actuators]})
+        return result
+
     def state(self):
         pose = tcp_pose(self.model, self.data, self.site_id)
         if self.pose_goal and self.task['status'] in ('complete', 'failed', 'settling'):
@@ -541,13 +646,14 @@ class Simulation:
         for item in self.actuators:
             arm.append({**item, 'target': float(self.data.ctrl[item['index']]), 'actual': float(self.data.qpos[item['qpos_index']]),
                         'force': float(self.data.actuator_force[item['index']])})
-        return {'engine': 'MuJoCo', 'version': mujoco.__version__, 'model': self.model_id, 'name': self.config['name'],
+        return {'engine': 'MuJoCo', 'version': mujoco.__version__, 'model': self.model_id, 'name': self.platform_config['name'],
+                'active_robot': self.active_robot, 'robots': self.robot_states(),
                 'generation': self.generation, 'paused': self.paused, 'speed': self.speed, 'time': float(self.data.time),
                 'timestep': self.model.opt.timestep, 'steps': self.physics_steps, 'contacts': int(self.data.ncon),
                 'gravity': bool(self.model.opt.gravity[2]), 'view': self.view, 'flags': self.flags.copy(),
                 'nq': self.model.nq, 'nv': self.model.nv, 'nu': self.model.nu, 'meshes': self.model.nmesh,
                 'arm_dof': self.config['arm_dof'], 'mass': float(self.model.body_mass.sum()), 'actuators': arm,
-                'hand_dof': self.model.nu-self.config['arm_dof'], 'model_note': self.config.get('model_note', ''),
+                'hand_dof': len(self.actuators)-self.config['arm_dof'], 'model_note': self.platform_config.get('model_note', ''),
                 'scene_id': self.scene_id, 'scene_name': SCENES[self.scene_id]['name'], 'seed': self.seed,
                 'evaluation': self.evaluator.snapshot(), 'playback': getattr(self, 'playback', None),
                 'tcp': pose['position_m'], 'tcp_pose': pose,

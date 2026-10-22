@@ -113,7 +113,12 @@ keypoints, 3D value maps, code, arm joint angles or a long action sequence.
 Output exactly one JSON object matching the provided schema. Do not use tools, shell or files.
 position_m is the next ABSOLUTE TCP position in MuJoCo WORLD frame (metres), NOT a delta.
 quaternion_wxyz is absolute TCP orientation, a normalized quaternion in w,x,y,z order.
-The coordinate origin is the robot base at table height; Z up. Cameras include extrinsics:
+The world coordinate frame is fixed at the workbench, Z up; selecting a robot does not move its origin.
+For multi-arm scenes, observation.robots lists every robot's current TCP, joints and controls.
+Use robot_id to select arm1/arm2/arm3 for this one action, or null to keep active_robot.
+All position/orientation values stay in the same world frame; bounds apply relative to the selected arm's current TCP.
+Do not use another arm's TCP as the origin or report another arm's action as your own.
+Cameras include extrinsics:
 camera local +X right, +Y up, -Z forward. Use numeric robot state to maintain scale/orientation.
 gripper_open: 0 fully closed, 1 fully open. Preserve it unless the task requires a change.
 For a dexterous hand, hand_joint_positions_rad may contain all hand joint angles in the
@@ -188,7 +193,7 @@ async def codex_action(config, prompt, cameras, *, response_type=PoseAction,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         communication = asyncio.create_task(process.communicate(
-            (system_prompt + '\nImages attached in order: front, side, wrist.\n' + prompt).encode('utf-8')))
+            (system_prompt + ('\nImages attached in order: front, side, wrist.\n' if cameras else '\n') + prompt).encode('utf-8')))
         def capture_returned(stdout):
             usage = None; reasoning = []
             for line in stdout.decode('utf-8', 'replace').splitlines():
@@ -254,7 +259,7 @@ async def api_action(config, prompt, cameras, *, response_type=PoseAction,
         return response_type.model_validate(raw['output']), raw.get('usage')
     if config.provider == 'anthropic':
         from anthropic import AsyncAnthropic
-        tool_name = 'next_robot_action' if response_type is PoseAction else 'next_robot_plan'
+        tool_name = 'next_robot_action' if response_type is PoseAction else 'submit_workbench_repair' if schema_name == 'workbench_repair' else 'next_robot_plan'
         content = [{'type': 'text', 'text': prompt + f'\nReturn only the {tool_name} tool call.'}]
         for camera in cameras:
             content.extend([{'type': 'text', 'text': camera['name']}, {'type': 'image', 'source': {

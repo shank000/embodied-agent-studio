@@ -135,5 +135,38 @@ class PriceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cost['amount_usd'], .25)
         self.assertTrue(any('快照' in text for text in cost['warnings']))
 
+    async def test_calendar_reassessment_uses_recorded_price_and_keeps_old_cost_and_raw_logs(self):
+        from server.costing import calculate_call_cost
+        prices = {'status': 'ready', 'provider': 'deepseek', 'model': 'deepseek-flash', 'billing_kind': 'api',
+            'currency': 'USD', 'basis': 'recorded_snapshot', 'source_url': pricing.SOURCE_URLS['deepseek'],
+            'updated_at': '2026-10-22T09:00:00Z', 'peak_utc': [[60, 240], [360, 600]],
+            'peak_weekdays_utc': [0, 1, 2, 3, 4], 'holiday_region': 'CN',
+            'peak': {'input_per_million': .3, 'output_per_million': 1.2, 'cached_input_per_million': .006},
+            'off_peak': {'input_per_million': .15, 'output_per_million': .6, 'cached_input_per_million': .003}}
+        record = {'call_id': 'calendar-fixture', 'round': 1, 'model': 'deepseek-flash', 'provider': 'compatible',
+            'started_at': '2026-10-22T09:13:28Z', 'status': 'complete', 'inference_s': 1., 'pricing': prices,
+            'usage': {'prompt_tokens': 3115, 'completion_tokens': 12208, 'prompt_cache_hit_tokens': 2304, 'prompt_cache_miss_tokens': 811}}
+        with patch('server.costing.resolve_public_holiday', return_value={'known': False, 'message': 'Historical missing calendar fixture'}):
+            record['cost'] = calculate_call_cost(record, prices)
+        self.assertEqual(record['cost']['status'], 'partial')
+        self.assertEqual(record['cost']['amount_max_usd'], .014906724)
+        log = RunLog('agent', {'model': 'deepseek-flash', 'provider': 'compatible'})
+        log.end_inference(record); log.finish({'status': 'complete'})
+        before = {name: (log.folder/name).read_bytes() for name in ('events.jsonl', 'summary.json')}
+        self.catalog.providers['deepseek'] = price('deepseek', amount=999.)
+        result = analyze_run(log.id); call = result['rounds'][0]
+        self.assertEqual(result['cost']['amount_usd'], .014906724)
+        self.assertEqual(call['recorded_cost'], record['cost'])
+        self.assertEqual(call['cost']['pricing'], prices)
+        self.assertTrue(call['calendar_resolution']['recalculated_from_recorded_price'])
+        self.assertTrue(call['calendar_resolution']['original_log_unchanged'])
+        self.assertEqual(result['cost']['basis'], 'recorded_snapshot')
+        self.assertEqual(before, {name: (log.folder/name).read_bytes() for name in before})
+        cancelled = RunLog('agent', {'model': 'deepseek-flash', 'provider': 'compatible'})
+        cancelled.end_inference({**record, 'call_id': 'cancelled-fixture', 'status': 'cancelled', 'usage': None,
+            'cost': calculate_call_cost({**record, 'usage': None}, prices)})
+        cancelled.finish({'status': 'stopped'})
+        self.assertIsNone(analyze_run(cancelled.id)['cost']['amount_usd'])
+
 
 if __name__ == '__main__': unittest.main()

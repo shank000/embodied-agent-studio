@@ -69,7 +69,7 @@ class ProviderContracts(unittest.TestCase):
         for provider in ('openai', 'compatible', 'anthropic'):
             with self.subTest(provider=provider):
                 action, _ = self.call(self.config(provider=provider, max_output_tokens=24576))
-                self.assertEqual(action.model_dump(), ACTION)
+                self.assertEqual(action.model_dump(exclude={'robot_id'}), ACTION)
                 path, body = self.server.received[-1]
                 content = body['input'][0]['content'] if provider == 'openai' else body['messages'][-1]['content']
                 images = [c for c in content if c['type'] in ('input_image', 'image_url', 'image')]
@@ -90,7 +90,7 @@ class ProviderContracts(unittest.TestCase):
             for thinking in ('enabled', 'disabled'):
                 with self.subTest(thinking=thinking):
                     action, _ = self.call(self.config(base_url='https://api.deepseek.com/v1', deepseek_thinking=thinking, reasoning='low'))
-                    self.assertEqual(action.model_dump(), ACTION)
+                    self.assertEqual(action.model_dump(exclude={'robot_id'}), ACTION)
                     body = self.server.received[-1][1]
                     self.assertEqual(body['max_tokens'], 16384)
                     self.assertEqual(body['thinking'], {'type': thinking})
@@ -131,7 +131,7 @@ class ProviderContracts(unittest.TestCase):
                 config = self.config(provider=provider, max_output_tokens=budget,
                                      base_url=self.base_url+'/agent' if provider == 'custom' else self.base_url)
                 action, _ = self.call(config)
-                self.assertEqual(action.model_dump(), ACTION)
+                self.assertEqual(action.model_dump(exclude={'robot_id'}), ACTION)
                 body = self.server.received[-1][1]
                 actual = (body['model_settings']['max_output_tokens'] if provider == 'custom' else
                           body['max_output_tokens'] if provider == 'openai' else body['max_tokens'])

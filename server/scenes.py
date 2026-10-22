@@ -9,6 +9,7 @@ SCENES = {
     'drawer': {'name': '抽屉操作', 'description': '带滑轨和把手的真实可动抽屉。', 'tasks': ['open_drawer', 'lift_red']},
     'obstacles': {'name': '障碍与杂物', 'description': '立柱和散落物体，测试受限空间中的操作。', 'tasks': ['place_red', 'lift_red']},
     'assembly': {'name': '圆柱插装', 'description': '自由圆柱销与四壁插座，测试对齐与插入。', 'tasks': ['insert_peg', 'lift_red']},
+    'cooperative': {'name': '多臂共享分拣', 'description': '共享物体与两个收纳盒，搭配双/三 Panda，研究轮间协作、避让与任务分工。', 'tasks': ['sort_red_blue', 'place_red', 'lift_red']},
 }
 TASKS = {
     'lift_red': {'name': '抬起红色方块', 'instruction': '把红色方块抓起来，保持在桌面上方。', 'criterion': '红色方块中心高于桌面 8 cm（随工作台缩放），持续 0.3 秒。'},
@@ -17,6 +18,7 @@ TASKS = {
     'open_drawer': {'name': '拉开抽屉', 'instruction': '抓住前方抽屉的把手，把抽屉向外拉开。', 'criterion': '抽屉滑轨位移超过 12 cm（随工作台缩放），持续 0.3 秒。'},
     'insert_peg': {'name': '圆柱销插入插座', 'instruction': '把橙色圆柱销竖直插入右侧的深色方形插座，松开并移开手。', 'criterion': '销轴竖直对中，底端进入插座，静止且与手无接触，持续 0.3 秒。'},
     'reach_up': {'name': '末端抬高 2 cm', 'instruction': '保持夹爪开度和当前末端姿态，将末端沿世界坐标 Z 轴抬高 2 厘米。', 'criterion': '末端距初始位置正上方 2 cm 的目标小于 6 mm（小机械臂按比例），持续 0.3 秒。'},
+    'sort_red_blue': {'name': '红蓝方块分别入盒', 'instruction': '把红色方块放入绿色收纳盒，把蓝色方块放入蓝色收纳盒；可按 robot_id 分配机械臂，完成后所有手都松开并移开。', 'criterion': '红蓝方块分别完整位于对应盒内、高度正确、静止且与任何机械臂无接触，持续 0.3 秒；评价物理结果，不要求使用指定数量的机械臂。'},
 }
 
 
@@ -59,7 +61,7 @@ def add_scene(world, scale, scene_id, seed):
             geom(world, name + f'_wall{i}', 'box', [sx, sy, .025], [x+dx, y+dy, .032], color)
     # Build fixtures before sampling loose objects so their footprints are reserved.
     if scene_id != 'drawer': tray('tray', [.5, .25], '.40 .61 .48 1')
-    if scene_id in ('sorting', 'obstacles'):
+    if scene_id in ('sorting', 'obstacles', 'cooperative'):
         tray('blue_bin', [.17, .26], '.32 .49 .65 1', (.105, .12))
     if scene_id == 'obstacles':
         for i, (x, y) in enumerate([(.42, -.02), (.67, .08), (.27, .07)]):
@@ -99,13 +101,16 @@ class TaskEvaluator:
     def __init__(self, sim, task_id):
         self.task_id, self.scale = task_id, sim.config['scale']
         self.initial_tcp = sim.data.site_xpos[sim.site_id].copy()
+        self.initial_tcps = {key: sim.data.site_xpos[robot['site_id']].copy() for key, robot in sim.robots.items()}
         self.hold_s = 0.
         self.success = False
         self.steps = 0
         self.robot_bodies = set()
-        for actuator in sim.actuators:
+        for actuator in sim.all_actuators:
             body = int(sim.model.jnt_bodyid[sim.model.joint(actuator['name']).id])
-            self.robot_bodies.add(body)
+            while body:
+                self.robot_bodies.add(body)
+                body = int(sim.model.body_parentid[body])
         # Include fixed descendants (fingertips) of moving robot bodies.
         for body in range(1, sim.model.nbody):
             if int(sim.model.body_parentid[body]) in self.robot_bodies: self.robot_bodies.add(body)
@@ -133,6 +138,21 @@ class TaskEvaluator:
             valid = bool(np.all(error < [.115, .125]) and .030 < red[2] < .052 and speed < .03 and not self.touches_robot(sim, 'block_red'))
             progress = max(0., 1 - np.linalg.norm(error)/.5)
             values = {'target_distance_m': float(np.linalg.norm(error)*s), 'object_speed_m_s': float(speed*s)}
+        elif self.task_id == 'sort_red_blue':
+            satisfied = {}; distances = {}
+            for name, center, tolerance in [('red', [.5, .25], [.115, .125]), ('blue', [.17, .26], [.070, .085])]:
+                body_name = 'block_' + name
+                position = data.body(body_name).xpos / s
+                error = np.abs(position[:2]-center)
+                joint = sim.model.joint(body_name+'_joint').id
+                vadr = sim.model.jnt_dofadr[joint]
+                object_speed = np.linalg.norm(data.qvel[vadr:vadr+3])/s
+                satisfied[name] = bool(np.all(error < tolerance) and .030 < position[2] < .052
+                                       and object_speed < .03 and not self.touches_robot(sim, body_name))
+                distances[name] = float(np.linalg.norm(error)*s)
+            valid = all(satisfied.values())
+            progress = sum(satisfied.values()) / 2
+            values = {'objects_placed': satisfied, 'target_distances_m': distances}
         elif self.task_id == 'stack_red':
             blue = data.body('block_blue').xpos / s
             xy = np.linalg.norm(red[:2] - blue[:2]); dz = red[2]-blue[2]
@@ -151,7 +171,7 @@ class TaskEvaluator:
             progress = max(0., 1 - error/.4)
             values = {'alignment_error_m': float(error*s), 'axis_vertical_cosine': float(vertical), 'peg_height_m': float(pos[2]*s)}
         else:
-            target = self.initial_tcp + [0, 0, .02]
+            target = self.initial_tcps[sim.active_robot] + [0, 0, .02]
             error = np.linalg.norm(data.site_xpos[sim.site_id] - target)
             valid = error < .006*s
             progress = 1-error/.02; values = {'position_error_m': float(error)}

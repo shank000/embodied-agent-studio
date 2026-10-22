@@ -76,7 +76,8 @@ class CostingTests(unittest.TestCase):
                        off_peak={'input_per_million': 1., 'output_per_million': 4., 'cached_input_per_million': .1},
                        peak_utc=[[60, 240], [360, 600]], peak_weekdays_utc=[0, 1, 2, 3, 4], holiday_region='CN')
         usage = {'prompt_tokens': 1000, 'completion_tokens': 200, 'prompt_cache_hit_tokens': 400, 'prompt_cache_miss_tokens': 600}
-        uncertain = calculate_call_cost({'usage': usage, 'started_at': '2026-10-22T01:00:00Z'}, prices)
+        # Unknown years retain a range; the sourced 2026 calendar is now known.
+        uncertain = calculate_call_cost({'usage': usage, 'started_at': '2027-10-22T01:00:00Z'}, prices)
         self.assertEqual(uncertain['status'], 'partial')
         self.assertIsNone(uncertain['amount_usd'])
         self.assertEqual(uncertain['known_amount_usd'], 0.)
@@ -88,6 +89,40 @@ class CostingTests(unittest.TestCase):
         no_time = calculate_call_cost({'usage': usage, 'response_at': '2026-10-22T11:00:00Z'}, prices)
         self.assertIsNone(no_time['amount_usd'])
         self.assertEqual(no_time['amount_max_usd'], .00288)
+
+    def test_sourced_2026_calendar_resolves_normal_holiday_and_makeup_weekend_calls(self):
+        prices = quote(provider='deepseek', peak={'input_per_million': 2., 'output_per_million': 8., 'cached_input_per_million': .2},
+                       off_peak={'input_per_million': 1., 'output_per_million': 4., 'cached_input_per_million': .1},
+                       peak_utc=[[60, 240], [360, 600]], peak_weekdays_utc=[0, 1, 2, 3, 4], holiday_region='CN')
+        usage = {'prompt_tokens': 1000, 'completion_tokens': 200, 'prompt_cache_hit_tokens': 400, 'prompt_cache_miss_tokens': 600}
+        ordinary = calculate_call_cost({'usage': usage, 'started_at': '2026-10-22T09:13:28Z'}, prices)
+        self.assertEqual(ordinary['status'], 'complete'); self.assertEqual(ordinary['amount_usd'], .00288)
+        resolution = ordinary['calendar_resolution']
+        self.assertTrue(resolution['known']); self.assertFalse(resolution['is_holiday'])
+        self.assertEqual(resolution['tier'], 'peak'); self.assertEqual(resolution['document_date'], '2025-11-04')
+        self.assertTrue(resolution['source_url'].startswith('https://www.beijing.gov.cn/'))
+        # Jan 2 and Feb 23 are within the government's announced holiday/rest
+        # periods. Jan 4 and Feb 14 are make-up working weekends, still off-peak.
+        for stamp in ('2026-01-02T01:00:00Z', '2026-02-23T01:00:00Z',
+                      '2026-01-04T01:00:00Z', '2026-02-14T01:00:00Z'):
+            with self.subTest(stamp=stamp):
+                result = calculate_call_cost({'usage': usage, 'started_at': stamp}, prices)
+                self.assertEqual(result['status'], 'complete'); self.assertEqual(result['amount_usd'], .00144)
+        total = aggregate_costs([ordinary, ordinary])
+        self.assertEqual(len(total['calendar_sources']), 1)
+
+    def test_complete_deepseek_usage_snapshot_is_resolved_but_cancelled_missing_usage_stays_unknown(self):
+        prices = quote(provider='deepseek', peak={'input_per_million': .3, 'output_per_million': 1.2, 'cached_input_per_million': .006},
+                       off_peak={'input_per_million': .15, 'output_per_million': .6, 'cached_input_per_million': .003},
+                       peak_utc=[[60, 240], [360, 600]], peak_weekdays_utc=[0, 1, 2, 3, 4], holiday_region='CN')
+        usage = {'prompt_tokens': 3115, 'completion_tokens': 12208, 'prompt_cache_hit_tokens': 2304, 'prompt_cache_miss_tokens': 811}
+        actual = calculate_call_cost({'usage': usage, 'started_at': '2026-10-22T09:13:28.058638+00:00'}, prices)
+        self.assertEqual(actual['amount_usd'], .014906724)
+        self.assertEqual({row['component']: row['tokens'] for row in actual['breakdown']},
+                         {'input': 811, 'cached_input': 2304, 'output': 12208})
+        cancelled = calculate_call_cost({'usage': None, 'started_at': '2026-10-22T09:13:17Z', 'status': 'cancelled'}, prices)
+        self.assertEqual(cancelled['status'], 'unavailable'); self.assertIsNone(cancelled['amount_usd'])
+        self.assertNotIn('amount_min_usd', cancelled)
 
     def test_long_context_applies_to_whole_call_and_counts_anthropic_cache(self):
         prices = quote(long_context_threshold=1000, long_context_rates={

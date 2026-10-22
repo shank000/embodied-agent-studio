@@ -57,6 +57,7 @@ class PolicyOutput(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
     protocol: Literal['embodied-policy-v1']
     action_type: Literal['actuator_targets', 'tcp_pose']
+    robot_id: str | None = Field(default=None, min_length=1, max_length=40)
     joint_names: list[str] = Field(default_factory=list, max_length=64)
     actions: list[list[float]] = Field(default_factory=list, max_length=50)
     dt_s: float = Field(default=.05, ge=.02, le=.5)
@@ -75,6 +76,9 @@ class PolicyOutput(BaseModel):
         if self.action_type == 'actuator_targets' and (not self.actions or not self.joint_names):
             raise ValueError('动作块需要非空 actions 与明确的 joint_names。')
         if self.action_type == 'tcp_pose' and self.pose is None: raise ValueError('TCP 策略输出必须包含 pose。')
+        if self.pose is not None and self.robot_id:
+            if self.pose.robot_id and self.pose.robot_id != self.robot_id: raise ValueError('策略外层与 TCP 动作的 robot_id 不一致。')
+            self.pose = self.pose.model_copy(update={'robot_id':self.robot_id})
         return self
 
 
@@ -260,7 +264,7 @@ class PolicyController:
                         frames += 1
                     else:
                         result = await self.worker.execute({'action': 'policy_chunk', 'generation': obs['generation'],
-                            'actions': output.actions, 'joint_names': output.joint_names, 'dt_s': output.dt_s})
+                            'actions': output.actions, 'joint_names': output.joint_names, 'dt_s': output.dt_s, 'robot_id': output.robot_id})
                         frames += result['frames']; limited += result['limited_targets']
                     deadline = time.monotonic()+60
                     while time.monotonic() < deadline:

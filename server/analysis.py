@@ -109,6 +109,19 @@ def analyze_run(run_id, *, _ancestors=()):
     for call in ordered:
         for field in (*TOKEN_FIELDS, 'inference_s'): call[field] = _number(call.get(field))
         call.setdefault('reasoning', {'availability': 'unavailable', 'text': None, 'source': None})
+        saved_price = call.get('pricing')
+        # Re-evaluate only the previously unresolved calendar using the original
+        # price snapshot and actual usage. Preserve the recorded cost verbatim.
+        if (isinstance(call.get('cost'), dict) and call['cost'].get('status') == 'partial' and
+                isinstance(saved_price, dict) and saved_price.get('holiday_region') and
+                saved_price.get('status') in ('ready', 'stale')):
+            resolved = calculate_call_cost(call, saved_price)
+            if (resolved.get('calendar_resolution') or {}).get('known'):
+                call['recorded_cost'] = call['cost']
+                call['cost'] = resolved
+                call['calendar_resolution'] = {**resolved['calendar_resolution'], 'recalculated_from_recorded_price': True,
+                    'original_log_unchanged': True}
+                call['cost']['warnings'].append('按原调用价格与原始用量补齐官方节假日条件重新估算；旧费用保留在 recorded_cost，未改写原日志。')
         if not isinstance(call.get('cost'), dict) or call['cost'].get('status') == 'unavailable':
             recorded_cost = call.get('cost')
             saved_price = call.get('pricing')

@@ -16,6 +16,7 @@ class PoseAction(BaseModel):
     duration_s: float = Field(ge=.5, le=4)
     explanation: str = Field(min_length=1, max_length=1000)
     hand_joint_positions_rad: list[float] | None = None
+    robot_id: str | None = Field(default=None, min_length=1, max_length=40)
 
     @classmethod
     def action_schema(cls):
