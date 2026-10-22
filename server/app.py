@@ -32,6 +32,7 @@ from .comparison import ComparisonController, ComparisonStart
 from .scenes import SCENES, TASKS
 from .runlog import list_runs, run_folder
 from .analysis import analyze_run, analyze_experiments
+from .run_management import rename_run, delete_run, restore_run, RunInUseError
 from .artifacts import MethodRecipe, register_method, list_methods, get_method, verify_method
 from .composition import CompositionController, CompositionStart
 from .research import (ResearchProtocol, ResearchExperiment, ResearchController, register_protocol,
@@ -438,8 +439,38 @@ async def comparison_csv():
 
 
 @app.get('/api/runs')
-async def runs(limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0)):
-    return list_runs(limit=limit, offset=offset)
+async def runs(limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0), deleted: bool = False):
+    return list_runs(limit=limit, offset=offset, deleted=deleted)
+
+
+class RunRename(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(max_length=160)
+
+
+def manage_run(operation, run_id, *args):
+    try: return operation(run_id, *args)
+    except RunInUseError as exc: raise HTTPException(409, str(exc)) from exc
+    except FileNotFoundError as exc: raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc: raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch('/api/runs/{run_id}')
+async def rename_run_record(run_id: str, body: RunRename, request: Request):
+    local_request(request)
+    return manage_run(rename_run, run_id, body.name)
+
+
+@app.delete('/api/runs/{run_id}')
+async def delete_run_record(run_id: str, request: Request):
+    local_request(request)
+    return manage_run(delete_run, run_id)
+
+
+@app.post('/api/runs/{run_id}/restore')
+async def restore_run_record(run_id: str, request: Request):
+    local_request(request)
+    return manage_run(restore_run, run_id)
 
 
 @app.get('/api/runs/{run_id}/analysis')

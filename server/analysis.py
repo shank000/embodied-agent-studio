@@ -5,6 +5,7 @@ import json
 import math
 
 from .runlog import LIVE_RUNS, list_runs, run_folder, live_snapshot
+from .run_management import record_labels
 from .telemetry import reasoning_text, response_text, usage_tokens, effective_reasoning
 
 TOKEN_FIELDS = ('input_tokens', 'output_tokens', 'reasoning_tokens', 'total_tokens')
@@ -113,6 +114,7 @@ def analyze_run(run_id, *, _ancestors=()):
                 analysis = analyze_run(child_id, _ancestors=(*_ancestors, run_id))
                 child_analyses.append(analysis)
                 child['analysis_status'] = analysis['status']
+                child.update({key: analysis[key] for key in ('display_name', 'deleted_at')})
             except (ValueError, FileNotFoundError, KeyError) as exc: child['analysis_error'] = str(exc)
         children.append(child)
     known_empty = result.get('telemetry_schema_version') == 'embodied-calls-v1'
@@ -131,7 +133,8 @@ def analyze_run(run_id, *, _ancestors=()):
     elapsed = _number(result.get('elapsed_s', result.get('wall_time_s', (result.get('metrics') or {}).get('wall_time_s'))))
     ended_at = result.get('ended_at')
     if elapsed is None and ended_at: elapsed = _elapsed(started_at, ended_at)
-    return {'run_id': run_id, 'kind': result.get('kind'), 'status': result.get('status', 'interrupted'),
+    return {'run_id': run_id, **record_labels({**result, 'run_id': run_id, 'started_at': started_at}),
+        'kind': result.get('kind'), 'status': result.get('status', 'interrupted'),
         'message': result.get('message'), 'task': result.get('task'), 'model': model, 'reasoning': effort,
         'started_at': started_at, 'ended_at': ended_at, 'elapsed_s': elapsed,
         'metrics': result.get('metrics'), 'video': (result.get('artifacts') or {}).get('video'),

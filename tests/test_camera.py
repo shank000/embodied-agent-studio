@@ -3,6 +3,7 @@ import base64
 import io
 import unittest
 
+import mujoco
 import numpy as np
 from pydantic import ValidationError
 from PIL import Image
@@ -12,6 +13,48 @@ from server.simulation import Simulation
 
 
 class CameraNavigationTests(unittest.TestCase):
+    def test_pan_translates_projected_points_without_changing_depth_or_size(self):
+        sim = Simulation('so101', render=False)
+        try:
+            scene = mujoco.MjvScene(sim.model, maxgeom=1)
+
+            def camera_frame():
+                mujoco.mjv_updateCamera(sim.model, sim.data, sim.cam, scene)
+                camera = scene.camera[0]
+                eye = np.mean([view.pos for view in scene.camera], axis=0).astype(float)
+                forward, up = camera.forward.astype(float), camera.up.astype(float)
+                return eye, forward, up, np.cross(forward, up)
+
+            def project(points, frame):
+                eye, forward, up, right = frame
+                relative = points-eye
+                depth = relative @ forward
+                height = 2*np.tan(np.deg2rad(sim.model.vis.global_.fovy)/2)*depth
+                return np.column_stack((relative @ right, -(relative @ up)))/height[:, None], depth
+
+            for azimuth in (0., 90., 135., -70.):
+                for elevation in (-3., -8., -26., -45., -70., -89.):
+                    for dx, dy in ((.12, 0.), (0., .12), (0., -.12), (.08, .12)):
+                        with self.subTest(azimuth=azimuth, elevation=elevation, dx=dx, dy=dy):
+                            sim.set_view('perspective')
+                            sim.cam.azimuth, sim.cam.elevation = azimuth, elevation
+                            before_frame = camera_frame()
+                            _, _, up, right = before_frame
+                            # Fixed world points forming a square in the initial image plane.
+                            # A true pan shifts the square without changing its depth or size.
+                            points = sim.cam.lookat + .05*np.asarray([right+up, right-up, -right-up, -right+up])
+                            before, before_depth = project(points, before_frame)
+                            distance = sim.cam.distance
+                            sim.command({'action': 'camera', 'pan_dx': dx, 'pan_dy': dy})
+                            after_frame = camera_frame()
+                            after, after_depth = project(points, after_frame)
+                            np.testing.assert_allclose(after-before, np.tile([dx, dy], (4, 1)), atol=1e-6)
+                            np.testing.assert_allclose(after_depth, before_depth, atol=1e-6)
+                            np.testing.assert_allclose(after_frame[1:], before_frame[1:], atol=1e-7)
+                            self.assertEqual(sim.cam.distance, distance)
+        finally:
+            sim.close()
+
     def test_pan_changes_lookat_without_changing_physics_or_calibrated_cameras(self):
         for robot in ('panda', 'so101', 'rm65_gaia'):
             with self.subTest(robot=robot):

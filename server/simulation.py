@@ -510,15 +510,16 @@ class Simulation:
             self.cam.azimuth += payload.get('dx', 0)
             self.cam.elevation = float(np.clip(self.cam.elevation + payload.get('dy', 0), -89, -3))
             self.cam.distance = float(np.clip(self.cam.distance * math.exp(payload.get('zoom', 0)), .5*self.config['scale'], 5*self.config['scale']))
-            # Combine native horizontal/vertical pans into the screen plane. A
-            # vertical-only world-Z pan would barely move a top-down view.
+            # Screen-up is (-sin(elevation) * horizontal_forward, cos(elevation)).
+            # The opposite horizontal sign introduces a dolly component (pure
+            # dolly at -45 degrees), which makes vertical dragging look like zoom.
             # Only this interactive camera moves; calibrated cameras do not.
             if payload.get('pan_dx', 0) or payload.get('pan_dy', 0):
                 elevation = math.radians(self.cam.elevation)
                 mujoco.mjv_moveCamera(self.model, mujoco.mjtMouse.mjMOUSE_MOVE_V,
                     payload.get('pan_dx', 0), payload.get('pan_dy', 0)*math.cos(elevation), self.cam)
                 mujoco.mjv_moveCamera(self.model, mujoco.mjtMouse.mjMOUSE_MOVE_H,
-                    0., payload.get('pan_dy', 0)*math.sin(elevation), self.cam)
+                    0., -payload.get('pan_dy', 0)*math.sin(elevation), self.cam)
             self.view = 'custom'
         elif action == 'speed':
             if payload['value'] not in (.25, .5, 1., 2.): raise ValueError('不支持的仿真速度。')

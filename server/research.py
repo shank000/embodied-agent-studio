@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .artifacts import get_method, verify_method
 from .runlog import RunLog, run_folder, list_runs
+from .run_management import primary_models
 from .telemetry import batch_timing
 from .scenes import SCENES, TASKS
 from .simulation import MODELS
@@ -185,7 +186,9 @@ class ResearchController:
 
     async def run(self, request, protocol):
         log = RunLog('research_experiment', {'task': TASKS[protocol['spec']['task_id']]['instruction'],
-                     'protocol': protocol, 'settings': request.model_dump(), 'rows': self.state['rows']})
+                     'protocol': protocol, 'settings': request.model_dump(), 'rows': self.state['rows'],
+                     'primary_models': [model for method_id in request.method_ids
+                                        for model in primary_models(get_method(method_id))]})
         self.run_log = log
         log.snapshot_provider = self.snapshot
         self.state.update(run_id=log.id, experiment_id=log.id)

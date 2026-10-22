@@ -3,10 +3,11 @@ const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 const names={agent:'视觉 Agent',smolvla:'SmolVLA',vla:'自定义 VLA',wam:'自定义 WAM'};
 const statuses={idle:'等待任务',loading:'加载模型',preparing:'准备实验',observing:'采集观察',thinking:'策略推理',executing:'执行动作',verified:'评价器确认成功',model_done:'模型报告完成',blocked:'无法继续',error:'运行错误',failed:'执行失败',stopped:'已停止',cancelled:'已取消',canceled:'已取消',interrupted:'服务中断',returned:'已返回',round_complete:'本轮结束',limit:'达到上限',running:'运行中',complete:'实验完成',unfinished:'未结束'};
 let context, catalog, configs={}, lastGeneration=-1, lastRows='', lastPolicy='', currentPage='workspace', runs=[], selectedRun='',resultsOffset=0,resultsHasMore=true,analysisCatalog=[],refreshingResults=false,lastResultRefresh=0,lastRunStates='';
+let selectedResult=null,resultsGeneration=0,detailGeneration=0,analysisGeneration=0,analysisCatalogGeneration=0,hasAnalysisResults=false,resultMutationPending=false;
 const RESULTS_PAGE_SIZE=100;
 
-async function request(path,payload){
-  const response=await fetch(`/api/${path}`,payload===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+async function request(path,payload,method=payload===undefined?'GET':'POST'){
+  const response=await fetch(`/api/${path}`,{method,...(payload===undefined?{}:{headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})});
   const data=await response.json();
   if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:Array.isArray(data.detail)?data.detail.map(e=>e.msg).join('；'):'请求失败');
   return data;
@@ -81,7 +82,15 @@ export async function initResearch(callbacks){
   });
   $('#compare-stop').addEventListener('click',async()=>{try{await request('comparison/stop',{});}catch(error){context.toast(error.message);}});
   $('#refresh-logs').addEventListener('click',()=>refreshLogs({reset:true}));$('#log-filter').addEventListener('change',renderRunList);$('#log-status-filter').addEventListener('change',renderRunList);
+  $('#log-record-scope').addEventListener('change',()=>{runs=[];resultsOffset=0;resultsHasMore=true;clearResult();refreshLogs({reset:true,force:true});});
   $('#load-more-results').addEventListener('click',loadMoreResults);
+  $('#rename-result').addEventListener('click',openResultRename);
+  $('#delete-result').addEventListener('click',openResultDelete);
+  $('#restore-result').addEventListener('click',restoreResult);
+  $('#result-name-form').addEventListener('submit',saveResultName);
+  $('#result-auto-name').addEventListener('click',()=>{$('#result-name-input').value='';$('#result-name-input').focus();});
+  $('#result-delete-form').addEventListener('submit',deleteResult);
+  for(const action of ['name','delete']){const dialog=$(`#result-${action}-dialog`);$(`#cancel-result-${action}`).addEventListener('click',()=>dialog.close());dialog.addEventListener('cancel',event=>{if(resultMutationPending)event.preventDefault();});}
   for(const tab of ['records','analysis'])$(`#results-${tab}-tab`).addEventListener('click',()=>{for(const name of ['records','analysis']){$(`#results-${name}-tab`).setAttribute('aria-selected',String(name===tab));$(`#results-${name}-tab`).classList.toggle('selected',name===tab);$(`#results-${name}-panel`).hidden=name!==tab;}if(tab==='analysis')refreshAnalysisCatalog();});
   $('#results-analysis-form').addEventListener('submit',event=>{event.preventDefault();runAnalysis();});
   $('#analysis-model').addEventListener('change',()=>fillSelect($('#analysis-task'),analysisCatalog.filter(run=>run.model===$('#analysis-model').value).map(run=>run.task),'请选择同一任务'));
@@ -164,37 +173,84 @@ function renderComparison(rows){
 function resultError(error){$('#results-error').textContent=error.message;$('#results-error').hidden=false;context.toast(error.message);}
 function category(run){if(run.metrics?.success||run.success||run.status==='verified')return 'success';if(['stopped','cancelled','canceled'].includes(run.status))return 'stopped';if(run.active||['unfinished','interrupted','running','preparing','observing','thinking','executing','loading','planning','deciding'].includes(run.status))return 'unfinished';return 'error';}
 function resultModel(run){return run.model||run.config?.model||run.recipe?.agent?.model||run.recipe?.policy?.model||'';}
+function resultName(run){return run.display_name||run.default_name||run.run_id||'实验记录';}
+function resultIsActive(run){return !!run.active||run.status==='running';}
+function resultScope(){return $('#log-record-scope').value==='deleted';}
+function resultListPath(offset){return `runs?limit=${RESULTS_PAGE_SIZE}&offset=${offset}&deleted=${resultScope()}`;}
 function runKinds(kind){return {agent:'视觉 Agent',policy:'策略模型',composition:'方法版本运行',comparison:'对比实验',research_experiment:'RSI 配对评测'}[kind]||kind;}
 function fillSelect(select,items,placeholder){const previous=select.value;select.replaceChildren();const first=document.createElement('option');first.value='';first.textContent=placeholder;select.append(first);for(const value of [...new Set(items.filter(Boolean))].sort()){const option=document.createElement('option');option.value=value;option.textContent=value;select.append(option);}if([...select.options].some(option=>option.value===previous))select.value=previous;}
 function mergeRunPages(...pages){const records=new Map();for(const page of pages)for(const run of page)if(!records.has(run.run_id))records.set(run.run_id,run);return [...records.values()].sort((a,b)=>a.run_id===b.run_id?0:a.run_id>b.run_id?-1:1);}
 function resultPagingState(){const button=$('#load-more-results');button.disabled=refreshingResults||!resultsHasMore;button.textContent=refreshingResults?'正在读取结果…':resultsHasMore?'加载更多结果':'已读取全部结果';}
-async function refreshLogs({reset=false}={}){
-  if(refreshingResults)return;refreshingResults=true;lastResultRefresh=Date.now();$('#results-error').hidden=true;
+async function refreshLogs({reset=false,force=false}={}){
+  if(refreshingResults&&!force)return;const generation=++resultsGeneration;refreshingResults=true;lastResultRefresh=Date.now();$('#results-error').hidden=true;
   resultPagingState();
   try{
-    const page=await request(`runs?limit=${RESULTS_PAGE_SIZE}&offset=0`),known=new Set(runs.map(run=>run.run_id));
+    const page=await request(resultListPath(0));if(generation!==resultsGeneration)return;const known=new Set(runs.map(run=>run.run_id));
     if(reset||!runs.length||page.length<RESULTS_PAGE_SIZE||!page.some(run=>known.has(run.run_id))){runs=page;resultsOffset=page.length;resultsHasMore=page.length===RESULTS_PAGE_SIZE;}
     else{resultsOffset+=page.filter(run=>!known.has(run.run_id)).length;runs=mergeRunPages(page,runs);}
-    renderRunList();const chosen=runs.find(run=>run.run_id===selectedRun);if(chosen)await showRun(chosen);else if(!selectedRun&&runs.length)await showRun(runs[0]);
-  }catch(error){resultError(error);}finally{refreshingResults=false;resultPagingState();}
+    renderRunList();const chosen=runs.find(run=>run.run_id===selectedRun);if(chosen)await showRun(chosen);else if(!selectedRun&&runs.length)await showRun(runs[0]);else if(selectedRun&&reset)await showRun(selectedResult||{run_id:selectedRun});else if(!runs.length)clearResult();
+  }catch(error){if(generation===resultsGeneration)resultError(error);}finally{if(generation===resultsGeneration){refreshingResults=false;resultPagingState();}}
 }
 async function loadMoreResults(){
-  if(refreshingResults||!resultsHasMore)return;refreshingResults=true;lastResultRefresh=Date.now();$('#results-error').hidden=true;resultPagingState();
-  try{const page=await request(`runs?limit=${RESULTS_PAGE_SIZE}&offset=${resultsOffset}`);resultsOffset+=page.length;resultsHasMore=page.length===RESULTS_PAGE_SIZE;runs=mergeRunPages(runs,page);renderRunList();}
-  catch(error){resultError(error);}finally{refreshingResults=false;resultPagingState();}
+  if(refreshingResults||!resultsHasMore)return;const generation=++resultsGeneration;refreshingResults=true;lastResultRefresh=Date.now();$('#results-error').hidden=true;resultPagingState();
+  try{const page=await request(resultListPath(resultsOffset));if(generation!==resultsGeneration)return;resultsOffset+=page.length;resultsHasMore=page.length===RESULTS_PAGE_SIZE;runs=mergeRunPages(runs,page);renderRunList();}
+  catch(error){if(generation===resultsGeneration)resultError(error);}finally{if(generation===resultsGeneration){refreshingResults=false;resultPagingState();}}
 }
 function renderRunList(){
   const filtered=runs.filter(run=>($('#log-filter').value==='all'||run.kind===$('#log-filter').value)&&($('#log-status-filter').value==='all'||category(run)===$('#log-status-filter').value));
-  $('#results-count').textContent=`显示 ${filtered.length} / 已读取 ${runs.length} 条运行，包含错误与取消。`;
+  $('#results-count').textContent=`显示 ${filtered.length} / 已读取 ${runs.length} 条${resultScope()?'已删除记录，可恢复。':'运行，包含错误与取消。'}`;
   const root=$('#run-list');root.replaceChildren();if(!filtered.length){root.innerHTML='<p class="empty-state">筛选条件下没有运行记录。</p>';return;}
-  for(const run of filtered){const button=document.createElement('button');button.className='run-list-item'+(selectedRun===run.run_id?' selected':'');const wall=metric(run.elapsed_s)??metric(run.metrics?.wall_time_s)??metric(run.wall_time_s);button.innerHTML=`<span>${escape(runKinds(run.kind))}<em>${escape(statuses[run.status]||run.status)}</em></span><strong>${escape(run.task||'运行记录')}</strong><p>${escape(resultModel(run)||'模型见详情')} · 墙钟 ${secondsText(wall)}</p><small>${escape(run.run_id)}</small>`;button.addEventListener('click',()=>showRun(run));root.append(button);}
+  for(const run of filtered){const button=document.createElement('button');button.className='run-list-item'+(selectedRun===run.run_id?' selected':'');const wall=metric(run.elapsed_s)??metric(run.metrics?.wall_time_s)??metric(run.wall_time_s);button.innerHTML=`<span>${escape(runKinds(run.kind))}<em>${escape(statuses[run.status]||run.status)}</em></span><strong>${escape(resultName(run))}</strong><p>${escape(run.task||'未记录任务指令')}</p><p>${escape(resultModel(run)||'模型见详情')} · 墙钟 ${secondsText(wall)}</p><small>${escape(run.run_id)}</small>`;button.addEventListener('click',()=>showRun(run));root.append(button);}
 }
 async function showRun(run){
-  const id=run.run_id;selectedRun=id;renderRunList();$('#results-error').hidden=true;$('#log-detail-title').textContent=id;
-  try{const [analysis,events]=await Promise.all([request(`runs/${encodeURIComponent(id)}/analysis`),request(`runs/${encodeURIComponent(id)}/events`)]);if(selectedRun!==id)return;
+  const id=run.run_id,generation=++detailGeneration;selectedRun=id;selectedResult=run;renderRunList();$('#results-error').hidden=true;renderResultActions(run);
+  try{const [analysis,events]=await Promise.all([request(`runs/${encodeURIComponent(id)}/analysis`),request(`runs/${encodeURIComponent(id)}/events`)]);if(selectedRun!==id||generation!==detailGeneration)return;
+    selectedResult={...run,...analysis};renderResultActions(selectedResult);
     $('#log-download').hidden=false;$('#log-download').href=`/api/runs/${encodeURIComponent(id)}/download`;$('#log-detail').textContent=events.map(event=>JSON.stringify(event,null,2)).join('\n\n');
     renderRunVideo($('#log-video'),id,analysis.video||run.artifacts?.video||run.video);renderResultAnalysis(analysis,run);
-  }catch(error){if(selectedRun===id)resultError(error);}
+  }catch(error){if(selectedRun===id&&generation===detailGeneration)resultError(error);}
+}
+function clearResult(){
+  selectedRun='';selectedResult=null;detailGeneration++;$('#log-detail-title').textContent='选择一条实验结果';$('#log-detail-id').textContent='';$('#log-download').hidden=true;$('#result-actions').hidden=true;$('#result-management-note').hidden=true;
+  for(const selector of ['#result-summary','#result-calls','#result-children','#result-task-text'])$(selector).replaceChildren();
+  for(const selector of ['#result-round-charts','#result-chart-note','#result-outcome-message','#result-data-issues'])$(selector).hidden=true;
+  renderRunVideo($('#log-video'),'',null);$('#result-description').textContent='接口未返回的用量与推理文本会标记缺失，不推测补齐。';$('#log-detail').textContent='运行记录将在这里展示。';
+}
+function renderResultActions(run){
+  $('#log-detail-title').textContent=resultName(run);$('#log-detail-id').textContent=run.run_id;$('#result-actions').hidden=false;
+  $('#rename-result').disabled=resultMutationPending;$('#delete-result').hidden=!!run.deleted_at;$('#delete-result').disabled=resultIsActive(run)||resultMutationPending;$('#restore-result').hidden=!run.deleted_at;$('#restore-result').disabled=resultMutationPending;
+  const note=run.deleted_at?`已于 ${run.deleted_at} 移入回收站，已从跨实验分析中移除。原始日志和轨迹视频保留，可恢复。`:resultIsActive(run)?'实验正在运行，结束后可删除记录。':'默认名称由主要模型与开始时间生成；重命名不修改原始日志。';
+  $('#result-management-note').textContent=note;$('#result-management-note').hidden=false;
+}
+function openResultRename(){
+  if(!selectedResult||resultMutationPending)return;const dialog=$('#result-name-dialog');dialog.dataset.runId=selectedResult.run_id;$('#result-name-input').value=selectedResult.custom_name||'';$('#result-name-input').placeholder=selectedResult.default_name||resultName(selectedResult);$('#result-name-default').textContent=`自动名称：${selectedResult.default_name||resultName(selectedResult)}`;$('#result-name-error').textContent='';dialog.showModal();$('#result-name-input').focus();
+}
+function openResultDelete(){
+  if(!selectedResult||resultIsActive(selectedResult)||resultMutationPending)return;const dialog=$('#result-delete-dialog');dialog.dataset.runId=selectedResult.run_id;$('#result-delete-name').textContent=resultName(selectedResult);$('#result-delete-id').textContent=selectedResult.run_id;$('#result-delete-error').textContent='';dialog.showModal();
+}
+function setResultMutationPending(pending){
+  resultMutationPending=pending;for(const selector of ['#result-name-input','#save-result-name','#result-auto-name','#cancel-result-name','#confirm-result-delete','#cancel-result-delete'])$(selector).disabled=pending;
+  if(selectedResult)renderResultActions(selectedResult);
+}
+async function refreshManagedResults(){
+  analysisGeneration++;
+  await refreshLogs({reset:true,force:true});await refreshAnalysisCatalog();
+  if(hasAnalysisResults){if($('#analysis-model').value&&$('#analysis-task').value)await runAnalysis();else clearAnalysis('实验记录已更新，请重新选择模型与任务。');}
+}
+async function saveResultName(event){
+  event.preventDefault();if(resultMutationPending)return;const dialog=$('#result-name-dialog'),id=dialog.dataset.runId;setResultMutationPending(true);$('#result-name-error').textContent='';
+  try{await request(`runs/${encodeURIComponent(id)}`,{name:$('#result-name-input').value},'PATCH');dialog.close();await refreshManagedResults();context.toast('实验名称已保存。');}
+  catch(error){$('#result-name-error').textContent=error.message;resultError(error);}finally{setResultMutationPending(false);}
+}
+async function deleteResult(event){
+  event.preventDefault();if(resultMutationPending)return;const dialog=$('#result-delete-dialog'),id=dialog.dataset.runId;setResultMutationPending(true);$('#result-delete-error').textContent='';
+  try{await request(`runs/${encodeURIComponent(id)}`,undefined,'DELETE');dialog.close();clearResult();await refreshManagedResults();context.toast('实验记录已移入回收站，可随时恢复。');}
+  catch(error){$('#result-delete-error').textContent=error.message;resultError(error);}finally{setResultMutationPending(false);}
+}
+async function restoreResult(){
+  if(!selectedResult||resultMutationPending)return;const id=selectedResult.run_id;setResultMutationPending(true);
+  try{await request(`runs/${encodeURIComponent(id)}/restore`,{});clearResult();await refreshManagedResults();context.toast('实验记录已恢复，可在实验记录列表查看。');}
+  catch(error){resultError(error);}finally{setResultMutationPending(false);}
 }
 function renderResultAnalysis(analysis,run){
   const total=analysis.total||{},rounds=analysis.rounds||[],wall=metric(analysis.elapsed_s)??metric(run.metrics?.wall_time_s),state=statuses[analysis.status]||analysis.status;
@@ -213,20 +269,24 @@ function renderResultAnalysis(analysis,run){
     detail.innerHTML=`<summary><strong>第 ${escape(row.round??'?')} 轮 · ${escape(phase)}</strong><span>${secondsText(row.inference_s)} · 输出 ${numberText(row.output_tokens)} tokens · ${escape(callStatus)}</span></summary><div class="call-meta">${escape(row.provider||'接口未记录')} / ${escape(row.model||'模型未记录')} · 推理强度 ${escape(row.reasoning_effort||analysis.reasoning||'未记录')} · 输入 ${numberText(row.input_tokens)} / 输出 ${numberText(row.output_tokens)} / 推理 ${numberText(row.reasoning_tokens)} tokens</div><h4>接口公开输出 / 摘要</h4><pre>${escape(typeof row.public_text==='string'?row.public_text:row.public_text==null?'服务未返回可展示的公开文本。':JSON.stringify(row.public_text,null,2))}</pre><h4>服务返回的推理文字 / 摘要</h4><pre>${escape(row.reasoning?.availability==='returned'?row.reasoning.text||'返回字段为空。':'服务未返回可展示的推理文字或摘要。')}</pre>${row.error?`<p class="call-error">${escape(typeof row.error==='string'?row.error:JSON.stringify(row.error))}</p>`:''}`;
     $('#result-calls').append(detail);
   }
-  $('#result-children').replaceChildren();if(analysis.children?.length){const label=document.createElement('p');label.className='research-note';label.textContent='本实验的子试验结果（包括未生成独立运行编号的失败或取消）：';$('#result-children').append(label);for(const child of analysis.children){const row=typeof child==='string'?{run_id:child}:child||{},entry=document.createElement('article');entry.className='result-child';const title=document.createElement('strong');title.textContent=[row.method_name||names[row.method]||row.method||row.task||'子试验',row.seed==null?'':`种子 ${row.seed}`,statuses[row.status||row.analysis_status]||row.status||row.analysis_status||''].filter(Boolean).join(' · ');entry.append(title);const messages=[row.message,row.error,row.analysis_error].filter(Boolean);if(messages.length){const reason=document.createElement('p');reason.textContent=messages.map(value=>typeof value==='string'?value:JSON.stringify(value)).join('；');entry.append(reason);}if(row.run_id){const button=document.createElement('button');button.type='button';button.className='text-button';button.dataset.resultRun=row.run_id;button.textContent=`查看 ${row.run_id}`;entry.append(button);}else{const note=document.createElement('small');note.textContent='未生成独立运行编号，状态和错误由本批实验保留。';entry.append(note);}$('#result-children').append(entry);}}
+  $('#result-children').replaceChildren();if(analysis.children?.length){const label=document.createElement('p');label.className='research-note';label.textContent='本实验的子试验结果（包括未生成独立运行编号的失败或取消）：';$('#result-children').append(label);for(const child of analysis.children){const row=typeof child==='string'?{run_id:child}:child||{},entry=document.createElement('article');entry.className='result-child';const title=document.createElement('strong');title.textContent=[row.display_name||row.method_name||names[row.method]||row.method||row.task||'子试验',row.seed==null?'':`种子 ${row.seed}`,statuses[row.status||row.analysis_status]||row.status||row.analysis_status||'',row.deleted_at?'已移入回收站':''].filter(Boolean).join(' · ');entry.append(title);const messages=[row.message,row.error,row.analysis_error].filter(Boolean);if(messages.length){const reason=document.createElement('p');reason.textContent=messages.map(value=>typeof value==='string'?value:JSON.stringify(value)).join('；');entry.append(reason);}if(row.run_id){const button=document.createElement('button');button.type='button';button.className='text-button';button.dataset.resultRun=row.run_id;button.textContent=`查看 ${row.run_id}`;entry.append(button);}else{const note=document.createElement('small');note.textContent='未生成独立运行编号，状态和错误由本批实验保留。';entry.append(note);}$('#result-children').append(entry);}}
 }
 async function refreshAnalysisCatalog(){
-  try{const response=await request('experiments/analysis?limit=1000');analysisCatalog=response.groups?.length?response.groups:response.runs||[];fillSelect($('#analysis-model'),analysisCatalog.map(run=>run.model),'请选择同一模型');fillSelect($('#analysis-task'),analysisCatalog.map(run=>run.task),'请选择同一任务');}catch(error){resultError(error);}
+  const generation=++analysisCatalogGeneration;
+  try{const response=await request('experiments/analysis?limit=1000');if(generation!==analysisCatalogGeneration)return;analysisCatalog=response.groups?.length?response.groups:response.runs||[];fillSelect($('#analysis-model'),analysisCatalog.map(run=>run.model),'请选择同一模型');fillSelect($('#analysis-task'),analysisCatalog.filter(run=>!$('#analysis-model').value||run.model===$('#analysis-model').value).map(run=>run.task),'请选择同一任务');}catch(error){if(generation===analysisCatalogGeneration)resultError(error);}
+}
+function clearAnalysis(message){
+  analysisGeneration++;hasAnalysisResults=false;$('#refresh-analysis').disabled=false;$('#analysis-message').textContent=message;$('#analysis-issues').hidden=true;$('#analysis-issues-text').textContent='';$('#analysis-token-chart').replaceChildren();$('#analysis-time-chart').replaceChildren();$('#analysis-rows').innerHTML='<tr><td colspan="6" class="empty-state">分析结果将在这里展示。</td></tr>';
 }
 async function runAnalysis(){
   const model=$('#analysis-model').value,task=$('#analysis-task').value,kind=$('#analysis-kind').value;if(!model||!task){resultError(new Error('请先选择相同模型与相同任务，再比较推理强度。'));return;}
-  $('#results-error').hidden=true;$('#refresh-analysis').disabled=true;$('#analysis-message').textContent='正在读取真实调用记录与缺失情况…';
-  try{const query=new URLSearchParams({model,task,kind,limit:$('#analysis-limit').value});const response=await request(`experiments/analysis?${query}`);const order={disabled:0,none:0,off:0,minimal:1,low:2,medium:3,high:4,xhigh:5,ultra:6};
+  const generation=++analysisGeneration;hasAnalysisResults=true;$('#results-error').hidden=true;$('#refresh-analysis').disabled=true;$('#analysis-message').textContent='正在读取真实调用记录与缺失情况…';
+  try{const query=new URLSearchParams({model,task,kind,limit:$('#analysis-limit').value});const response=await request(`experiments/analysis?${query}`);if(generation!==analysisGeneration)return;const order={disabled:0,none:0,off:0,minimal:1,low:2,medium:3,high:4,xhigh:5,ultra:6};
     const groups=(response.groups||[]).filter(group=>group.model===model&&group.task===task&&group.kind===kind).sort((a,b)=>(order[a.reasoning]??99)-(order[b.reasoning]??99)||String(a.reasoning).localeCompare(String(b.reasoning)));
     const points=groups.map(group=>({label:group.reasoning||'未记录',shortLabel:group.reasoning||'未记录',value:group.mean_output_tokens}));
     $('#analysis-token-chart').innerHTML=metricChartMarkup(points,'按推理强度比较单次实验累计输出 tokens 均值','推理强度');$('#analysis-time-chart').innerHTML=metricChartMarkup(points.map((point,index)=>({...point,value:groups[index].mean_inference_s})),'按推理强度比较单次实验调用总耗时均值','推理强度');
     $('#analysis-rows').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${escape(group.reasoning||'未记录')}</strong><small>${escape(group.model)}</small></td><td>${numberText(group.runs)}<small>输出样本 ${numberText(group.output_samples)} / 时间样本 ${numberText(group.inference_samples)}</small></td><td>${numberText(group.output_tokens)}<small>均值 ${numberText(group.mean_output_tokens)}</small></td><td>${secondsText(group.inference_s)}<small>均值 ${secondsText(group.mean_inference_s)}</small></td><td>${numberText(group.total_tokens)}<small>完整样本 ${numberText(group.token_samples)}</small></td><td>输出 ${numberText(group.missing_output_runs)}<small>调用耗时 ${numberText(group.missing_inference_runs)}</small></td></tr>`).join(''):'<tr><td colspan="6" class="empty-state">筛选范围内没有可比较的运行。</td></tr>';
     $('#analysis-message').textContent=`${groups.length} 个推理强度组 · 匹配 ${response.matched_runs??response.runs?.length??0} 条运行，列表读取 ${response.returned_runs??response.runs?.length??0} 条。${response.aggregation_scope==='leaf_runs_only'?'统计仅累计实际执行的子试验，排除父实验重复汇总。':''}${response.excluded_active_runs?`进行中的 ${response.excluded_active_runs} 条未纳入终态成本统计。`:''}缺失用量不作为 0，均值仅使用对应字段完整的实验。`;
     $('#analysis-issues').hidden=!response.issues?.length;$('#analysis-issues-text').textContent=(response.issues||[]).map(issue=>typeof issue==='string'?issue:JSON.stringify(issue)).join('\n');
-  }catch(error){resultError(error);$('#analysis-message').textContent=error.message;}finally{$('#refresh-analysis').disabled=false;}
+  }catch(error){if(generation===analysisGeneration){resultError(error);$('#analysis-message').textContent=error.message;}}finally{if(generation===analysisGeneration)$('#refresh-analysis').disabled=false;}
 }

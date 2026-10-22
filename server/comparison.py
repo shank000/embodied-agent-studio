@@ -69,7 +69,9 @@ class ComparisonController:
 
     async def run(self, request):
         log = RunLog('comparison', {'task':TASKS[request.task_id]['instruction'], 'settings':request.model_dump(),
-                                   'rows': self.state['rows']})
+                                   'rows': self.state['rows'], 'primary_models': [
+                                       self.agent.config.model if method == 'agent' else self.policy.configs[method].model
+                                       for method in request.methods]})
         self.run_log = log
         log.snapshot_provider = self.snapshot
         self.state['run_id'] = log.id; started = time.monotonic()

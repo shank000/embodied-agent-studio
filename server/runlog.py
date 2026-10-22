@@ -258,17 +258,16 @@ def live_snapshot(log):
     return {**log.metadata, **snapshot, 'status': 'running'}
 
 
-def list_runs(limit=100, offset=0):
+def list_runs(limit=100, offset=0, *, deleted=False):
+    from .run_management import read_run_record, record_labels
     if not RUNS.exists(): return []
     result = []
     for folder in sorted(RUNS.iterdir(), reverse=True):
         if not RUN_ID.fullmatch(folder.name): continue
-        summary = folder / 'summary.json'
-        if summary.exists(): result.append(json.loads(summary.read_text(encoding='utf-8')))
-        elif (folder / 'events.jsonl').exists():
-            with (folder / 'events.jsonl').open(encoding='utf-8') as file: metadata = json.loads(file.readline())['data']
-            result.append({**metadata, 'status': 'interrupted', 'message': '服务中断或未正常结束，已有事件仍可下载。'})
-            live = LIVE_RUNS.get(folder.name)
-            if live and not live._finished: result[-1].update(live_snapshot(live))
+        if not (folder / 'summary.json').is_file() and not (folder / 'events.jsonl').is_file(): continue
+        record = read_run_record(folder.name)
+        record.update(record_labels(record))
+        if bool(record['deleted_at']) != deleted: continue
+        result.append(record)
         if limit is not None and len(result) >= limit + offset: break
     return result[offset:] if limit is None else result[offset:offset + limit]
