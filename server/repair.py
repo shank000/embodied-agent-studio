@@ -26,7 +26,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from .agent import AgentConfig, api_action, codex_action, validate_agent_access
-from .runlog import RunLog, CURRENT_LOG, run_folder, list_runs
+from .runlog import RunLog, CURRENT_LOG, LIVE_RUNS, run_folder, list_runs
 
 ROOT = Path(__file__).resolve().parents[1]
 REPAIRS = ROOT / 'artifacts' / 'repairs'
@@ -42,6 +42,23 @@ class RepairConfig(AgentConfig):
     timeout_s: int = Field(default=300, ge=15, strict=True)
     extra_instructions: str = Field(default='', max_length=3000)
     auto_analyze: bool = False
+    auto_recover: bool = True
+    max_recovery_attempts: int = Field(default=2, ge=1, strict=True)
+
+
+class RecoverySettings(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    max_output_tokens: int | None = Field(default=None, ge=512, strict=True)
+    timeout_s: int | None = Field(default=None, ge=15, strict=True)
+    reasoning: str | None = Field(default=None, min_length=1, max_length=64, pattern=r'^[A-Za-z0-9_.-]+$')
+    deepseek_thinking: Literal['enabled', 'disabled'] | None = None
+
+
+class RecoveryPlan(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    action: Literal['retry', 'stop']
+    instruction: str = Field(max_length=3000)
+    settings: RecoverySettings | None = None
 
 
 class RepairEdit(BaseModel):
@@ -58,6 +75,7 @@ class RepairProposal(BaseModel):
     evidence: list[str] = Field(max_length=20)
     recommendations: list[str] = Field(max_length=20)
     edits: list[RepairEdit] = Field(max_length=12)
+    recovery: RecoveryPlan | None = None
 
     @classmethod
     def action_schema(cls):
@@ -103,6 +121,11 @@ def system_contract():
     return ('You are the dedicated coding repair agent for the embodied MuJoCo workbench. '
             'Return one JSON instance of the supplied repair proposal schema. '
             'Explain diagnosis, evidence and advice in Chinese. Do not use tools, shell or files. '
+            'For a paused live experiment, provide a structured recovery plan: retry means one bounded '
+            'new inference at the same observation, never replay a previous physical command. '
+            'Give a short corrective instruction for invalid/empty JSON, or an evidenced settings correction. '
+            'Use stop for unavailable credentials, missing evidence, unsafe recovery or code requiring restart. '
+            'Do not call a source edit applied or effective before validation/restart. '
             'The following built-in skills always apply:\n\n' + '\n\n'.join(item['text'] for item in skills()))
 
 
@@ -125,11 +148,12 @@ def source_context(run_id, description, secrets=()):
         folder = run_folder(run_id)
         summary = folder / 'summary.json'
         if summary.exists(): metadata = json.loads(summary.read_text(encoding='utf-8'))
+        elif run_id in LIVE_RUNS: metadata = LIVE_RUNS[run_id].metadata
         with (folder / 'events.jsonl').open(encoding='utf-8') as handle:
             for line in handle:
                 try: event = json.loads(line)
                 except ValueError: continue
-                if event.get('event') in ('start', 'inference', 'model_output', 'error', 'cleanup_error', 'finish'):
+                if event.get('event') in ('start', 'inference', 'model_output', 'error', 'recoverable_error', 'cleanup_error', 'finish'):
                     # Inference records duplicate the raw output and its reasoning.
                     # Keep call/error metadata and the actual output once, without
                     # filling the diagnostic prompt with long reasoning transcripts.
@@ -233,6 +257,7 @@ class RepairController:
     def snapshot(self):
         state = deepcopy(self.state)
         if self._clock is not None: state['elapsed_s'] = time.monotonic()-self._clock
+        if getattr(self, 'recovery_snapshot', None): state['recovery'] = self.recovery_snapshot()
         return state
 
     def _finish_timing(self):
@@ -241,7 +266,7 @@ class RepairController:
             self._clock = None
         self.state['active'] = False
 
-    async def start(self, request, *, secrets=()):
+    async def start(self, request, *, secrets=(), parent_log=None):
         if self.state['active']: raise ValueError('已有修复任务在运行。')
         if self.state.get('status') in ('applying','apply_failed','restoring','restore_failed') or self.state.get('restart_required'):
             raise ValueError('上一项代码变更尚待重启或恢复，请先完成后再开始新诊断。')
@@ -262,13 +287,16 @@ class RepairController:
                       'started_at': datetime.now(timezone.utc).isoformat(), 'timeout_s':config.timeout_s,
                       'message': '正在按内置修复技能分析原始报错与模型接入代码。'}
         self._clock = time.monotonic()
-        self.task = asyncio.create_task(self.run(config, context, sources), name='model-repair')
+        self.task = asyncio.create_task(self.run(config, context, sources, parent_log=parent_log), name='model-repair')
         return self.snapshot()
 
-    async def run(self, config, context, sources):
-        log = RunLog('repair', {'model':config.model, 'provider':config.provider,
+    async def run(self, config, context, sources, *, parent_log=None):
+        log = parent_log or RunLog('repair', {'model':config.model, 'provider':config.provider,
             'task':'诊断并修复模型调用报错', 'source_run_id':context.get('source_run_id'),
             'settings':config.model_dump(exclude={'api_key'})}, secrets=self.current['secrets'])
+        if parent_log is not None:
+            for secret in self.current['secrets']:
+                if secret and secret not in log.secrets: log.secrets.append(secret)
         token = CURRENT_LOG.set(log)
         self.state['run_id'] = log.id
         try:
@@ -297,7 +325,7 @@ class RepairController:
             log.write('error', {'message':self.state['message']})
         finally:
             self._finish_timing()
-            log.finish({'status':self.state['status'], 'message':self.state['message']})
+            if parent_log is None: log.finish({'status':self.state['status'], 'message':self.state['message']})
             CURRENT_LOG.reset(token)
 
     async def stop(self):

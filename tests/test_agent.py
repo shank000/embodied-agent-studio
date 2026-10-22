@@ -165,6 +165,68 @@ class VisualLoopTests(unittest.TestCase):
                 self.assertEqual(agent.state['history'], [])
         asyncio.run(check())
 
+    def test_recovery_retries_same_round_then_continues_real_physics_and_video(self):
+        from server.repair import RepairController, RepairConfig, RepairProposal, EDITABLE
+        from server.recovery import RecoveryCoordinator
+        from server.telemetry import track_inference
+        from server.runlog import model_output
+        async def check(root):
+            for name in EDITABLE:
+                path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('# protocol fixture\n')
+            repair=RepairController(root)
+            repair.configure(RepairConfig(provider='custom',model='local-coding-fixture',
+                base_url='http://127.0.0.1:1/unused',auto_analyze=True))
+            await self.worker.execute({'action':'load','model':'panda'})
+            agent=AgentController(self.worker)
+            agent.configure(AgentConfig(provider='compatible',model='local-visual-fixture',api_key='fixture-key'))
+            agent.recovery=RecoveryCoordinator(repair)
+            seen=[]
+            @track_inference('agent_inference')
+            async def boundary(config,prompt,cameras):
+                payload=json.loads(prompt);seen.append(payload)
+                self.assertEqual(len(cameras),3)
+                if len(seen)==1:raise ModelResponseError('模型正文为空，本轮未执行动作。',{'input_tokens':2,'output_tokens':3})
+                pose=payload['observation']['tcp']
+                if len(seen)==2:
+                    pose['position_m'][2]+=.02
+                    action=action_at(pose)
+                else:action=action_at(pose,status='done',explanation='实际末端已抬高。')
+                usage={'input_tokens':2,'output_tokens':3}
+                model_output({'provider':'compatible','model':config.model,'content':action.model_dump_json(),'usage':usage})
+                return action,usage
+            @track_inference('agent_inference')
+            async def diagnose(config,prompt,cameras,**kwargs):
+                self.assertEqual(cameras,[])
+                proposal=RepairProposal(diagnosis='空正文在物理动作前失败。',category='provider',evidence=['empty response'],
+                    recommendations=['返回严格动作实例后重试。'],edits=[],
+                    recovery={'action':'retry','instruction':'Return the exact action JSON instance.','settings':None})
+                usage={'input_tokens':1,'output_tokens':1}
+                model_output({'provider':'custom','model':config.model,'output':proposal.model_dump(),'usage':usage})
+                return proposal,usage
+            with patch('server.agent.api_action',boundary),patch('server.repair.api_action',diagnose), \
+                    patch.object(self.worker,'execute',wraps=self.worker.execute) as execute:
+                await agent.start(AgentStart(task='抬高两厘米并确认',record_video=True))
+                await asyncio.wait_for(agent.task,25)
+                commands=[call.args[0]['action'] for call in execute.call_args_list]
+            self.assertEqual(agent.state['status'],'model_done',agent.state)
+            self.assertEqual(agent.state['round'],2);self.assertEqual(len(seen),3)
+            self.assertEqual(seen[0]['observation']['time'],seen[1]['observation']['time'])
+            self.assertGreater(seen[2]['observation']['time'],seen[1]['observation']['time'])
+            self.assertIn('recovery_feedback',seen[1])
+            self.assertEqual(commands.count('move_tcp'),1)
+            self.assertEqual(commands.count('record_start'),1);self.assertEqual(commands.count('record_stop'),1)
+            self.assertEqual(agent.state['history'][0]['round'],1)
+            self.assertEqual(agent.state['history'][0]['result']['status'],'complete')
+            self.assertEqual(agent.run_log.artifacts['observation_count'],2)
+            self.assertEqual(agent.run_log._inference_count,4)
+            self.assertEqual(agent.state['video']['status'],'saved')
+            self.assertGreater(agent.state['video']['frame_count'],1)
+            events=list(map(json.loads,agent.run_log.path.read_text(encoding='utf-8').splitlines()))
+            self.assertEqual(sum(row['event']=='finish' for row in events),1)
+            self.assertEqual([row['data']['round'] for row in events if row['event']=='inference'],[1,1,1,2])
+        with tempfile.TemporaryDirectory(prefix='native-recovery-') as folder:
+            asyncio.run(check(Path(folder)))
+
     def test_truncated_response_stops_before_motion_and_preserves_usage(self):
         async def check():
             await self.worker.execute({'action': 'load', 'model': 'panda'})

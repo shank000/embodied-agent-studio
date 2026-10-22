@@ -36,6 +36,7 @@ from .run_management import rename_run, delete_run, restore_run, batch_delete_ru
 from .model_capabilities import discover_model_capabilities
 from .pricing import catalog as price_catalog
 from .repair import RepairController, RepairConfig, RepairStart, secret_values
+from .recovery import RecoveryCoordinator
 from .artifacts import MethodRecipe, register_method, list_methods, get_method, verify_method
 from .composition import CompositionController, CompositionStart
 from .research import (ResearchProtocol, ResearchExperiment, ResearchController, register_protocol,
@@ -244,6 +245,16 @@ research = ResearchController(worker, composition)
 repair = RepairController()
 
 
+def repair_secrets():
+    return [agent.config.api_key.get_secret_value(),
+            *(config.api_key.get_secret_value() for config in policy.configs.values()),
+            *secret_values(composition.runtime_credentials)]
+
+
+recovery = RecoveryCoordinator(repair, secrets=repair_secrets)
+for controller in (agent, policy, composition): controller.recovery = recovery
+
+
 def research_active():
     return composition.snapshot().get('active') or research.state.get('active')
 
@@ -366,17 +377,36 @@ async def repair_model_capabilities(body: RepairConfig, request: Request):
 
 @app.get('/api/repair/sources')
 async def repair_sources():
-    return [row for row in list_runs(limit=None) if row.get('kind') != 'repair' and row.get('status') in ('error', 'interrupted', 'blocked')][:100]
+    rows = [row for row in list_runs(limit=None) if row.get('kind') != 'repair' and row.get('status') in ('error', 'interrupted', 'blocked')]
+    if recovery.current:
+        owner = recovery.current['owner']
+        rows.insert(0, {'run_id':owner.state['run_id'], 'model':owner.state.get('model'),
+                       'status':'repair_paused','display_name':'当前故障暂停实验'})
+    return rows[:100]
 
 
 @app.post('/api/repair/start')
 async def start_repair(body: RepairStart, request: Request):
     local_request(request)
     async with repair.lock:
-        sensitive = [agent.config.api_key.get_secret_value(), *(config.api_key.get_secret_value() for config in policy.configs.values())]
-        sensitive.extend(secret_values(composition.runtime_credentials))
-        try: return await repair.start(body, secrets=sensitive)
+        if recovery.current:
+            if body.source_run_id == recovery.current['run_id']: return repair.snapshot()
+            raise HTTPException(409, '已有实验处于故障恢复流程，请先继续或停止该实验。')
+        try: return await repair.start(body, secrets=repair_secrets())
         except (ValueError, FileNotFoundError) as exc: raise HTTPException(400, str(exc)) from exc
+
+
+class RecoveryResume(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    failure_id: str = Field(min_length=1,max_length=64)
+
+
+@app.post('/api/repair/resume')
+async def resume_repair(body: RecoveryResume, request: Request):
+    local_request(request)
+    async with repair.lock:
+        try: return recovery.resume(body.failure_id)
+        except ValueError as exc: raise HTTPException(409,str(exc)) from exc
 
 
 @app.post('/api/repair/stop')

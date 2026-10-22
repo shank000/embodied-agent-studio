@@ -4,7 +4,7 @@ import {renderRunVideo,runVideoMarkup,renderRunTimer} from './research.js';
 const $=selector=>document.querySelector(selector);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const modes={agent:'视觉 Agent',policy:'策略模型',hybrid:'组合方法'};
-const statuses={idle:'等待任务',queued:'等待执行',preparing:'准备实验',loading:'加载模型',running:'运行中',observing:'采集观察',planning:'主 Agent 规划',thinking:'模型推理',deciding:'选择候选',executing:'执行动作',verified:'评价器确认成功',model_done:'模型报告完成',blocked:'无法继续',error:'运行错误',failed:'执行未到位',stopped:'已停止',limit:'达到预算',round_complete:'本步结束',complete:'已完成',completed:'已完成',unfinished:'未结束'};
+const statuses={idle:'等待任务',queued:'等待执行',preparing:'准备实验',loading:'加载模型',running:'运行中',observing:'采集观察',planning:'主 Agent 规划',thinking:'模型推理',deciding:'选择候选',executing:'执行动作',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型报告完成',blocked:'无法继续',error:'运行错误',failed:'执行未到位',stopped:'已停止',limit:'达到预算',round_complete:'本步结束',complete:'已完成',completed:'已完成',unfinished:'未结束'};
 let context,defaults,catalog,methods=[],protocols=[],experiments=[],registry={},episode=null,replayRun='',lastRegistry='',lastExperiment='',lastRun='',lastFinished='',currentState={},busy=false;
 const methodId=method=>method.method_id||method.id;
 const protocolId=protocol=>protocol.protocol_id||protocol.id;

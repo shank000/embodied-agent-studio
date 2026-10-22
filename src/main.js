@@ -47,7 +47,8 @@ function enableControls(){
   $('#agent-stop').disabled=!connected||!state?.agent?.active;
   $('#agent-one-round').disabled=!enabled||takeover;
   $('#capture-observation').disabled=!enabled||takeover;
-  $('#agent-settings').disabled=takeover||busy;
+  const agentConfigEditable=state?.agent?.status==='repair_paused'&&!state?.policy?.active&&!state?.comparison?.active&&!state?.research?.active&&!state?.experiment?.active;
+  $('#agent-settings').disabled=(takeover&&!agentConfigEditable)||busy;
   if(takeover)document.querySelectorAll('#joint-controls input,.sim-action,#gripper-open,#gripper-close,#command,#send,#speed,#gravity,#step,#apply-scene,#scene-select,#task-select,#scene-seed').forEach(el=>el.disabled=true);
 }
 async function operate(payload,{message=false}={}){
@@ -124,7 +125,7 @@ function renderState(){
 }
 function renderAgent(){
   const agent=state.agent;if(!agent)return;
-  const names={idle:'等待任务',observing:'采集观察',thinking:'模型决策中',executing:'正在执行',verified:'评价器确认成功',model_done:'模型判断已完成',blocked:'模型无法继续',error:'调用或执行失败',stopped:'接管已停止',round_complete:'本轮已结束',limit:'已达轮数上限'};
+  const names={idle:'等待任务',observing:'采集观察',thinking:'模型决策中',executing:'正在执行',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型判断已完成',blocked:'模型无法继续',error:'调用或执行失败',stopped:'接管已停止',round_complete:'本轮已结束',limit:'已达轮数上限'};
   $('#agent-status').textContent=names[agent.status]||agent.status;
   $('#agent-message').textContent=agent.message;
   const roundLimit=Object.hasOwn(agent,'max_rounds')?agent.max_rounds:agentConfig?.max_rounds;

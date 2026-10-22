@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
+from . import recovery as recovery_module
 from .control import PoseAction
 from .runlog import RunLog, CURRENT_LOG, model_output
 from .telemetry import track_inference, controller_timing
@@ -138,7 +139,7 @@ async def predict_policy(config, body, client=None):
     endpoint = 'http://127.0.0.1:8010/predict' if config.kind == 'smolvla' else config.endpoint
     headers = {'Authorization': 'Bearer ' + config.api_key.get_secret_value()} if config.api_key.get_secret_value() else {}
     if client is not None:
-        response = await client.post(endpoint, json=body, headers=headers)
+        response = await client.post(endpoint, json=body, headers=headers, timeout=config.timeout_s)
     else:
         async with httpx.AsyncClient(timeout=config.timeout_s, trust_env=False) as session:
             response = await session.post(endpoint, json=body, headers=headers)
@@ -165,10 +166,11 @@ class PolicyController:
         self.configs = {kind: PolicyConfig(kind=kind, model='lerobot/smolvla_base' if kind == 'smolvla' else kind.upper() + ' 自定义模型') for kind in POLICY_KINDS}
         self.state = {'active': False, 'status': 'idle', 'round': 0, 'message': '选择策略模型后开始。'}
         self.observation = None; self.observation_id = 0; self.task = None
+        self._accepting = False
         self.retain_local_service = False
 
     def configure(self, config):
-        if self.state['active']: raise ValueError('请先停止策略运行。')
+        if self.state['active'] and self.state.get('status') != 'repair_paused': raise ValueError('请先停止策略运行。')
         previous = self.configs[config.kind]
         if previous.endpoint == config.endpoint and not config.api_key.get_secret_value(): config.api_key = previous.api_key
         self.configs[config.kind] = config
@@ -204,9 +206,11 @@ class PolicyController:
                       'max_rounds': 1 if request.one_chunk else config.max_chunks,
                       'message': '准备策略模型。', 'task': request.task, 'history': []}
         self.task = asyncio.create_task(self.run(request, config.model_copy(deep=True)))
+        self._accepting = True
         return self.snapshot()
 
     async def stop(self):
+        self._accepting = False
         if self.task and not self.task.done():
             self.task.cancel()
             try: await self.task
@@ -251,11 +255,19 @@ class PolicyController:
                     saved = log.save_observation(obs, number)
                     log.write('observation', {'round': number, 'request': body, 'observation': saved})
                     self.state.update(status='thinking', message=f'{config.model} 正在预测动作块。')
-                    inference_start = time.monotonic()
-                    raw = await predict_policy(config, body, client)
-                    latencies.append(time.monotonic()-inference_start)
+                    async def infer(feedback, effective_config):
+                        attempt_body = {**body, 'model': effective_config.model, 'device': effective_config.device,
+                            'horizon': min(effective_config.horizon, max(1, int(remaining/effective_config.dt_s))),
+                            'dt_s': effective_config.dt_s, **({'recovery_feedback': feedback} if feedback else {})}
+                        inference_start = time.monotonic()
+                        raw = await predict_policy(effective_config, attempt_body, client)
+                        output = PolicyOutput.model_validate(raw)
+                        return raw, output, time.monotonic()-inference_start, effective_config
+                    raw, output, latency, config = await recovery_module.invoke_with_recovery(
+                        self, 'policy_inference', infer, obs, config)
+                    if not self._accepting or asyncio.current_task().cancelling(): raise asyncio.CancelledError
+                    latencies.append(latency)
                     log.write('model_output', {'round': number, 'response': raw, 'latency_s': latencies[-1]})
-                    output = PolicyOutput.model_validate(raw)
                     self.state.update(status='executing', message=output.summary or '执行策略动作块。', latency_s=round(latencies[-1],3))
                     if output.action_type == 'tcp_pose':
                         if output.pose.status != 'move':
@@ -288,8 +300,8 @@ class PolicyController:
             self.state.update(status='stopped', message='策略已停止，迟到的推理结果不会执行。'); raise
         except Exception as exc:
             message = str(getattr(exc, 'detail', exc)) or type(exc).__name__
-            key = config.api_key.get_secret_value()
-            if key: message = message.replace(key, '[已隐藏密钥]')
+            for key in log.secrets:
+                if key: message = message.replace(key, '[已隐藏密钥]')
             self.state.update(status='error', message=message[:2400]); log.write('error', {'message':message[:2400]})
         finally:
             try: await self.worker.execute({'action':'stop'})
@@ -314,6 +326,7 @@ class PolicyController:
                 log.write('error', {'phase':'cleanup', 'message':self.state['message']})
             finally:
                 self.state['active'] = False
+                self._accepting = False
                 try:
                     log.finish({'status':self.state['status'], 'message':self.state['message'], 'metrics':self.state['metrics']})
                     self.state['video'] = log.artifacts.get('video', {}).copy()

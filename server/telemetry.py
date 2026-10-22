@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 CURRENT_CALL = ContextVar('robot_inference_call', default=None)
+RECOVERY_CONTEXT = ContextVar('robot_recovery_attempt', default=None)
 
 
 def utc_now():
@@ -123,6 +124,7 @@ def track_inference(phase):
                       'status': 'running', 'public_text': None, 'response_returned': False, 'usage': None,
                       'pricing': pricing,
                       'reasoning': {'availability': 'unavailable', 'text': None, 'source': None}, 'error': None}
+            if RECOVERY_CONTEXT.get(): record.update(RECOVERY_CONTEXT.get())
             started = time.monotonic()
             token = CURRENT_CALL.set(record)
             log.begin_inference(record, started)

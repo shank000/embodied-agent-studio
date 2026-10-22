@@ -185,6 +185,8 @@ def analyze_run(run_id, *, _ancestors=()):
         'message': result.get('message'), 'task': result.get('task'), 'model': model, 'reasoning': effort,
         'started_at': started_at, 'ended_at': ended_at, 'elapsed_s': elapsed,
         'metrics': result.get('metrics'), 'video': (result.get('artifacts') or {}).get('video'),
+        'recovery_assisted':bool(result.get('recovery_assisted') or any(event.get('event')=='recoverable_error' for event in events)),
+        'recovery_attempts':sum(event.get('event')=='recoverable_error' for event in events),
         'total': totals, 'rounds': ordered, 'children': children, 'trials': rows, 'cost': cost,
         'issues': issues, 'aggregation_scope': 'children_once' if result.get('kind') in BATCH_KINDS else 'actual_provider_calls',
         'inference_semantics': '端到端服务调用耗时，含网络与排队；并行调用逐请求累计，可能超过墙钟时间。',

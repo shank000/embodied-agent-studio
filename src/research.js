@@ -1,7 +1,7 @@
 const $=selector=>document.querySelector(selector);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const names={agent:'视觉 Agent',smolvla:'SmolVLA',vla:'自定义 VLA',wam:'自定义 WAM'};
-const statuses={idle:'等待任务',loading:'加载模型',preparing:'准备实验',observing:'采集观察',thinking:'策略推理',executing:'执行动作',verified:'评价器确认成功',model_done:'模型报告完成',blocked:'无法继续',error:'运行错误',failed:'执行失败',stopped:'已停止',cancelled:'已取消',canceled:'已取消',interrupted:'服务中断',returned:'已返回',round_complete:'本轮结束',limit:'达到上限',running:'运行中',complete:'实验完成',unfinished:'未结束'};
+const statuses={idle:'等待任务',loading:'加载模型',preparing:'准备实验',observing:'采集观察',thinking:'策略推理',executing:'执行动作',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型报告完成',blocked:'无法继续',error:'运行错误',failed:'执行失败',stopped:'已停止',cancelled:'已取消',canceled:'已取消',interrupted:'服务中断',returned:'已返回',round_complete:'本轮结束',limit:'达到上限',running:'运行中',complete:'实验完成',unfinished:'未结束'};
 let context, catalog, configs={}, lastGeneration=-1, lastRows='', lastPolicy='', currentPage='workspace', runs=[], selectedRun='',resultsOffset=0,resultsHasMore=true,analysisCatalog=[],refreshingResults=false,lastResultRefresh=0,lastRunStates='';
 let selectedResult=null,resultsGeneration=0,detailGeneration=0,analysisGeneration=0,analysisCatalogGeneration=0,hasAnalysisResults=false,resultMutationPending=false;
 const checkedResults=new Set();
@@ -36,7 +36,8 @@ export function renderRunTimer(container,run){
   if(!container)return;const timing=run?.timing||{},wall=metric(timing.elapsed_wall_s)??metric(run?.elapsed_s)??metric(run?.metrics?.wall_time_s),inference=metric(timing.inference_elapsed_s);
   container.hidden=wall==null&&inference==null;if(container.hidden)return;
   const current=metric(timing.current_inference_s),activeCalls=metric(timing.active_calls);
-  container.innerHTML=`<span>墙钟 <strong>${secondsText(wall)}</strong></span><span title="包含网络、排队与服务处理时间">累计调用 <strong>${secondsText(inference)}</strong></span>${current==null?'':activeCalls>0?`<span>当前请求等待 <strong>${secondsText(current)}</strong>${activeCalls>1?` · ${activeCalls} 个并发请求`:''}</span>`:'<span>暂无推理请求</span>'}${run?.active?'<span class="timer-active">运行中</span>':''}`;
+  const activity={repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停',retrying:'重试当前轮'}[run?.status]||'运行中';
+  container.innerHTML=`<span>墙钟 <strong>${secondsText(wall)}</strong></span><span title="包含网络、排队与服务处理时间">累计调用 <strong>${secondsText(inference)}</strong></span>${current==null?'':activeCalls>0?`<span>当前请求等待 <strong>${secondsText(current)}</strong>${activeCalls>1?` · ${activeCalls} 个并发请求`:''}</span>`:'<span>暂无推理请求</span>'}${run?.active?`<span class="timer-active">${activity}</span>`:''}`;
 }
 export function metricChartMarkup(points,title,xLabel='轮次 / 调用'){
   const values=points.map(point=>metric(point.value));if(!points.length||values.every(value=>value==null))return '<p class="empty-state">没有返回可绘制的真实数值。</p>';
@@ -150,7 +151,8 @@ export function renderResearch(state){
   $('#policy-status').textContent=statuses[policy.status]||policy.status||'等待任务';$('#policy-message').textContent=policy.message||'';
   $('#policy-round').textContent=`${policy.round||0} / ${policy.max_rounds||configs[$('#policy-kind').value]?.max_chunks||60} 次`;
   renderRunTimer($('#policy-run-time'),policy);renderRunTimer($('#comparison-run-time'),comparison);
-  $('#policy-stop').disabled=!policy.active;$('#policy-start').disabled=locked;$('#policy-one-chunk').disabled=locked;$('#policy-settings').disabled=policy.active||comparison.active;$('#policy-kind').disabled=locked;
+  const policyConfigEditable=policy.status==='repair_paused'&&!state.agent?.active&&!comparison.active&&!state.research?.active&&!state.experiment?.active;
+  $('#policy-stop').disabled=!policy.active;$('#policy-start').disabled=locked;$('#policy-one-chunk').disabled=locked;$('#policy-settings').disabled=(policy.active&&!policyConfigEditable)||comparison.active||state.research?.active||state.experiment?.active;$('#policy-kind').disabled=locked;
   $('#policy-record-video').disabled=locked;$('#compare-record-video').disabled=locked;renderRunVideo($('#policy-video'),policy.run_id,policy.video);
   for(const selector of ['#apply-scene','#scene-select','#task-select','#scene-seed'])$(selector).disabled=locked||$('#reset').disabled;
   $('#compare-start').disabled=locked;$('#compare-stop').disabled=!comparison.active;
@@ -344,7 +346,7 @@ async function refreshPricingStatus(manual=false){
 }
 function renderResultAnalysis(analysis,run){
   const total=analysis.total||{},rounds=analysis.rounds||[],wall=metric(analysis.elapsed_s)??metric(run.metrics?.wall_time_s),state=statuses[analysis.status]||analysis.status;
-  $('#result-description').textContent=`${runKinds(analysis.kind||run.kind)} · ${analysis.model||resultModel(run)||'模型未记录'} · 推理强度 ${analysis.reasoning||'未记录'} · ${state||'状态未记录'}${analysis.started_at?` · 开始 ${analysis.started_at}`:''}`;
+  $('#result-description').textContent=`${runKinds(analysis.kind||run.kind)} · ${analysis.model||resultModel(run)||'模型未记录'} · 推理强度 ${analysis.reasoning||'未记录'} · ${state||'状态未记录'}${analysis.started_at?` · 开始 ${analysis.started_at}`:''}${analysis.recovery_assisted?` · 恢复辅助 · ${numberText(analysis.recovery_attempts)} 次（调用总量含修复诊断与重试）`:''}`;
   $('#result-task-text').textContent=analysis.task||run.task||'';const message=analysis.message||analysis.error||run.message||'';$('#result-outcome-message').textContent=typeof message==='string'?message:JSON.stringify(message);$('#result-outcome-message').hidden=!message;$('#result-outcome-message').classList.toggle('error',['error','failed','blocked'].includes(analysis.status||run.status));
   $('#result-data-issues').textContent=(analysis.issues||[]).length?`记录读取提示：${analysis.issues.join('；')}`:'';$('#result-data-issues').hidden=!analysis.issues?.length;
   $('#result-summary').innerHTML=[['完整墙钟',secondsText(wall)],['模型调用次数',numberText(total.calls)],['总 tokens',numberText(total.total_tokens)],['输出 tokens',numberText(total.output_tokens)],['累计调用耗时',secondsText(total.inference_s)],['用量记录',total.usage_complete?'完整':'存在缺失']].map(([label,value])=>`<div><small>${escape(label)}</small><strong>${escape(value)}</strong></div>`).join('');

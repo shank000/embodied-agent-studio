@@ -13,6 +13,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import agent as agent_module
+from . import recovery as recovery_module
 from .control import PoseAction
 from .decision import DecisionConfig, choose_candidate, choose_decisions
 from .policy import PolicyConfig, PolicyOutput, predict_policy, warmup_policy, release_local_service
@@ -283,13 +284,16 @@ class CompositionController:
         return observation
 
     async def _agent(self, config, observation, *, planner=False, reason=None):
-        prompt = agent_module.observation_text(self.state['task'], observation, self.state['history'], self.initial_tcp)
+        prompt_data = json.loads(agent_module.observation_text(self.state['task'], observation, self.state['history'], self.initial_tcp))
         if planner:
-            prompt += '\nPlanning trigger: ' + str(reason)
-        function = agent_module.codex_action if config.provider == 'codex' else agent_module.api_action
+            prompt_data['planning_trigger'] = reason
         options = {'response_type': PlannerOutput, 'system_prompt': PLANNER_PROMPT, 'schema_name': 'robot_subgoal'} if planner else {}
-        result, usage = await self._timed('planning' if planner else 'agent_inference',
-            function(config, prompt, observation['cameras'], **options))
+        phase = 'planning' if planner else 'agent_inference'
+        async def infer(feedback, effective_config):
+            prompt = json.dumps({**prompt_data, **({'recovery_feedback': feedback} if feedback else {})}, ensure_ascii=False)
+            function = agent_module.codex_action if effective_config.provider == 'codex' else agent_module.api_action
+            return await self._timed(phase, function(effective_config, prompt, observation['cameras'], **options))
+        result, usage = await recovery_module.invoke_with_recovery(self, phase, infer, observation, config)
         self._assert_current(observation)
         self.state['usage'].setdefault('planner' if planner else 'agent', []).append(usage)
         self.log.write('plan' if planner else 'agent_action', {'step': self.state['step'],
@@ -303,10 +307,18 @@ class CompositionController:
             'task': self.state.get('subgoal', self.state['task']), 'observation': observation,
             'seed': self.initial_state.get('seed', 42)+number-1, 'reset': self.policy_calls == 1,
             'horizon': min(config.horizon, max(1, int(remaining/config.dt_s))), 'dt_s': config.dt_s}
-        raw = await self._timed('policy_inference', predict_policy(config, body))
+        async def infer(feedback, effective_config):
+            attempt_body = {**body, 'model': effective_config.model, 'device': effective_config.device,
+                'horizon': min(effective_config.horizon, max(1, int(remaining/effective_config.dt_s))),
+                'dt_s': effective_config.dt_s, **({'recovery_feedback': feedback} if feedback else {})}
+            async def request_and_validate():
+                raw = await predict_policy(effective_config, attempt_body)
+                return raw, PolicyOutput.model_validate(raw)
+            return await self._timed('policy_inference', request_and_validate())
+        raw, output = await recovery_module.invoke_with_recovery(self, 'policy_inference', infer, observation, config)
         self._assert_current(observation)
         self.log.write('policy_output', {'step': number, 'observation_id': observation['observation_id'], 'response': raw})
-        return PolicyOutput.model_validate(raw)
+        return output
 
     @staticmethod
     def _policy_candidates(output):
@@ -433,10 +445,17 @@ class CompositionController:
                             'robot_state': {key: value for key, value in observation.items() if key != 'cameras'}}
                         threshold = float(recipe.get('controller', {}).get('decision_min_confidence', 0.))
                         if not 0 <= threshold <= 1: raise ValueError('决策置信度阈值须在 0 至 1 之间。')
+                        async def recovering_chooser(config, context, offered, *, api_key='', cameras=()):
+                            async def infer(feedback, effective_config):
+                                attempt_context = {**context, **({'recovery_feedback': feedback} if feedback else {})}
+                                return await choose_candidate(effective_config, attempt_context, offered,
+                                    api_key=api_key, cameras=cameras)
+                            return await recovery_module.invoke_with_recovery(self,
+                                'decision:' + context['decision_id'], infer, observation, config)
                         result = await self._timed('decision_aggregation', choose_decisions(decision_configs,
                             recipe.get('decision_strategy', 'single'), decision_context, candidates,
                             api_keys=credentials.get('decision_api_keys', {}), cameras=observation['cameras'],
-                            min_confidence=threshold, on_result=self._decision_record, chooser=choose_candidate))
+                            min_confidence=threshold, on_result=self._decision_record, chooser=recovering_chooser))
                         self._assert_current(observation)
                         self.log.write('decision', {'step': number, 'input': decision_context, 'result': result.model_dump()})
                         self.state['decision_aggregation'] = result.aggregation

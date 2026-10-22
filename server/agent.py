@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from .control import PoseAction
 from .runlog import RunLog, CURRENT_LOG, model_output
 from .telemetry import track_inference, controller_timing
+from .recovery import invoke_with_recovery
 
 
 class AgentConfig(BaseModel):
@@ -330,10 +331,11 @@ class AgentController:
         self.lock = asyncio.Lock()
         self.observation = None
         self.observation_id = 0
+        self._accepting = False
         self.state = {'active': False, 'status': 'idle', 'round': 0, 'message': '配置模型后开始视觉任务。', 'history': []}
 
     def configure(self, config):
-        if self.state['active']: raise ValueError('请先停止当前 Agent 任务，再修改模型。')
+        if self.state['active'] and self.state['status'] != 'repair_paused': raise ValueError('请先停止当前 Agent 任务，再修改模型。')
         if config.provider == self.config.provider and config.base_url == self.config.base_url and not config.api_key.get_secret_value():
             config.api_key = self.config.api_key
         if config.reasoning_native and config.reasoning is not None:
@@ -377,9 +379,11 @@ class AgentController:
                       'max_sim_time_s': request.max_sim_time_s, 'evaluator_stop': request.evaluator_stop,
                       'record_video': request.record_video}
         self.task = asyncio.create_task(self.run(request.one_round))
+        self._accepting = True
         return self.snapshot()
 
     async def stop(self):
+        self._accepting = False
         if self.task and not self.task.done():
             self.task.cancel()
             try: await self.task
@@ -424,8 +428,16 @@ class AgentController:
                 prompt = observation_text(self.state['task'], obs, self.state['history'], initial)
                 saved = log.save_observation(obs, number)
                 log.write('observation', {'round': number, 'input': json.loads(prompt), 'observation': saved})
-                function = codex_action if config.provider == 'codex' else api_action
-                action, usage = await function(config, prompt, obs['cameras'])
+                async def infer(feedback, effective_config):
+                    function = codex_action if effective_config.provider == 'codex' else api_action
+                    request_prompt = prompt
+                    if feedback:
+                        payload = json.loads(prompt)
+                        payload['recovery_feedback'] = feedback
+                        request_prompt = json.dumps(payload,ensure_ascii=False)
+                    return await function(effective_config, request_prompt, obs['cameras'])
+                action, usage = await invoke_with_recovery(self, 'agent_inference', infer, obs, config)
+                if not self._accepting or asyncio.current_task().cancelling(): raise asyncio.CancelledError
                 self.state.update(action=action.model_dump(), latency_s=round(time.monotonic()-start, 2), usage=usage)
                 latencies.append(time.monotonic()-start)
                 log.write('action', {'round': number, 'action': action.model_dump(), 'latency_s': latencies[-1], 'usage': usage})
@@ -479,8 +491,8 @@ class AgentController:
             raise
         except Exception as exc:
             message = str(getattr(exc, 'detail', exc)) or type(exc).__name__
-            key = config.api_key.get_secret_value()
-            if key: message = message.replace(key, '[已隐藏密钥]')
+            for key in log.secrets:
+                if key: message = message.replace(key, '[已隐藏密钥]')
             self.state.update(status='error', message=message[:2400])
             log.write('error', {'message': message[:2400], 'round': self.state['round']})
             if isinstance(exc, ModelResponseError): self.state['usage'] = exc.usage
@@ -491,6 +503,7 @@ class AgentController:
                 try: await self.worker.execute({'action': 'record_stop'})
                 except Exception as exc: log.write('cleanup_error', {'phase': 'recording', 'message': str(getattr(exc, 'detail', exc))})
             self.state['active'] = False
+            self._accepting = False
             with self.worker.lock: final = self.worker.snapshot.copy()
             self.state['metrics'] = {'success': final.get('evaluation', {}).get('success', False),
                 'engine_ready': final.get('ready',False),
