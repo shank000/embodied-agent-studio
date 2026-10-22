@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from collections import deque
 from copy import deepcopy
 from datetime import datetime, timezone
 import difflib
@@ -18,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from typing import Literal
 from uuid import uuid4
 
@@ -37,7 +39,7 @@ SKILL_DIR = Path(__file__).with_name('repair_skills')
 class RepairConfig(AgentConfig):
     model: str = 'gpt-6-astra'
     reasoning: str | None = 'high'
-    timeout_s: int = Field(default=300, ge=15, le=300)
+    timeout_s: int = Field(default=300, ge=15, strict=True)
     extra_instructions: str = Field(default='', max_length=3000)
     auto_analyze: bool = False
 
@@ -118,7 +120,7 @@ def redact(value, secrets=()):
 
 
 def source_context(run_id, description, secrets=()):
-    metadata = {}; selected = []
+    metadata = {}; selected = deque(maxlen=6)
     if run_id:
         folder = run_folder(run_id)
         summary = folder / 'summary.json'
@@ -128,14 +130,34 @@ def source_context(run_id, description, secrets=()):
                 try: event = json.loads(line)
                 except ValueError: continue
                 if event.get('event') in ('start', 'inference', 'model_output', 'error', 'cleanup_error', 'finish'):
-                    selected.append(event)
-        selected = [{'event':event.get('event'), 'timestamp':event.get('timestamp'),
-                     'diagnostic_excerpt':json.dumps(redact(event.get('data'), secrets), ensure_ascii=False)[:10000]}
-                    for event in selected[-6:]]
+                    # Inference records duplicate the raw output and its reasoning.
+                    # Keep call/error metadata and the actual output once, without
+                    # filling the diagnostic prompt with long reasoning transcripts.
+                    data = redact(event.get('data'), secrets)
+                    if event['event'] == 'inference' and isinstance(data, dict):
+                        data = {key:value for key,value in data.items() if key in (
+                            'call_id','round','phase','provider','model','reasoning_effort',
+                            'configured_reasoning','started_at','ended_at','status',
+                            'inference_s','usage','error','response_returned')}
+                    selected.append({'event':event.get('event'), 'timestamp':event.get('timestamp'),
+                        'diagnostic_excerpt':json.dumps(diagnostic_value(data), ensure_ascii=False)})
+        selected = list(selected)
         metadata = {key:metadata.get(key) for key in ('run_id','kind','provider','model','status','message','settings','metrics')}
     if not selected and not description.strip(): raise ValueError('请选择包含报错的实验，或填写待诊断问题。')
     return redact({'source_run_id': run_id, 'description': description, 'summary': metadata,
-                   'recent_events': selected}, secrets)
+                   'recent_events': list(selected)}, secrets)
+
+
+def diagnostic_value(value):
+    """Compact diagnostic copy; original experiment outputs remain untouched."""
+    if isinstance(value, dict):
+        return {key:diagnostic_value(item) for key,item in value.items()
+                if key not in ('returned_reasoning','reasoning_content','reasoning','thinking',
+                               'encrypted_content','pricing','cost')}
+    if isinstance(value, list): return [diagnostic_value(item) for item in value]
+    if isinstance(value, str) and len(value) > 6000:
+        return value[:4000] + f'\n[已省略 {len(value)-6000} 字符；完整内容保存在原实验日志]\n' + value[-2000:]
+    return value
 
 
 def safe_path(root, relative):
@@ -173,6 +195,7 @@ class RepairController:
         self.config = RepairConfig()
         self.lock = asyncio.Lock()
         self.task = None
+        self._clock = None
         self.state = {'active': False, 'status': 'idle', 'message': '选择一个报错实验，配置编码模型后分析。'}
         self.current = None
         pointer = self.root/'artifacts/repairs/last_applied.json'
@@ -207,7 +230,16 @@ class RepairController:
         self.config = config
         return self.public_config()
 
-    def snapshot(self): return deepcopy(self.state)
+    def snapshot(self):
+        state = deepcopy(self.state)
+        if self._clock is not None: state['elapsed_s'] = time.monotonic()-self._clock
+        return state
+
+    def _finish_timing(self):
+        if self._clock is not None:
+            self.state['elapsed_s'] = time.monotonic()-self._clock
+            self._clock = None
+        self.state['active'] = False
 
     async def start(self, request, *, secrets=()):
         if self.state['active']: raise ValueError('已有修复任务在运行。')
@@ -227,7 +259,9 @@ class RepairController:
                         'source_run_id': request.source_run_id, 'secrets': sensitive}
         self.state = {'active': True, 'status': 'analyzing', 'job_id': job_id,
                       'source_run_id': request.source_run_id, 'model': config.model,
+                      'started_at': datetime.now(timezone.utc).isoformat(), 'timeout_s':config.timeout_s,
                       'message': '正在按内置修复技能分析原始报错与模型接入代码。'}
+        self._clock = time.monotonic()
         self.task = asyncio.create_task(self.run(config, context, sources), name='model-repair')
         return self.snapshot()
 
@@ -259,10 +293,10 @@ class RepairController:
             self.state.update(status='stopped', message='修复分析已停止，未修改工作区。')
             raise
         except Exception as exc:
-            self.state.update(status='error', message=redact(str(exc), self.current['secrets']))
+            self.state.update(status='error', message=redact(str(exc) or type(exc).__name__, self.current['secrets']))
             log.write('error', {'message':self.state['message']})
         finally:
-            self.state['active'] = False
+            self._finish_timing()
             log.finish({'status':self.state['status'], 'message':self.state['message']})
             CURRENT_LOG.reset(token)
 
@@ -286,7 +320,10 @@ class RepairController:
             if (target.read_bytes() if target.exists() else b'') != original: raise ValueError('候选对应的代码已变更，请重新分析。')
         # Run the supplied regression against the original implementation first.
         (folder/REGRESSION).write_bytes(self.current['after'][REGRESSION])
-        self.state.update(active=True, status='validating', message='正在用本机 Python 执行副本中的候选回归与固定接口契约。')
+        self.state.update(active=True, status='validating', timeout_s=None,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            message='正在用本机 Python 执行副本中的候选回归与固定接口契约。')
+        self._clock = time.monotonic()
         # This is explicit user-authorized local code execution, not an OS sandbox.
         self.task = asyncio.create_task(self._validate(folder), name='repair-validation')
         return self.snapshot()
@@ -340,7 +377,7 @@ sys.exit(0 if result.wasSuccessful() else 1)
             self.state.update(status='proposed', message='候选验证已取消，工作区未修改。'); raise
         except Exception as exc:
             self.state.update(status='validation_failed', message=redact(str(exc), self.current['secrets']))
-        finally: self.state['active'] = False
+        finally: self._finish_timing()
 
     @staticmethod
     async def _terminate(process):

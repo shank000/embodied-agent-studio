@@ -174,11 +174,12 @@ async def codex_action(config, prompt, cameras, *, response_type=PoseAction,
         schema.write_text(json.dumps(response_type.action_schema()), encoding='utf-8')
         arguments = [codex_executable(), 'exec', '--ignore-user-config', '--skip-git-repo-check',
                      '--ephemeral', '--sandbox', 'read-only', '--color', 'never', '--json',
-                     '--disable', 'shell_tool', '--disable', 'apps', '--disable', 'hooks',
+                     '--disable', 'shell_tool', '--disable', 'apps', '--disable', 'plugins', '--disable', 'hooks',
                      '--disable', 'multi_agent', '-c', 'web_search="disabled"',
                      '-c', 'model_provider="robot_openai"',
                      '-c', 'model_providers.robot_openai={name="OpenAI",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
-                     '-c', 'skills.max_context_tokens=1', '--disable', 'shell_snapshot',
+                     '-c', 'skills.include_instructions=false', '-c', 'skills.bundled.enabled=false',
+                     '--disable', 'shell_snapshot',
                      '-c', 'project_doc_max_bytes=0', '-c', 'approval_policy="never"',
                      '--model', config.model, '--output-schema', str(schema),
                      '--output-last-message', str(output), '--cd', folder]
@@ -203,8 +204,9 @@ async def codex_action(config, prompt, cameras, *, response_type=PoseAction,
                 returned = item.get('item') or {}
                 if returned.get('type') == 'reasoning' and isinstance(returned.get('text'), str): reasoning.append(returned['text'])
             content = output.read_text(encoding='utf-8') if output.exists() else None
-            model_output({'provider': 'codex', 'model': config.model, 'content': content, 'usage': usage,
-                          'returned_reasoning': '\n\n'.join(reasoning) or None})
+            if content or usage is not None or reasoning:
+                model_output({'provider': 'codex', 'model': config.model, 'content': content, 'usage': usage,
+                              'returned_reasoning': '\n\n'.join(reasoning) or None})
             return content, usage
         try:
             stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), config.timeout_s)

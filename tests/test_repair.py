@@ -14,6 +14,7 @@ import httpx
 
 from server import repair, runlog
 from server.agent import api_action
+from pydantic import ValidationError
 
 REGRESSION = """import unittest
 from server.agent import response_value
@@ -75,6 +76,51 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         path=self.root/'server/agent.py';path.write_text('# user change\n')
         with self.assertRaisesRegex(ValueError,'其他操作'):self.controller.apply()
         self.assertEqual(path.read_text(),'# user change\n')
+
+    async def test_long_coding_timeout_is_configurable_and_elapsed_time_survives_failure(self):
+        self.controller.configure(repair.RepairConfig(timeout_s=900))
+        with self.assertRaises(ValidationError): repair.RepairConfig(timeout_s=1)
+        # Main robot call limits are independent from the dedicated coding task.
+        from server.agent import AgentConfig
+        with self.assertRaises(ValidationError): AgentConfig(timeout_s=900)
+        entered=asyncio.Event();release=asyncio.Event()
+        async def boundary(config,*args,**kwargs):
+            self.assertEqual(config.timeout_s,900)
+            entered.set();await release.wait();raise TimeoutError()
+        with patch('server.repair.codex_action',boundary),patch('server.repair.validate_agent_access'):
+            await self.controller.start(repair.RepairStart(description='slow diagnosis'))
+            await entered.wait()
+            before=self.controller.snapshot();await asyncio.sleep(.02)
+            during=self.controller.snapshot()
+            self.assertTrue(during['active']);self.assertEqual(during['timeout_s'],900)
+            self.assertGreater(during['elapsed_s'],before['elapsed_s'])
+            release.set();await self.controller.task
+        finished=self.controller.snapshot()
+        self.assertFalse(finished['active']);self.assertEqual(finished['status'],'error')
+        self.assertEqual(finished['message'],'TimeoutError')
+        self.assertGreaterEqual(finished['elapsed_s'],during['elapsed_s'])
+        self.assertEqual(finished['elapsed_s'],self.controller.snapshot()['elapsed_s'])
+
+    async def test_diagnostic_context_keeps_actual_error_and_output_without_duplicated_reasoning(self):
+        source=runlog.RunLog('agent',{'model':'fixture','provider':'compatible'})
+        response={'status':'move','type':'json_object','explanation':'bad response fixture-key'}
+        for i in range(4):
+            source.write('model_output',{'choices':[{'finish_reason':'stop','content':json.dumps(response),
+                'returned_reasoning':'long-reasoning '*10000}], 'usage':{'completion_tokens':100}})
+            source.write('inference',{'status':'error','reasoning':{'text':'long-reasoning '*10000},
+                'public_text':json.dumps(response),'usage':{'completion_tokens':100},'error':'extra forbidden type'})
+        message='error-head '+('x'*15000)+' error-tail fixture-key'
+        source.write('error',{'message':message});source.finish({'status':'error','message':'extra forbidden type'})
+        original=source.path.read_bytes()
+        context=repair.source_context(source.id,'',['fixture-key'])
+        encoded=json.dumps(context,ensure_ascii=False)
+        self.assertEqual(len(context['recent_events']),6)
+        self.assertLess(len(encoded),13000)
+        self.assertNotIn('long-reasoning',encoded);self.assertNotIn('fixture-key',encoded)
+        self.assertIn('json_object',encoded);self.assertIn('error-head',encoded);self.assertIn('error-tail',encoded)
+        for event in context['recent_events']:json.loads(event['diagnostic_excerpt'])
+        self.assertEqual(source.path.read_bytes(),original)
+        self.assertEqual(repair.source_context(None,'manual diagnosis')['recent_events'],[])
 
     async def test_regression_that_passes_original_is_not_accepted_as_a_fix(self):
         result=proposal();result.edits[-1].after=REGRESSION.replace("'correct'","'wrong'")
