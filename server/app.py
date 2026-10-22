@@ -34,6 +34,7 @@ from .runlog import list_runs, run_folder
 from .analysis import analyze_run, analyze_experiments
 from .run_management import rename_run, delete_run, restore_run, batch_delete_runs, RunInUseError
 from .model_capabilities import discover_model_capabilities
+from .pricing import catalog as price_catalog
 from .artifacts import MethodRecipe, register_method, list_methods, get_method, verify_method
 from .composition import CompositionController, CompositionStart
 from .research import (ResearchProtocol, ResearchExperiment, ResearchController, register_protocol,
@@ -256,7 +257,9 @@ async def lifespan(app):
     if not ready or worker.failure:
         worker.shutdown.set()
         raise RuntimeError(worker.failure or 'MuJoCo 初始化超时。')
-    yield
+    await price_catalog.start()
+    try: yield
+    finally: await price_catalog.close()
     await stop_research()
     await comparison.stop()
     await policy.stop()
@@ -450,6 +453,17 @@ async def comparison_csv():
 @app.get('/api/runs')
 async def runs(limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0), deleted: bool = False):
     return list_runs(limit=limit, offset=offset, deleted=deleted)
+
+
+@app.get('/api/pricing')
+async def pricing_status():
+    return price_catalog.status()
+
+
+@app.post('/api/pricing/refresh')
+async def refresh_pricing(request: Request):
+    local_request(request)
+    return await price_catalog.refresh(force=True)
 
 
 class RunRename(BaseModel):

@@ -1,11 +1,14 @@
 """Read-only analysis of actual returned calls; missing historical data stay missing."""
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import math
 
 from .runlog import LIVE_RUNS, list_runs, run_folder, live_snapshot
 from .run_management import record_labels
+from .pricing import estimate_quote
+from .costing import calculate_call_cost, aggregate_costs
 from .telemetry import reasoning_text, response_text, usage_tokens, effective_reasoning
 
 TOKEN_FIELDS = ('input_tokens', 'output_tokens', 'reasoning_tokens', 'total_tokens')
@@ -94,15 +97,28 @@ def analyze_run(run_id, *, _ancestors=()):
             action = actions.get(number, {})
             usage = raw.get('usage') if raw.get('usage') is not None else action.get('usage')
             calls[str(index)] = {'call_id': 'legacy-' + str(index), 'round': number, 'started_at': None,
+                'response_at': event.get('timestamp'),
                 'phase': 'legacy_provider_output', 'provider': data.get('provider', result.get('provider')),
                 'model': data.get('model', result.get('model')), 'reasoning_effort': None,
                 'status': 'returned', 'public_text': response_text(data), 'reasoning': reasoning_text(data),
                 'usage': usage, **usage_tokens(usage), 'inference_s': _number(data.get('latency_s', action.get('latency_s'))),
                 'error': None, 'response_returned': True, 'legacy': True}
     ordered = sorted(calls.values(), key=lambda call: (call.get('round') or 0, call.get('started_at') or '', call['call_id']))
+    recipe = result.get('recipe') or {}
+    fallback_config = recipe.get('agent') or recipe.get('policy') or result.get('settings') or {}
     for call in ordered:
         for field in (*TOKEN_FIELDS, 'inference_s'): call[field] = _number(call.get(field))
         call.setdefault('reasoning', {'availability': 'unavailable', 'text': None, 'source': None})
+        if not isinstance(call.get('cost'), dict) or call['cost'].get('status') == 'unavailable':
+            recorded_cost = call.get('cost')
+            saved_price = call.get('pricing')
+            quote = saved_price if isinstance(saved_price, dict) and saved_price.get('status') in ('ready', 'stale') else estimate_quote(
+                {**fallback_config, 'provider': call.get('provider') or result.get('provider') or fallback_config.get('provider', fallback_config.get('kind')),
+                 'model': call.get('model') or result.get('model') or fallback_config.get('model')})
+            call['cost'] = calculate_call_cost(call, quote)
+            if isinstance(recorded_cost, dict) and quote.get('basis') == 'current_price_estimate':
+                call['recorded_cost'] = recorded_cost
+                call['cost']['warnings'].append('调用时未获得可用报价；此处按当前官方价格补估，原费用记录仍保留在 recorded_cost 和原始日志中。')
     rows = result.get('rows') or [event['data'] for event in events if event.get('event') == 'trial_result']
     children = []; child_analyses = []; seen = set()
     for row in rows:
@@ -133,12 +149,30 @@ def analyze_run(run_id, *, _ancestors=()):
     elapsed = _number(result.get('elapsed_s', result.get('wall_time_s', (result.get('metrics') or {}).get('wall_time_s'))))
     ended_at = result.get('ended_at')
     if elapsed is None and ended_at: elapsed = _elapsed(started_at, ended_at)
+    costs = [child['cost'] for child in child_analyses] if result.get('kind') in BATCH_KINDS else [call['cost'] for call in ordered]
+    for child in children if result.get('kind') in BATCH_KINDS else []:
+        if child.get('analysis_error'):
+            costs.append({'status': 'unavailable', 'total_calls': 0, 'missing_calls': 1, 'call_count_incomplete': True,
+                          'warnings': ['部分子实验无法读取，费用仅包含已读取的子实验；无法给出完整总额或上界。']})
+    expected_calls = (result.get('timing') or {}).get('inference_calls', (result.get('metrics') or {}).get('inference_count', 0))
+    incomplete_events = bool(issues) or (result.get('kind') not in BATCH_KINDS and isinstance(expected_calls, int) and expected_calls > len(ordered))
+    if incomplete_events:
+        saved_cost = result.get('cost')
+        if isinstance(saved_cost, dict) and saved_cost.get('total_calls', 0) > 0:
+            cost = deepcopy(saved_cost)
+            cost.setdefault('warnings', []).append('部分调用事件缺失或损坏；总费用保留已归档的费用快照，逐轮明细可能不完整。')
+        else:
+            costs.append({'status': 'unavailable', 'total_calls': 0, 'missing_calls': 1, 'call_count_incomplete': True,
+                          'warnings': ['调用事件缺失或损坏，无法确认完整费用；未将缺失调用按零计算。']})
+            cost = aggregate_costs(costs)
+    else:
+        cost = aggregate_costs(costs)
     return {'run_id': run_id, **record_labels({**result, 'run_id': run_id, 'started_at': started_at}),
         'kind': result.get('kind'), 'status': result.get('status', 'interrupted'),
         'message': result.get('message'), 'task': result.get('task'), 'model': model, 'reasoning': effort,
         'started_at': started_at, 'ended_at': ended_at, 'elapsed_s': elapsed,
         'metrics': result.get('metrics'), 'video': (result.get('artifacts') or {}).get('video'),
-        'total': totals, 'rounds': ordered, 'children': children, 'trials': rows,
+        'total': totals, 'rounds': ordered, 'children': children, 'trials': rows, 'cost': cost,
         'issues': issues, 'aggregation_scope': 'children_once' if result.get('kind') in BATCH_KINDS else 'actual_provider_calls',
         'inference_semantics': '端到端服务调用耗时，含网络与排队；并行调用逐请求累计，可能超过墙钟时间。',
         'usage_complete_semantics': '每次调用均返回有效 input_tokens 与 output_tokens；reasoning_tokens 可独立缺失。'}

@@ -6,6 +6,7 @@ let context, catalog, configs={}, lastGeneration=-1, lastRows='', lastPolicy='',
 let selectedResult=null,resultsGeneration=0,detailGeneration=0,analysisGeneration=0,analysisCatalogGeneration=0,hasAnalysisResults=false,resultMutationPending=false;
 const checkedResults=new Set();
 let batchDeleteIds=[];
+let pricingState=null,pricingLoading=false,pricingRefreshing=false,lastPricingCheck=0,pricingGeneration=0,pricingError='',pricingErrorIsManual=false;
 const RESULTS_PAGE_SIZE=100;
 
 async function request(path,payload,method=payload===undefined?'GET':'POST'){
@@ -55,7 +56,7 @@ function updateSceneInfo(){if(!catalog)return;const scene=catalog.scenes.find(s=
 function updateCompareCriterion(){if(catalog)$('#comparison-criterion').textContent=catalog.tasks[$('#compare-task').value]?.criterion||'';}
 function fillTask(){if(!catalog)return;const instruction=catalog.tasks[$('#task-select').value].instruction;$('#command').value=instruction;$('#policy-task').value=instruction;}
 function updatePolicySummary(){const kind=$('#policy-kind').value;const config=configs[kind];$('#policy-model-name').textContent=config?.model||names[kind];$('#policy-model-note').textContent=kind==='smolvla'?'官方 SmolVLA 直接预测动作块。默认映射为 SO-101，基础权重未在当前场景微调。':`${names[kind]} 通过你配置的推理服务预测动作。${config?.endpoint?'接口已配置。':'尚未配置接口。'}`;}
-function changePage(page){currentPage=page;for(const name of ['workspace','rsi','comparison','logs'])$(`#${name}-view`).hidden=name!==page;document.querySelectorAll('[data-page]').forEach(button=>button.classList.toggle('selected',button.dataset.page===page));if(page==='logs')refreshLogs();}
+function changePage(page){currentPage=page;for(const name of ['workspace','rsi','comparison','logs'])$(`#${name}-view`).hidden=name!==page;document.querySelectorAll('[data-page]').forEach(button=>button.classList.toggle('selected',button.dataset.page===page));if(page==='logs'){refreshLogs();refreshPricingStatus();}}
 
 export async function initResearch(callbacks){
   context=callbacks;
@@ -89,6 +90,7 @@ export async function initResearch(callbacks){
   $('#select-visible-results').addEventListener('change',event=>{for(const run of filteredResults())if(!resultIsActive(run)&&!run.deleted_at){if(event.target.checked)checkedResults.add(run.run_id);else checkedResults.delete(run.run_id);}renderRunList();});
   $('#delete-selected-results').addEventListener('click',openBatchResultDelete);
   $('#result-batch-delete-form').addEventListener('submit',deleteSelectedResults);
+  $('#refresh-pricing').addEventListener('click',()=>refreshPricingStatus(true));
   $('#rename-result').addEventListener('click',openResultRename);
   $('#delete-result').addEventListener('click',openResultDelete);
   $('#restore-result').addEventListener('click',restoreResult);
@@ -161,6 +163,7 @@ export function renderResearch(state){
   if(rowsKey!==lastRows){lastRows=rowsKey;renderComparison(comparison.rows||[]);}
   const keys=['agent','policy','comparison','research','experiment'],runStates=JSON.stringify(keys.map(key=>[state[key]?.run_id,state[key]?.status,state[key]?.active]));
   if(currentPage==='logs'&&!refreshingResults&&Date.now()-lastResultRefresh>3000&&(runStates!==lastRunStates||keys.some(key=>state[key]?.active))){lastRunStates=runStates;refreshLogs();}
+  if(currentPage==='logs'&&Date.now()-lastPricingCheck>(pricingState?.refreshing?3000:60000))refreshPricingStatus();
 }
 
 function renderComparison(rows){
@@ -226,7 +229,7 @@ async function showRun(run){
 function clearResult(){
   selectedRun='';selectedResult=null;detailGeneration++;$('#log-detail-title').textContent='选择一条实验结果';$('#log-detail-id').textContent='';$('#log-download').hidden=true;$('#result-actions').hidden=true;$('#result-management-note').hidden=true;
   for(const selector of ['#result-summary','#result-calls','#result-children','#result-task-text'])$(selector).replaceChildren();
-  for(const selector of ['#result-round-charts','#result-chart-note','#result-outcome-message','#result-data-issues'])$(selector).hidden=true;
+  for(const selector of ['#result-round-charts','#result-chart-note','#result-outcome-message','#result-data-issues','#result-cost-panel'])$(selector).hidden=true;
   renderRunVideo($('#log-video'),'',null);$('#result-description').textContent='接口未返回的用量与推理文本会标记缺失，不推测补齐。';$('#log-detail').textContent='运行记录将在这里展示。';
 }
 function renderResultActions(run){
@@ -281,12 +284,64 @@ async function deleteSelectedResults(event){
     context.toast(failed.length?`${message}具体原因见结果列表上方。`:message);
   }catch(error){$('#result-batch-delete-error').textContent=error.message;resultError(error);}finally{setResultMutationPending(false);}
 }
+function moneyText(value){
+  const amount=metric(value);if(amount==null)return '不可估算';
+  return amount>0&&amount<1e-8?`USD ${amount.toExponential(3)}`:`USD ${amount.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:8})}`;
+}
+function localPriceTime(value){if(!value)return '未记录';const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString('zh-CN',{hour12:false});}
+function priceSourceLink(url,label='官方价格页 ↗'){
+  if(typeof url!=='string'||!/^https?:\/\//i.test(url))return '<span>未提供来源链接</span>';
+  return `<a class="text-button" href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(label)}</a>`;
+}
+function costAmountMarkup(cost){
+  const amount=metric(cost?.amount_usd),known=metric(cost?.known_amount_usd),reference=metric(cost?.reference_amount_usd),minimum=metric(cost?.amount_min_usd),maximum=metric(cost?.amount_max_usd);
+  const cash=amount!=null?moneyText(amount):minimum!=null&&maximum!=null?`${moneyText(minimum)} ～ ${moneyText(maximum)}`:cost?.status==='partial'&&known>0?`${moneyText(known)}（已知部分）`:'不可完整估算';
+  return `<div><small>API 费用估算</small><strong>${escape(cash)}</strong></div>${reference==null&&!cost?.has_reference&&cost?.status!=='reference'?'':`<div class="cost-reference"><small>Codex 订阅 · API 等价参考</small><strong>${escape(moneyText(reference))}</strong><span>用于对照 API 用量成本，不代表订阅实际扣费。</span></div>`}`;
+}
+function costBreakdownMarkup(rows){
+  if(!rows?.length)return '<p class="research-note">没有可展示的计价组成。</p>';
+  const components={input:'输入',input_tokens:'输入',uncached_input:'未缓存输入',input_uncached:'未缓存输入',cached_input:'缓存命中输入',input_cached:'缓存命中输入',cache_read:'缓存读取',cache_creation:'缓存写入',cache_write:'缓存写入',output:'输出',output_tokens:'输出',reasoning:'推理'};
+  return `<div class="result-table-wrap"><table class="result-table cost-breakdown-table"><thead><tr><th>组成</th><th>Tokens</th><th>USD / 百万 tokens</th><th>估算金额 / USD</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${escape(components[row.component]||row.component||'未记录')}</td><td>${numberText(row.tokens)}</td><td>${escape(metric(row.rate_per_million)==null?'未记录':String(row.rate_per_million))}</td><td>${escape(moneyText(row.amount_usd))}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function renderResultCost(cost){
+  $('#result-cost-panel').hidden=false;const state={complete:'全部调用已估算',partial:'费用范围或部分估算',unavailable:'费用不可估算',reference:'API 等价参考'}[cost?.status]||'费用未记录';
+  $('#result-cost-amounts').innerHTML=costAmountMarkup(cost);
+  const basis={recorded_snapshot:'按每次调用保存的价格快照计算。',current_price_estimate:'历史记录未保存价格快照，按当前可用价格估算；不代表实验当时的价格。',mixed:'包含已保存的价格快照与按当前价格补算的历史调用。'}[cost?.basis]||'尚无可用计价依据。';
+  const types=[['billable_calls','API 调用'],['reference_calls','订阅参考调用'],['local_calls','本地策略调用']].filter(([key])=>metric(cost?.[key])!=null).map(([key,label])=>`${label} ${numberText(cost[key])} 次`).join(' / ');
+  const calls=cost?.call_count_incomplete?`已计价 ${numberText(cost?.priced_calls)} 次 / 调用总数不完整（已知至少 ${numberText(cost?.total_calls)} 次） · 存在无法读取的调用记录`:`精确计价 ${numberText(cost?.priced_calls)} / ${numberText(cost?.total_calls)} 次调用${metric(cost?.missing_calls)==null?'':` · 未精确计价 ${numberText(cost.missing_calls)} 次`}`;
+  $('#result-cost-note').textContent=`${state} · ${calls}。${types?`${types}。`:''}${basis}费用按官方标价与接口返回用量估算，实际账单以服务商为准。`;
+  $('#result-cost-warnings').replaceChildren();for(const warning of cost?.warnings||[]){const item=document.createElement('li');item.textContent=warning;$('#result-cost-warnings').append(item);}$('#result-cost-warnings').hidden=!cost?.warnings?.length;
+  $('#result-cost-breakdown').innerHTML=costBreakdownMarkup(cost?.breakdown);
+  $('#result-price-snapshots').innerHTML=cost?.price_sources?.length?cost.price_sources.map(source=>`<p class="research-note">${escape(source.provider||'接口未记录')} / ${escape(source.model||'模型未记录')} · 价格更新时间（本地）${escape(localPriceTime(source.updated_at))} · ${priceSourceLink(source.source_url)}</p>`).join(''):'<p class="research-note">本实验没有可追溯的价格来源记录。</p>';
+  renderPricingStatus();
+}
+function callCostMarkup(cost){
+  if(!cost)return '<div class="call-cost"><strong>费用未记录</strong></div>';
+  const status={complete:'费用估算',partial:'费用范围或部分估算',unavailable:'费用不可估算',reference:'API 等价参考'}[cost.status]||'费用估算';
+  const pricing=cost.pricing||{},basis={recorded_snapshot:'调用时价格快照',current_price_estimate:'按当前可用价格补算',mixed:'快照与当前价格混合'}[cost.basis]||'';
+  return `<div class="call-cost"><strong>${escape(status)}</strong><div class="cost-amounts">${costAmountMarkup(cost)}</div>${basis||pricing.updated_at?`<p>${escape(basis)}${pricing.updated_at?` · 价格更新时间（本地）${escape(localPriceTime(pricing.updated_at))}`:''}</p>`:''}${pricing.source_url?priceSourceLink(pricing.source_url):''}${cost.warnings?.length?`<ul>${cost.warnings.map(warning=>`<li>${escape(warning)}</li>`).join('')}</ul>`:''}</div>`;
+}
+function renderPricingStatus(){
+  const busy=pricingRefreshing||pricingState?.refreshing;$('#refresh-pricing').disabled=!!busy;$('#refresh-pricing').textContent=busy?'正在更新官方价格…':'刷新官方价格';
+  const interval=metric(pricingState?.refresh_interval_s),schedule=interval==null?'价格更新周期由服务端管理':`服务端每 ${numberText(interval/60)} 分钟自动更新`;
+  $('#pricing-status').textContent=pricingLoading&&!pricingState?'正在读取价格来源状态…':`${schedule} · 最近价格更新（本地）${localPriceTime(pricingState?.updated_at)}${busy?' · 更新中':''}`;
+  $('#pricing-error').textContent=pricingError;$('#pricing-error').hidden=!pricingError;
+  $('#pricing-providers').innerHTML=pricingState?.providers?.length?pricingState.providers.map(source=>`<article class="pricing-provider"><div><strong>${escape(({openai:'OpenAI',anthropic:'Anthropic',deepseek:'DeepSeek'})[source.provider]||source.provider)}</strong><span class="result-pill${source.status==='ready'?' success':''}">${escape({ready:'价格可用',stale:'保留上次价格',unavailable:'价格不可用'}[source.status]||source.status)}</span></div><p>${priceSourceLink(source.source_url)} · ${numberText(source.model_count)} 个模型</p><p>价格更新（本地）${escape(localPriceTime(source.updated_at))}<br>最近尝试（本地）${escape(localPriceTime(source.last_attempt_at))}</p>${source.error?`<p class="pricing-source-error">${escape(source.error)}</p>`:''}</article>`).join(''):'<p class="research-note">尚未取得官方价格来源状态。无法匹配的模型或用量会保留为费用缺失。</p>';
+}
+async function refreshPricingStatus(manual=false){
+  if(pricingRefreshing||(!manual&&pricingLoading))return;const generation=++pricingGeneration;lastPricingCheck=Date.now();if(manual){pricingRefreshing=true;pricingError='';pricingErrorIsManual=false;}else pricingLoading=true;renderPricingStatus();
+  try{const data=await request(manual?'pricing/refresh':'pricing',manual?{}:undefined);if(generation!==pricingGeneration)return;pricingState=data;if(manual||!pricingErrorIsManual)pricingError='';renderPricingStatus();
+    if(manual){if(selectedResult)await showRun(selectedResult);const incomplete=data.providers?.some(source=>source.status!=='ready');context.toast(incomplete?'价格刷新结束，部分来源保留旧价格或暂不可用，详见来源状态。':'官方价格已刷新，当前实验费用已重新读取。');}
+  }catch(error){if(generation===pricingGeneration){if(manual||!pricingErrorIsManual){pricingError=`价格状态更新失败：${error.message}${pricingState?'；仍显示上次取得的来源状态。':''}`;pricingErrorIsManual=manual;}if(manual)context.toast(pricingError);}}
+  finally{if(generation===pricingGeneration){pricingLoading=false;pricingRefreshing=false;renderPricingStatus();}}
+}
 function renderResultAnalysis(analysis,run){
   const total=analysis.total||{},rounds=analysis.rounds||[],wall=metric(analysis.elapsed_s)??metric(run.metrics?.wall_time_s),state=statuses[analysis.status]||analysis.status;
   $('#result-description').textContent=`${runKinds(analysis.kind||run.kind)} · ${analysis.model||resultModel(run)||'模型未记录'} · 推理强度 ${analysis.reasoning||'未记录'} · ${state||'状态未记录'}${analysis.started_at?` · 开始 ${analysis.started_at}`:''}`;
   $('#result-task-text').textContent=analysis.task||run.task||'';const message=analysis.message||analysis.error||run.message||'';$('#result-outcome-message').textContent=typeof message==='string'?message:JSON.stringify(message);$('#result-outcome-message').hidden=!message;$('#result-outcome-message').classList.toggle('error',['error','failed','blocked'].includes(analysis.status||run.status));
   $('#result-data-issues').textContent=(analysis.issues||[]).length?`记录读取提示：${analysis.issues.join('；')}`:'';$('#result-data-issues').hidden=!analysis.issues?.length;
   $('#result-summary').innerHTML=[['完整墙钟',secondsText(wall)],['模型调用次数',numberText(total.calls)],['总 tokens',numberText(total.total_tokens)],['输出 tokens',numberText(total.output_tokens)],['累计调用耗时',secondsText(total.inference_s)],['用量记录',total.usage_complete?'完整':'存在缺失']].map(([label,value])=>`<div><small>${escape(label)}</small><strong>${escape(value)}</strong></div>`).join('');
+  renderResultCost(analysis.cost);
   const points=rounds.map((row,index)=>({label:`第 ${row.round??'?'} 轮 / 调用 ${row.call_id??index+1}`,shortLabel:`${row.round??'?'} / ${index+1}`,value:row.output_tokens}));
   $('#result-round-charts').hidden=false;$('#result-chart-note').hidden=false;$('#result-token-chart').innerHTML=metricChartMarkup(points,'每轮接口输出 tokens');$('#result-time-chart').innerHTML=metricChartMarkup(points.map((point,index)=>({...point,value:rounds[index].inference_s})),'每轮模型调用耗时');
   const open=new Set([...document.querySelectorAll('#result-calls details[open]')].map(details=>details.dataset.call));
@@ -296,7 +351,7 @@ function renderResultAnalysis(analysis,run){
     const detail=document.createElement('details');detail.className='result-call';detail.dataset.call=String(row.call_id??index);detail.open=open.has(detail.dataset.call);
     const phase={agent:'视觉 Agent 调用',agent_inference:'视觉 Agent 调用',policy:'策略模型调用',policy_inference:'策略模型调用',planning:'主 Agent 规划',decision:'决策器调用',legacy_provider_output:'历史接口输出'}[row.phase]||row.phase||'模型调用',callStatus={complete:'调用完成',returned:'已返回',running:'调用中',cancelled:'已取消',error:'调用失败',interrupted:'服务中断'}[row.status]||row.status||'状态未记录';
     detail.innerHTML=`<summary><strong>第 ${escape(row.round??'?')} 轮 · ${escape(phase)}</strong><span>${secondsText(row.inference_s)} · 输出 ${numberText(row.output_tokens)} tokens · ${escape(callStatus)}</span></summary><div class="call-meta">${escape(row.provider||'接口未记录')} / ${escape(row.model||'模型未记录')} · 推理强度 ${escape(row.reasoning_effort||analysis.reasoning||'未记录')} · 输入 ${numberText(row.input_tokens)} / 输出 ${numberText(row.output_tokens)} / 推理 ${numberText(row.reasoning_tokens)} tokens</div><h4>接口公开输出 / 摘要</h4><pre>${escape(typeof row.public_text==='string'?row.public_text:row.public_text==null?'服务未返回可展示的公开文本。':JSON.stringify(row.public_text,null,2))}</pre><h4>服务返回的推理文字 / 摘要</h4><pre>${escape(row.reasoning?.availability==='returned'?row.reasoning.text||'返回字段为空。':'服务未返回可展示的推理文字或摘要。')}</pre>${row.error?`<p class="call-error">${escape(typeof row.error==='string'?row.error:JSON.stringify(row.error))}</p>`:''}`;
-    $('#result-calls').append(detail);
+    detail.insertAdjacentHTML('beforeend',callCostMarkup(row.cost));$('#result-calls').append(detail);
   }
   $('#result-children').replaceChildren();if(analysis.children?.length){const label=document.createElement('p');label.className='research-note';label.textContent='本实验的子试验结果（包括未生成独立运行编号的失败或取消）：';$('#result-children').append(label);for(const child of analysis.children){const row=typeof child==='string'?{run_id:child}:child||{},entry=document.createElement('article');entry.className='result-child';const title=document.createElement('strong');title.textContent=[row.display_name||row.method_name||names[row.method]||row.method||row.task||'子试验',row.seed==null?'':`种子 ${row.seed}`,statuses[row.status||row.analysis_status]||row.status||row.analysis_status||'',row.deleted_at?'已移入回收站':''].filter(Boolean).join(' · ');entry.append(title);const messages=[row.message,row.error,row.analysis_error].filter(Boolean);if(messages.length){const reason=document.createElement('p');reason.textContent=messages.map(value=>typeof value==='string'?value:JSON.stringify(value)).join('；');entry.append(reason);}if(row.run_id){const button=document.createElement('button');button.type='button';button.className='text-button';button.dataset.resultRun=row.run_id;button.textContent=`查看 ${row.run_id}`;entry.append(button);}else{const note=document.createElement('small');note.textContent='未生成独立运行编号，状态和错误由本批实验保留。';entry.append(note);}$('#result-children').append(entry);}}
 }

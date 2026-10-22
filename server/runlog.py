@@ -44,6 +44,7 @@ class RunLog:
         self._active_inference = {}
         self._inference_s = 0.
         self._inference_count = 0
+        self._call_costs = []
         self.metadata.setdefault('started_at', self.started_at)
         self._lock = RLock()
         self._trajectory = None
@@ -81,6 +82,7 @@ class RunLog:
         with self._lock:
             self._active_inference.pop(record['call_id'], None)
             self._inference_s += record['inference_s']
+            if isinstance(record.get('cost'), dict): self._call_costs.append(record['cost'])
             self.write('inference', record)
 
     def timing_snapshot(self):
@@ -213,6 +215,22 @@ class RunLog:
             if isinstance(result.get('timing'), dict):
                 timing['timing'].update({key: value for key, value in result['timing'].items() if key != 'elapsed_wall_s'})
             result = {**result, **timing, 'artifacts': self.artifacts}
+            from .costing import aggregate_costs
+            costs = self._call_costs
+            if self.metadata.get('kind') in ('comparison', 'research_experiment'):
+                costs = []; seen = set()
+                for row in result.get('rows') or self.metadata.get('rows') or []:
+                    child_id = row.get('run_id')
+                    if not child_id or child_id in seen: continue
+                    seen.add(child_id)
+                    try:
+                        child_summary = json.loads((run_folder(child_id) / 'summary.json').read_text(encoding='utf-8'))
+                        if isinstance(child_summary.get('cost'), dict): costs.append(child_summary['cost'])
+                        else: raise ValueError('子实验未记录调用时价格。')
+                    except (OSError, ValueError) as exc:
+                        costs.append({'status': 'unavailable', 'total_calls': 0, 'missing_calls': 1, 'call_count_incomplete': True,
+                                      'warnings': [f'子实验 {child_id} 费用尚未归档：{exc}']})
+            result['cost'] = aggregate_costs(costs)
             if cleanup_errors: result['cleanup_errors'] = cleanup_errors
             try: self.write('finish', result)
             except OSError as exc:

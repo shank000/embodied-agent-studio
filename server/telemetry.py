@@ -109,15 +109,19 @@ def track_inference(phase):
         @wraps(function)
         async def traced(config, *args, **kwargs):
             from .runlog import CURRENT_LOG
+            from .pricing import quote_for_call
+            from .costing import calculate_call_cost
             log = CURRENT_LOG.get()
             if log is None: return await function(config, *args, **kwargs)
             settings = config.model_dump(exclude={'api_key'}) if hasattr(config, 'model_dump') else dict(config)
+            pricing = await quote_for_call(settings)
             effort = effective_reasoning(settings)
             current_phase = 'planning' if getattr(kwargs.get('response_type'), '__name__', '') == 'PlannerOutput' else phase
             record = {'call_id': uuid4().hex, 'round': log.current_round, 'phase': current_phase,
                       'provider': settings.get('provider', settings.get('kind')), 'model': settings.get('model'),
                       'reasoning_effort': effort, 'configured_reasoning': settings.get('reasoning'), 'started_at': utc_now(),
                       'status': 'running', 'public_text': None, 'response_returned': False, 'usage': None,
+                      'pricing': pricing,
                       'reasoning': {'availability': 'unavailable', 'text': None, 'source': None}, 'error': None}
             started = time.monotonic()
             token = CURRENT_CALL.set(record)
@@ -137,6 +141,7 @@ def track_inference(phase):
                 record.update(inference_s=time.monotonic() - started, ended_at=utc_now())
                 try:
                     record.update(usage_tokens(record['usage']))
+                    record['cost'] = calculate_call_cost(record, pricing)
                     log.end_inference(record)
                 finally: CURRENT_CALL.reset(token)
         return traced
