@@ -9,10 +9,13 @@ EmbodiWorks 的界面、API 与仿真共用一份源码。启动器会按系统�
 | 环境 | 已验证 | 尚未验证 |
 | --- | --- | --- |
 | Windows | 工作台、真实模型、图像渲染、实验记录与本地接口回归 | 各供应商与各型号的真实账号兼容性需用户验证 |
-| Ubuntu 26.04 / WSL2 x86_64 | Python 3.13.15、MuJoCo 3.13.0；Panda/SO-101 动力学、960×640 原生画面、同步三路相机、前端状态与启动器测试 | 原生 Linux 发行版全套端到端、EGL/OSMesa、CUDA 策略与视频流程 |
-| macOS | 已适配虚拟环境路径、npm Codex 原生程序发现 | Mac 实机安装、CGL 渲染与完整工作台流程 |
+| Ubuntu 26.04 / WSL2 x86_64 | Python 3.13.15、MuJoCo 3.13.0；Panda/SO-101 动力学、960×640 原生画面、同步三路相机、前端状态与启动器测试 | EGL、CUDA 策略与视频完整流程 |
+| Ubuntu GitHub runner | 安装、构建、前端与启动器回归、真实模型运动；OSMesa 原生图像、暂停、换视角、单步、切换模型与恢复运行 | 完整实验与外部模型账号流程 |
+| macOS arm64 GitHub runner | 安装、构建、前端与启动器回归、CLI 路径、Panda/SO-101 真实模型运动 | Mac 真机 CGL 渲染、策略与完整工作台流程 |
 
-Linux 本轮使用 WSLg 的 GLFW，OpenGL 实际为 llvmpipe 软件渲染；这项验证不能当作 NVIDIA GPU 性能测试。仓库的跨平台 CI 会在 Windows、Linux 和 macOS 运行构建与原生渲染 smoke；具体结果以该次 workflow 为准。
+WSL2 本轮使用 WSLg 的 GLFW，OpenGL 实际为 llvmpipe 软件渲染；这项验证不能当作 NVIDIA GPU 性能测试。CI 分为三平台基础检查和独立的 Linux OSMesa 原生渲染检查。
+
+本轮 Windows 标准 runner 报告 WGL 驱动不可用，macOS 标准 runner 在 CGL 选择像素格式时报告 `invalid pixel format`（[原始检查记录](https://github.com/shank000/embodied-agent-studio/actions/runs/39941573370)）。因此 CI 不把它们当作图像验收环境，也不通过改测试或静默切换后端掩盖错误；Windows 图像已在本机验证，Mac 原生图像仍需有可用 OpenGL 的真机确认。
 
 ## 1. 准备工具与源码
 
@@ -90,7 +93,7 @@ MUJOCO_GL=osmesa npm start
 
 这两个变量只选择后端，不会自动安装驱动。在 Debian/Ubuntu，软件渲染所需系统库通常为 `libosmesa6`；EGL 依赖实际显卡驱动与容器 GPU 透传。不要通过静默更换后端掩盖图形初始化错误，先检查终端中的原始报错。依据：[MuJoCo Python 与渲染说明](https://mujoco.readthedocs.io/en/stable/python.html#rendering)。
 
-macOS 的本项目使用 `mujoco.Renderer` 离屏画面，经 CGL 创建上下文，不使用 `viewer.launch_passive`；该 viewer 对 `mjpython` 的要求不能直接套用到本工作台。Mac 完整运行仍待实机确认。
+macOS 的本项目使用 `mujoco.Renderer` 离屏画面，经 CGL 创建上下文，不使用 `viewer.launch_passive`；该 viewer 对 `mjpython` 的要求不能直接套用到本工作台。MuJoCo 的 [CGL 实现](https://github.com/google-deepmind/mujoco/blob/3.13.0/python/mujoco/cgl/__init__.py)请求硬件加速与多重采样像素格式，无法提供该格式的虚拟环境会初始化失败。Mac 完整运行仍待实机确认。
 
 ## 模型接入
 
@@ -130,4 +133,4 @@ npm test
 npm run build
 ```
 
-完整 Python 回归需要所有机器人资源，视频测试还需要 FFmpeg / ffprobe。普通测试不调用付费模型；`tests/live_agent_smoke.py` 只有显式运行才消耗模型额度。[跨平台 CI](../.github/workflows/platform-smoke.yml)只运行安装、构建、基础模型与渲染 smoke，不代表所有平台的全部功能已验收。
+完整 Python 回归需要所有机器人资源，视频测试还需要 FFmpeg / ffprobe。普通测试不调用付费模型；`tests/live_agent_smoke.py` 只有显式运行才消耗模型额度。[跨平台 CI](../.github/workflows/platform-smoke.yml)运行三平台基础检查和 Linux 渲染 smoke，不代表所有平台的全部功能已验收。

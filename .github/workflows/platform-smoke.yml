@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
-    name: ${{ matrix.os }} / Python 3.13 / Node 22
+  core:
+    name: Core / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -42,14 +42,6 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Enable Linux software rendering
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libosmesa6
-          echo 'MUJOCO_GL=osmesa' >> "$GITHUB_ENV"
-
       - name: Create project Python environment
         run: python -m venv .venv
 
@@ -74,5 +66,39 @@ jobs:
       - name: Check real robot motion
         run: node tools/python.mjs -m unittest tests.test_simulation.PhysicsTests.test_real_models_and_actuated_joint_motion -v
 
+  linux-rendering:
+    name: Native rendering / Linux OSMesa
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MUJOCO_GL: osmesa
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Fetch pinned Panda and SO-101 models
+        uses: actions/checkout@v7
+        with:
+          repository: google-deepmind/mujoco_menagerie
+          ref: 822c2d8f877dd166c5b7d3c9f7e3c3b6589473b7
+          path: vendor/mujoco_menagerie
+          sparse-checkout: |
+            franka_emika_panda
+            robotstudio_so101
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install software rendering and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libosmesa6
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+
       - name: Check native rendering and service controls
-        run: node tools/python.mjs -m unittest tests.test_simulation.NativeServiceTests.test_render_pause_single_step_model_switch_and_resume -v
+        run: .venv/bin/python -m unittest tests.test_simulation.NativeServiceTests.test_render_pause_single_step_model_switch_and_resume -v
