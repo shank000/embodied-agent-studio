@@ -19,7 +19,9 @@ class CodexExecutableTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='codex-lookup-')
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # Windows TEMP can contain an 8.3 alias (e.g. RUNNER~1), while the
+        # production lookup resolves paths to their long spelling.
+        self.root = Path(temporary.name).resolve()
         self.package = self.root / 'node_modules' / '@openai' / 'codex'
         self.addCleanup(patch.stopall)
         patch('server.agent.__file__', str(self.root / 'server' / 'agent.py')).start()
@@ -43,7 +45,7 @@ class CodexExecutableTests(unittest.TestCase):
             with self.subTest(system=system, machine=machine), \
                     patch('server.agent.sys.platform', system), patch('server.agent.platform.machine', return_value=machine):
                 native = self.native(self.package.parent / ('codex-' + package_name) / 'vendor', target, filename)
-                self.assertEqual(codex_executable(), str(native))
+                self.assertEqual(Path(codex_executable()).resolve(), native.resolve())
         self.which.assert_not_called()
 
     def test_nested_optional_package_and_bundled_vendor_layouts(self):
@@ -52,8 +54,10 @@ class CodexExecutableTests(unittest.TestCase):
             with self.subTest(vendor=vendor), patch('server.agent.sys.platform', 'linux'), \
                     patch('server.agent.platform.machine', return_value='x86_64'):
                 native = self.native(vendor, target, 'codex')
-                self.assertEqual(codex_executable(), str(native))
-                native.unlink()
+                try:
+                    self.assertEqual(Path(codex_executable()).resolve(), native.resolve())
+                finally:
+                    native.unlink()
 
     def test_global_npm_shims_resolve_native_program_without_a_shell(self):
         global_root = self.root / 'global'
@@ -62,7 +66,7 @@ class CodexExecutableTests(unittest.TestCase):
             shim = global_root / 'codex.cmd'
             self.which.side_effect = lambda name, **kwargs: str(shim) if Path(name).name == 'codex' else None
             native = self.native(package.parent / 'codex-win32-x64/vendor', 'x86_64-pc-windows-msvc', 'codex.exe')
-            self.assertEqual(codex_executable(), str(native))
+            self.assertEqual(Path(codex_executable()).resolve(), native.resolve())
         with patch('server.agent.sys.platform', 'darwin'), patch('server.agent.platform.machine', return_value='arm64'):
             entry = package / 'bin/codex.js'
             entry.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +74,7 @@ class CodexExecutableTests(unittest.TestCase):
             self.which.side_effect = None
             self.which.return_value = str(entry)
             native = self.native(package.parent / 'codex-darwin-arm64/vendor', 'aarch64-apple-darwin', 'codex')
-            self.assertEqual(codex_executable(), str(native))
+            self.assertEqual(Path(codex_executable()).resolve(), native.resolve())
 
     def test_absent_or_incomplete_install_has_an_actionable_error(self):
         with patch('server.agent.sys.platform', 'linux'), patch('server.agent.platform.machine', return_value='x86_64'):
@@ -101,7 +105,7 @@ class CodexExecutableTests(unittest.TestCase):
                 patch('server.agent.platform.machine', return_value='x86_64'), \
                 patch('server.agent.shutil.which', REAL_WHICH), \
                 patch.dict(os.environ, {'PATH': os.pathsep.join([str(foreign), str(native_dir)])}):
-            self.assertEqual(codex_executable(), str(native))
+            self.assertEqual(Path(codex_executable()).resolve(), native.resolve())
 
     def test_real_path_npm_shell_shim_resolves_current_os_or_reports_missing_package(self):
         directory = self.root / 'npm-bin'
@@ -117,7 +121,7 @@ class CodexExecutableTests(unittest.TestCase):
                 codex_executable()
             native = self.native(directory / 'node_modules/@openai/codex-linux-x64/vendor',
                                  'x86_64-unknown-linux-musl', 'codex')
-            self.assertEqual(codex_executable(), str(native))
+            self.assertEqual(Path(codex_executable()).resolve(), native.resolve())
 
 
 if __name__ == '__main__':

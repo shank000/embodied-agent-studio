@@ -1,11 +1,11 @@
 // Only Python's standard library is invoked; no server or simulator is started.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync} from 'node:fs';
+import {copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {venvPython} from '../tools/python.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -44,10 +44,35 @@ test('missing environment fails with setup instructions instead of using system 
     assert.equal(result.status, 1);
     assert.equal(result.stdout, '');
     assert.match(result.stderr, /Project Python environment not found:/);
-    assert.ok(result.stderr.includes(venvPython(temporary)));
+    assert.ok(result.stderr.includes(venvPython(realpathSync(temporary))));
     assert.match(result.stderr, /-m venv \.venv/);
     assert.match(result.stderr, /-m pip install -r requirements\.txt/);
   } finally {
     rmSync(temporary, {recursive:true, force:true});
   }
+});
+
+test('direct execution through a linked directory still reports a missing environment', () => {
+  const temporary = mkdtempSync(path.join(os.tmpdir(), 'workbench-launcher-linked-'));
+  try {
+    const project = path.join(temporary, 'project');
+    const linked = path.join(temporary, 'linked');
+    mkdirSync(path.join(project, 'tools'), {recursive:true});
+    copyFileSync(launcher, path.join(project, 'tools', 'python.mjs'));
+    symlinkSync(project, linked, process.platform === 'win32' ? 'junction' : 'dir');
+    const result = spawnSync(process.execPath, [path.join(linked, 'tools', 'python.mjs'), '-c', 'print("unexpected")'], {encoding:'utf8'});
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.ok(result.stderr.includes(venvPython(realpathSync(project))));
+  } finally {
+    rmSync(temporary, {recursive:true, force:true});
+  }
+});
+
+test('importing the launcher from stdin does not execute it', () => {
+  const script = `await import(${JSON.stringify(pathToFileURL(launcher).href)}); console.log('imported');`;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-'], {input:script, encoding:'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'imported\n');
+  assert.equal(result.stderr, '');
 });
