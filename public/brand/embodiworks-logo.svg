@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 490 96" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">EmbodiWorks · 具身工坊</title>
+  <desc id="description">An open workcell and connected joints, paired with the EmbodiWorks wordmark.</desc>
+  <g transform="translate(8 16)" stroke="#225F49" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 12H17a5 5 0 0 0-5 5v30a5 5 0 0 0 5 5h8M39 12h8a5 5 0 0 1 5 5v30a5 5 0 0 1-5 5h-8M22 37l10-13 10 13"/>
+  </g>
+  <g fill="#225F49"><circle cx="30" cy="53" r="3.5"/><circle cx="40" cy="40" r="3.5"/><circle cx="50" cy="53" r="3.5"/></g>
+  <text x="91" y="61" fill="#183E31" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="48" font-weight="600" letter-spacing="-1.8">EmbodiWorks</text>
+</svg>

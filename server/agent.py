@@ -8,8 +8,10 @@ import json
 from itertools import count
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Literal
@@ -145,23 +147,70 @@ def observation_text(task, observation, history, initial_pose):
                        'recent_feedback': history[-8:]}, ensure_ascii=False)
 
 
+def _codex_npm_binary(package, target, package_name, filename):
+    # Same optional-package and bundled-vendor layouts as the pinned official
+    # @openai/codex/bin/codex.js entry point. Execute native code directly so
+    # timeout/cancellation does not leave an npm/Node wrapper's child running.
+    vendors = [package.parent / package_name / 'vendor',
+               package / 'node_modules' / '@openai' / package_name / 'vendor',
+               package / 'vendor']
+    return next((path for vendor in vendors
+                 if (path := vendor / target / 'bin' / filename).is_file()), None)
+
+
+def _codex_npm_package(path):
+    resolved = path.resolve()
+    if path.suffix.lower() in ('.cmd', '.ps1'):
+        return path.parent / 'node_modules' / '@openai' / 'codex'
+    if resolved.name == 'codex.js' and resolved.parent.name == 'bin':
+        return resolved.parent.parent
+    # npm also creates an extensionless /bin/sh wrapper on Windows. WSL may
+    # inherit that directory on PATH; it is not a native Linux executable.
+    try:
+        with path.open('rb') as file: header = file.read(4096)
+    except OSError:
+        return None
+    normalized = header.replace(b'\\', b'/')
+    if (header.startswith(b'#!') and b'basedir' in header and
+            b'node_modules/@openai/codex/bin/codex.js' in normalized):
+        return path.parent / 'node_modules' / '@openai' / 'codex'
+    return None
+
+
 def codex_executable():
     if os.getenv('CODEX_CLI_PATH'): return os.environ['CODEX_CLI_PATH']
-    # Project-pinned CLI avoids changing the user's global installation.
-    package_root = Path(__file__).resolve().parents[1] / 'node_modules' / '@openai'
-    local = list(package_root.glob('codex-win32-*/vendor/*/bin/codex.exe'))
-    local += list(package_root.glob('codex/node_modules/@openai/codex-win32-*/vendor/*/bin/codex.exe'))
-    if local: return str(local[0])
-    executable = shutil.which('codex.exe') or shutil.which('codex')
-    if not executable: raise ValueError('没有找到 Codex CLI，请先安装并运行 codex login。')
-    path = Path(executable)
-    if path.suffix.lower() in ('.cmd', '.ps1'):
-        package = path.parent / 'node_modules' / '@openai' / 'codex'
-        matches = list(package.glob('node_modules/@openai/codex-win32-*/vendor/*/bin/codex.exe'))
-        if not matches:
-            raise ValueError('未找到 Codex 原生程序，请用 CODEX_CLI_PATH 指向 codex.exe。')
-        path = matches[0]
-    return str(path)
+    arch = {'amd64': 'x64', 'x86_64': 'x64', 'arm64': 'arm64', 'aarch64': 'arm64'}.get(platform.machine().lower())
+    targets = {'win32': ('pc-windows-msvc', 'win32'),
+               'linux': ('unknown-linux-musl', 'linux'),
+               'darwin': ('apple-darwin', 'darwin')}
+    if arch is None or sys.platform not in targets:
+        raise ValueError('当前平台没有已识别的 Codex 原生程序；请用 CODEX_CLI_PATH 指向已安装的原生程序。')
+    suffix, package_os = targets[sys.platform]
+    target = f'{"x86_64" if arch == "x64" else "aarch64"}-{suffix}'
+    package_name = f'codex-{package_os}-{arch}'
+    filename = 'codex.exe' if sys.platform == 'win32' else 'codex'
+    package = Path(__file__).resolve().parents[1] / 'node_modules' / '@openai' / 'codex'
+    local = _codex_npm_binary(package, target, package_name, filename)
+    if local: return str(local)
+    seen = set()
+    incomplete_npm = False
+    commands = [filename, 'codex'] if sys.platform == 'win32' else [filename]
+    for directory in os.get_exec_path():
+        for command in commands:
+            executable = shutil.which(os.path.join(directory or os.curdir, command))
+            if not executable or executable in seen: continue
+            seen.add(executable)
+            path = Path(executable)
+            package = _codex_npm_package(path)
+            if package is None: return str(path)
+            native = _codex_npm_binary(package, target, package_name, filename)
+            if native: return str(native)
+            incomplete_npm = True
+    if incomplete_npm:
+        raise ValueError(f'PATH 中的 Codex npm 包缺少当前系统的原生程序（{package_os}/{arch}）；'
+            '请在当前系统重新安装 @openai/codex，或用 CODEX_CLI_PATH 指向原生程序。'
+            'WSL 请从 Ubuntu 终端安装并启动，参见 docs/INSTALL.md。')
+    raise ValueError('没有找到 Codex CLI；请运行 npm install，并参见 docs/INSTALL.md 完成 Codex 登录。')
 
 
 @track_inference('agent_inference')

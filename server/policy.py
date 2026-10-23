@@ -93,7 +93,7 @@ async def ensure_local_service():
             return
         except (httpx.ConnectError, httpx.ConnectTimeout): pass
         python = ROOT / '.venv-policy' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-        if not python.exists(): raise ValueError('缺少本地策略环境，请运行“安装策略环境.cmd”。')
+        if not python.exists(): raise ValueError('缺少本地策略环境；请按 docs/INSTALL.md 安装 .venv-policy。')
         with (ROOT / 'policy-server.log').open('ab') as out, (ROOT / 'policy-server-error.log').open('ab') as err:
             _local_process = subprocess.Popen([str(python), '-m', 'uvicorn', 'server.policy_service:app', '--host', '127.0.0.1', '--port', '8010', '--no-access-log'],
                 cwd=ROOT, stdout=out, stderr=err, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)

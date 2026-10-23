@@ -1,0 +1,78 @@
+name: Platform smoke
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: ${{ matrix.os }} / Python 3.13 / Node 22
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Fetch pinned Panda and SO-101 models
+        uses: actions/checkout@v7
+        with:
+          repository: google-deepmind/mujoco_menagerie
+          ref: 822c2d8f877dd166c5b7d3c9f7e3c3b6589473b7
+          path: vendor/mujoco_menagerie
+          sparse-checkout: |
+            franka_emika_panda
+            robotstudio_so101
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Enable Linux software rendering
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libosmesa6
+          echo 'MUJOCO_GL=osmesa' >> "$GITHUB_ENV"
+
+      - name: Create project Python environment
+        run: python -m venv .venv
+
+      - name: Install Python dependencies through the shared launcher
+        run: node tools/python.mjs -m pip install -r requirements.txt
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check frontend state
+        run: npm run test:ui
+
+      - name: Check cross-platform launcher
+        run: npm run test:launcher
+
+      - name: Check Codex lookup and paused image stream
+        run: node tools/python.mjs -m unittest tests.test_codex_executable tests.test_stream -v
+
+      - name: Check real robot motion
+        run: node tools/python.mjs -m unittest tests.test_simulation.PhysicsTests.test_real_models_and_actuated_joint_motion -v
+
+      - name: Check native rendering and service controls
+        run: node tools/python.mjs -m unittest tests.test_simulation.NativeServiceTests.test_render_pause_single_step_model_switch_and_resume -v

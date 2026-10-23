@@ -5,9 +5,11 @@ scene, task, layout seed, method configuration, expected behavior and observed
 behavior when reporting a simulation issue. Remove API keys and private experiment
 content before sharing logs or videos.
 
-Follow the Windows setup in [README.md](README.md), then run:
+Follow the platform instructions in [docs/INSTALL.md](docs/INSTALL.md), then run:
 
-```powershell
+```sh
+npm run test:launcher
+npm run test:ui
 npm test
 npm run build
 ```
