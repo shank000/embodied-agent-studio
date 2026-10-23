@@ -49,7 +49,7 @@ function enableControls(){
   $('#capture-observation').disabled=!enabled||takeover;
   const agentConfigEditable=state?.agent?.status==='repair_paused'&&!state?.policy?.active&&!state?.comparison?.active&&!state?.research?.active&&!state?.experiment?.active;
   $('#agent-settings').disabled=(takeover&&!agentConfigEditable)||busy;
-  if(takeover)document.querySelectorAll('#joint-controls input,.sim-action,#gripper-open,#gripper-close,#command,#send,#speed,#gravity,#step,#apply-scene,#scene-select,#task-select,#scene-seed').forEach(el=>el.disabled=true);
+  if(takeover)document.querySelectorAll('[data-model],#joint-controls input,.sim-action,#gripper-open,#gripper-close,#command,#send,#speed,#gravity,#step,#apply-scene,#scene-select,#task-select,#scene-seed').forEach(el=>el.disabled=true);
 }
 async function operate(payload,{message=false}={}){
   if(!connected||busy)return;
@@ -125,7 +125,7 @@ function renderState(){
 }
 function renderAgent(){
   const agent=state.agent;if(!agent)return;
-  const names={idle:'等待任务',observing:'采集观察',thinking:'模型决策中',executing:'正在执行',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型判断已完成',blocked:'模型无法继续',error:'调用或执行失败',stopped:'接管已停止',round_complete:'本轮已结束',limit:'已达轮数上限'};
+  const names={idle:'等待任务',observing:'采集观察',thinking:'模型决策中',executing:'正在执行',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型判断已完成',blocked:'模型无法继续',error:'调用或执行失败',stopped:'接管已停止',round_complete:'本轮已结束',limit:'已达到运行预算'};
   $('#agent-status').textContent=names[agent.status]||agent.status;
   $('#agent-message').textContent=agent.message;
   const roundLimit=Object.hasOwn(agent,'max_rounds')?agent.max_rounds:agentConfig?.max_rounds;
@@ -227,6 +227,8 @@ function providerFields(){
   try{deepseek=provider==='compatible'&&new URL($('#config-base-url').value).hostname==='api.deepseek.com';}catch{}
   $('#api-config-fields').hidden=provider==='codex';
   $('#api-budget-fields').hidden=['codex','custom'].includes(provider);
+  $('#api-config-fields').querySelectorAll('input').forEach(input=>input.disabled=provider==='codex');
+  $('#config-output-tokens').disabled=['codex','custom'].includes(provider);
   $('#output-budget-help').hidden=['codex','custom'].includes(provider);
   $('#deepseek-thinking-field').hidden=!deepseek;
   $('#reasoning-field').hidden=false;
@@ -245,7 +247,7 @@ $('#config-deepseek-thinking').addEventListener('change',providerFields);
 $('#config-provider').addEventListener('change',()=>{const provider=$('#config-provider').value;$('#config-base-url').value=provider==='custom'?'http://127.0.0.1:8020/agent':provider==='anthropic'?'https://api.anthropic.com':provider==='compatible'?'https://api.deepseek.com':'https://api.openai.com/v1';$('#config-api-key').value='';if(['anthropic','compatible','custom'].includes(provider)){$('#config-model').value='';$('#config-model').placeholder=provider==='custom'?'填写自定义 Agent 服务模型 ID':'填写支持多图输入的模型 ID';}else $('#config-model').value='gpt-6-astra';providerFields();refreshModelCapabilities(null);});
 $('#agent-settings').addEventListener('click',async()=>{try{agentConfig=await agentApi('config');const c=agentConfig;$('#config-provider').value=c.provider;$('#config-model').value=c.model;$('#config-base-url').value=c.base_url;$('#config-deepseek-thinking').value=c.deepseek_thinking??'enabled';$('#config-output-tokens').value=c.max_output_tokens??16384;$('#config-rounds').value=c.max_rounds??'';$('#config-timeout').value=c.timeout_s;$('#config-api-key').value='';$('#config-api-key').placeholder=c.has_api_key?'当前地址已有密钥，留空保留':'仅保留在本机服务内存中';$('#config-error').hidden=true;providerFields();$('#agent-config-dialog').showModal();refreshModelCapabilities(c.reasoning);}catch(error){toast(error.message);}});
 $('#close-agent-config').addEventListener('click',()=>$('#agent-config-dialog').close());
-$('#agent-config-form').addEventListener('submit',async event=>{event.preventDefault();try{if(capabilityLoading)throw new Error('模型能力正在读取，请稍候再应用。');agentConfig=await agentApi('config',{provider:$('#config-provider').value,model:$('#config-model').value.trim(),base_url:$('#config-base-url').value.trim(),api_key:$('#config-api-key').value,reasoning:selectedReasoning(),reasoning_native:true,deepseek_thinking:$('#config-deepseek-thinking').value,max_output_tokens:Number($('#config-output-tokens').value),max_rounds:Number($('#config-rounds').value)||null,timeout_s:Number($('#config-timeout').value)});$('#config-api-key').value='';updateConfigSummary();$('#agent-config-dialog').close();toast('模型配置已应用。');}catch(error){$('#config-error').textContent=error.message;$('#config-error').hidden=false;}});
+$('#agent-config-form').addEventListener('submit',async event=>{event.preventDefault();try{if(capabilityLoading)throw new Error('模型能力正在读取，请稍候再应用。');agentConfig=await agentApi('config',{provider:$('#config-provider').value,model:$('#config-model').value.trim(),base_url:$('#config-base-url').value.trim(),api_key:$('#config-api-key').value,reasoning:selectedReasoning(),reasoning_native:true,deepseek_thinking:$('#config-deepseek-thinking').value,max_output_tokens:$('#config-output-tokens').disabled?(agentConfig?.max_output_tokens??16384):Number($('#config-output-tokens').value),max_rounds:Number($('#config-rounds').value)||null,timeout_s:Number($('#config-timeout').value)});$('#config-api-key').value='';updateConfigSummary();$('#agent-config-dialog').close();toast('模型配置已应用。');}catch(error){$('#config-error').textContent=error.message;$('#config-error').hidden=false;}});
 agentApi('config').then(config=>{agentConfig=config;updateConfigSummary();}).catch(()=>{});
 initResearch({operate,toast,selectTab});
 initRsi({operate,toast,selectTab});

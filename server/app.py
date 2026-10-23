@@ -932,12 +932,16 @@ async def frame():
 async def stream(request: Request):
     async def frames():
         last = -1
+        part_prefix = b'--frame\r\nContent-Type: image/jpeg\r\n\r\n'
+        yield part_prefix
         while not await request.is_disconnected() and not worker.failure:
             with worker.lock:
                 frame_id, jpeg = worker.frame, worker.jpeg
             if frame_id != last and jpeg:
                 last = frame_id
-                yield b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(jpeg)).encode() + b'\r\n\r\n' + jpeg + b'\r\n'
+                # Chromium publishes the previous image after the next part's
+                # complete headers arrive, even if physics stays paused here.
+                yield jpeg + b'\r\n' + part_prefix
             await asyncio.sleep(1/30)
     return StreamingResponse(frames(), media_type='multipart/x-mixed-replace; boundary=frame', headers={'Cache-Control':'no-store','X-Accel-Buffering':'no'})
 

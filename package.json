@@ -8,7 +8,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "start": ".venv\\Scripts\\python.exe -m uvicorn server.app:app --host 127.0.0.1 --port 8000",
-    "test": ".venv\\Scripts\\python.exe -m unittest discover -s tests -p test_*.py -v"
+    "test": ".venv\\Scripts\\python.exe -m unittest discover -s tests -p test_*.py -v",
+    "test:ui": "node --test tests/test_frontend_state.mjs"
   },
   "devDependencies": {
     "@openai/codex": "0.155.1",

@@ -5,7 +5,7 @@ const $=selector=>document.querySelector(selector);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const modes={agent:'视觉 Agent',policy:'策略模型',hybrid:'组合方法'};
 const statuses={idle:'等待任务',queued:'等待执行',preparing:'准备实验',loading:'加载模型',running:'运行中',observing:'采集观察',planning:'主 Agent 规划',thinking:'模型推理',deciding:'选择候选',executing:'执行动作',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型报告完成',blocked:'无法继续',error:'运行错误',failed:'执行未到位',stopped:'已停止',limit:'达到预算',round_complete:'本步结束',complete:'已完成',completed:'已完成',unfinished:'未结束'};
-let context,defaults,catalog,methods=[],protocols=[],experiments=[],registry={},episode=null,replayRun='',lastRegistry='',lastExperiment='',lastRun='',lastFinished='',currentState={},busy=false;
+let context,defaults,catalog,methods=[],protocols=[],experiments=[],registry={},episode=null,replayRun='',lastRegistry='',lastExperiment='',lastRun='',lastFinished='',currentState={},busy=false,stopping=false;
 const methodId=method=>method.method_id||method.id;
 const protocolId=protocol=>protocol.protocol_id||protocol.id;
 const experimentId=experiment=>experiment.experiment_id||experiment.run_id;
@@ -21,6 +21,7 @@ async function request(path,payload){
 }
 function report(error){$('#rsi-error').textContent=error.message;$('#rsi-error').hidden=false;context?.toast?.(error.message);}
 async function action(work){if(busy)return;busy=true;$('#rsi-error').hidden=true;renderLocks();try{await work();}catch(error){report(error);}finally{busy=false;renderLocks();}}
+async function stopRun(path){if(stopping)return;stopping=true;$('#rsi-error').hidden=true;renderLocks();try{await request(path,{});}catch(error){report(error);}finally{stopping=false;renderLocks();}}
 function selectOptions(select,items,emptyLabel){
   const previous=select.value;
   select.replaceChildren();
@@ -62,19 +63,21 @@ function fillConfigs(source){
 function updateAgentFields(agent){
   $('#rsi-agent-source').value=agent.provider||'codex';$('#rsi-agent-model').value=agent.model||'';$('#rsi-agent-url').value=agent.base_url||'';
   $('#rsi-agent-url-field').hidden=agent.provider==='codex';
+  $('#rsi-agent-url').disabled=agent.provider==='codex'||$('#rsi-mode').value==='policy';
   $('#rsi-agent-provider-help').textContent=agent.provider==='custom'?'自定义 Agent 服务使用 embodied-agent-v1：填写完整请求地址与实际模型／Agent 标识，响应须返回符合动作或子目标 Schema 的 output。任意 Agent 实现均须遵循相同观察与执行权限。':'可填写此服务实际可用的任意模型 ID。保存会冻结模型和调用配置；当前工作台配置只是默认起点。';
 }
 function updateAgentJson(providerChanged=false){
   try{const agent=parseObject('#rsi-agent-json','Agent 配置');agent.provider=$('#rsi-agent-source').value;agent.model=$('#rsi-agent-model').value.trim();agent.base_url=providerChanged?({codex:'https://api.openai.com/v1',openai:'https://api.openai.com/v1',compatible:'',anthropic:'https://api.anthropic.com',custom:''}[agent.provider]):$('#rsi-agent-url').value.trim();$('#rsi-agent-json').value=pretty(agent);updateMode();}catch(error){report(error);}
 }
 function updateDecisionStrategy(){
-  const strategy=$('#rsi-decision-strategy').value;$('#rsi-single-decision-config').hidden=strategy!=='single';$('#rsi-multi-decision-config').hidden=strategy==='single';
+  const strategy=$('#rsi-decision-strategy').value,active=$('#rsi-mode').value==='hybrid';setFieldsVisible('#rsi-single-decision-config',active&&strategy==='single');setFieldsVisible('#rsi-multi-decision-config',active&&strategy!=='single');
   $('#rsi-decision-strategy-help').textContent={single:'一个决策器选择候选动作；只有该服务可使用单决策器密钥。',cascade:'第一个决策器提出首选，后续决策器依次复核；未达成一致则请求主 Agent 重规划。',weighted_vote:'各决策器分别选择候选，按 weight 计算票份额；须获得严格多数，没有多数则重规划。票份额不等同于校准概率。'}[strategy];
 }
+function setFieldsVisible(selector,visible){const field=$(selector);field.hidden=!visible;field.querySelectorAll('input,select,textarea').forEach(input=>input.disabled=!visible);}
 function updateMode(){
   const mode=$('#rsi-mode').value,policy=mode==='policy'||(mode==='hybrid'&&$('#rsi-hybrid-policy').checked);
-  $('#rsi-decision-fields').hidden=mode!=='hybrid';$('#rsi-policy-kind-field').hidden=!policy;
-  $('#rsi-agent-json-field').hidden=mode==='policy';$('#rsi-agent-config-fields').hidden=mode==='policy';$('#rsi-policy-json-field').hidden=!policy;
+  setFieldsVisible('#rsi-decision-fields',mode==='hybrid');setFieldsVisible('#rsi-policy-kind-field',policy);
+  setFieldsVisible('#rsi-agent-json-field',mode!=='policy');setFieldsVisible('#rsi-agent-config-fields',mode!=='policy');setFieldsVisible('#rsi-policy-json-field',policy);
   let agent={},p={};try{agent=JSON.parse($('#rsi-agent-json').value||'{}');p=JSON.parse($('#rsi-policy-json').value||'{}');}catch{}
   updateAgentFields(agent);updateDecisionStrategy();
   $('#rsi-config-summary').textContent=[mode!=='policy'?`主 Agent：${agent.model||'当前模型'} · ${agent.provider||'当前接口'}`:'',policy?`策略：${p.model||'当前策略'} · ${p.kind||$('#rsi-policy-kind').value}`:'',mode==='hybrid'?`决策组合：${{single:'单决策器',cascade:'级联复核',weighted_vote:'加权多数票'}[$('#rsi-decision-strategy').value]}，未配置服务时会明确报错。`:''].filter(Boolean).join(' / ');
@@ -132,8 +135,8 @@ function renderRegistry(){
 function renderLocks(){
   if(!context)return;
   const state=currentState,locked=!!(state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active);
-  $('#rsi-run-start').disabled=busy||locked||!methods.length;$('#rsi-run-once').disabled=busy||locked||!methods.length;$('#rsi-run-stop').disabled=busy||!state.research?.active;
-  $('#rsi-experiment-start').disabled=busy||locked||methods.length<2||!protocols.length;$('#rsi-experiment-stop').disabled=busy||!state.experiment?.active;
+  $('#rsi-run-start').disabled=busy||locked||!methods.length;$('#rsi-run-once').disabled=busy||locked||!methods.length;$('#rsi-run-stop').disabled=stopping||!state.research?.active;
+  $('#rsi-experiment-start').disabled=busy||locked||methods.length<2||!protocols.length;$('#rsi-experiment-stop').disabled=stopping||!state.experiment?.active;
   $('#rsi-save').disabled=busy||locked;$('#rsi-save-protocol').disabled=busy||locked;$('#rsi-save-runtime').disabled=busy||locked||!methods.length;$('#rsi-refresh').disabled=busy;$('#rsi-promote').disabled=busy||locked||!$('#rsi-promotion-experiment').value;$('#rsi-rollback').disabled=busy||locked||!registry.active_method_id;
   $('#rsi-restore-frame').disabled=busy||locked||!episode?.available;for(const selector of ['#rsi-run-method','#rsi-run-task','#rsi-run-sim','#rsi-run-wall','#rsi-run-steps','#rsi-run-record-video'])$(selector).disabled=busy||!!state.research?.active;
   $('#rsi-experiment-record-video').disabled=busy||locked;
@@ -159,7 +162,7 @@ export async function initRsi(callbacks){
     methods=await request('research/methods');renderMethods();$('#rsi-run-method').value=methodId(saved);$('#rsi-method-message').textContent=`已保存 ${methodId(saved)}。后续修改请创建子代版本。`;
   });});
   $('#rsi-run-form').addEventListener('submit',event=>{event.preventDefault();action(()=>startMethod(false));});$('#rsi-run-once').addEventListener('click',()=>{if($('#rsi-run-form').reportValidity())action(()=>startMethod(true));});
-  $('#rsi-run-stop').addEventListener('click',()=>action(async()=>{await request('research/stop',{});}));
+  $('#rsi-run-stop').addEventListener('click',()=>stopRun('research/stop'));
   $('#rsi-run-method').addEventListener('change',()=>{for(const type of ['agent','policy','decision'])$(`#rsi-runtime-${type}-key`).value='';$('#rsi-runtime-decision-keys').value='';$('#rsi-runtime-message').textContent='';});
   $('#rsi-save-runtime').addEventListener('click',()=>action(async()=>{
     const id=$('#rsi-run-method').value;if(!id)throw new Error('请先选择一个方法版本。');const credentials={},recipe=methods.find(method=>methodId(method)===id)?.recipe;
@@ -176,7 +179,7 @@ export async function initRsi(callbacks){
   });});
   $('#rsi-experiment-form').addEventListener('submit',event=>{event.preventDefault();action(async()=>{const method_ids=[...document.querySelectorAll('#rsi-compare-methods input:checked')].map(input=>input.value);if(method_ids.length<2)throw new Error('请选择至少两个方法版本进行配对比较。');const result=await request('research/experiments',{protocol_id:$('#rsi-protocol-select').value,method_ids,split:$('#rsi-split').value,record_video:$('#rsi-experiment-record-video').checked});$('#rsi-experiment-history').value='';$('#rsi-experiment-message').textContent=result.message||'配对实验已提交。';});});
   $('#rsi-experiment-history').addEventListener('change',()=>renderExperiment($('#rsi-experiment-history').value?experiments.find(experiment=>experimentId(experiment)===$('#rsi-experiment-history').value)||{}:currentState.experiment||{}));
-  $('#rsi-experiment-stop').addEventListener('click',()=>action(async()=>{await request('research/experiments/stop',{});}));
+  $('#rsi-experiment-stop').addEventListener('click',()=>stopRun('research/experiments/stop'));
   $('#rsi-promotion-candidate').addEventListener('change',updatePromotionParent);
   $('#rsi-promotion-form').addEventListener('submit',event=>{event.preventDefault();action(async()=>{const result=await request('research/promote',{experiment_id:$('#rsi-promotion-experiment').value,candidate_id:$('#rsi-promotion-candidate').value,parent_id:$('#rsi-promotion-parent').value});registry=result.registry||result;renderRegistry();$('#rsi-promotion-message').textContent=result.message||`已晋升 ${methodName($('#rsi-promotion-candidate').value)}；完整判定已存入实验档案。`;});});
   $('#rsi-rollback').addEventListener('click',()=>action(async()=>{const result=await request('research/rollback',{});registry=result.registry||result;renderRegistry();context.toast('已回滚上次晋升，版本与实验记录保留。');}));
@@ -191,7 +194,7 @@ export function renderRsi(state){
   const registryKey=JSON.stringify(registry);if(registryKey!==lastRegistry){lastRegistry=registryKey;renderRegistry();}
   const run=state.research||{};$('#rsi-run-status').textContent=statuses[run.status]||run.status||'等待任务';$('#rsi-run-message').textContent=run.message||'使用当前场景。运行记录包含模型公开输出、同步观察与实际物理状态。';$('#rsi-run-bundle').hidden=!run.run_id;if(run.run_id)$('#rsi-run-bundle').href=`/api/runs/${encodeURIComponent(run.run_id)}/bundle`;
   renderRunVideo($('#rsi-run-video'),run.run_id,run.video);
-  renderRunTimer($('#rsi-run-time'),run);renderRunTimer($('#rsi-experiment-time'),state.experiment);
+  renderRunTimer($('#rsi-run-time'),run);if(!$('#rsi-experiment-history').value)renderRunTimer($('#rsi-experiment-time'),state.experiment);
   const runKey=JSON.stringify([run.run_id,run.status,run.step,run.max_steps,run.subgoal,run.selected_candidate,run.timings,run.history,run.metrics]);if(runKey!==lastRun){lastRun=runKey;renderRunFeedback(run);}
   const experiment=state.experiment||{},key=JSON.stringify([experiment.run_id,experiment.status,experiment.message,experiment.rows,experiment.aggregates]);if(key!==lastExperiment){lastExperiment=key;if(!$('#rsi-experiment-history').value)renderExperiment(experiment);}
   if(experiment.run_id&&!experiment.active&&['complete','completed','stopped','error'].includes(experiment.status)&&experiment.run_id!==lastFinished){lastFinished=experiment.run_id;request('research/experiments').then(value=>{experiments=value;renderExperiments();renderLocks();}).catch(report);}
@@ -205,6 +208,7 @@ function renderRunFeedback(run){
   $('#rsi-run-history').innerHTML=(run.history||[]).slice(-4).reverse().map(record=>{const result=record.result||{};return `<div class="round-record"><strong>步骤 ${record.step} · ${escape(record.candidate_id)} · ${escape(statuses[result.status]||result.status)}</strong><p>${escape(record.action?.description||record.action?.pose?.explanation||'')}${result.message?`<br>${escape(result.message)}`:''}${result.position_error_m==null?'':`<br>末端位置误差 ${(Number(result.position_error_m)*1000).toFixed(2)} mm · 姿态误差 ${Number(result.orientation_error_rad||0).toFixed(4)} rad`}</p></div>`;}).join('')||'<p class="rsi-help">尚无动作执行反馈。</p>';
 }
 function renderExperiment(experiment){
+  renderRunTimer($('#rsi-experiment-time'),experiment);
   $('#rsi-experiment-message').textContent=experiment.message||'尚未开始版本评测。';const rows=experiment.rows||[];
   $('#rsi-experiment-rows').innerHTML=rows.length?rows.map(row=>{const metrics=row.metrics||{};return `<tr><td><strong>${escape(row.method_name||methodName(row.method_id))}</strong><small>种子 ${row.seed}</small></td><td><code>${escape(row.initial_state_id||'待分配')}</code><small title="${escape(row.message)}">${escape(statuses[row.status]||row.status)}</small></td><td>${row.metrics?(metrics.success?'<span class="result-pill success">成功</span>':'<span class="result-pill">未达成</span>'):'—'}</td><td>${seconds(metrics.sim_time_s)}<small>墙钟 ${seconds(metrics.wall_time_s)}</small></td><td>${metrics.inference_count??'—'}</td><td>${row.run_id?`<button class="text-button" type="button" data-replay-run="${escape(row.run_id)}">观察与视频回放</button><a class="text-button" href="/api/runs/${encodeURIComponent(row.run_id)}/bundle">完整 ZIP ↗</a>${runVideoMarkup(row.run_id,row.video,true)}`:'—'}</td></tr>`;}).join(''):'<tr><td colspan="6" class="empty-state">实际运行结果会保存在这里。</td></tr>';
   $('#rsi-experiment-summary').innerHTML=(experiment.aggregates||[]).map(summary=>`<div><strong>${escape(summary.name||methodName(summary.method_id))}</strong><span>${summary.successes??0} / ${summary.assigned??0}</span><small>成功 / 全部分配 · 完成 ${summary.completed??0}<br>错误 ${summary.errors??0} · 停止 ${summary.stopped??0} · 墙钟 ${seconds(summary.wall_time_s)}</small></div>`).join('');

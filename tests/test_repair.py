@@ -149,6 +149,39 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller.state['status'],'validation_failed')
         self.assertIn('导入错误',self.controller.state['validation']['output'])
 
+    async def test_cancelled_validation_keeps_evidence_and_requires_a_new_candidate(self):
+        result=proposal()
+        result.edits[-1].after=REGRESSION.replace('import unittest', 'import unittest\nimport time\nfrom pathlib import Path').replace(
+            "def test_reported_value(self): self.assertEqual(response_value(), 'correct')",
+            "def test_reported_value(self):\n        Path('validation-started').write_text('entered')\n        time.sleep(30)\n        self.assertEqual(response_value(), 'correct')")
+        original=(self.root/'server/agent.py').read_bytes()
+        await self.propose(result)
+        await self.controller.validate(allow_local_code_execution=True)
+        candidate=self.controller.current['folder']/'candidate'
+        try:
+            async with asyncio.timeout(5):
+                while not (candidate/'validation-started').exists():
+                    if self.controller.task.done():
+                        await self.controller.task
+                        self.fail('Validation ended before the regression started.')
+                    await asyncio.sleep(.02)
+            state=await asyncio.wait_for(self.controller.stop(),12)
+            self.assertFalse(state['active'])
+            self.assertEqual(state['status'],'validation_failed')
+            self.assertIn('已取消',state['message'])
+            self.assertIn('重新分析生成新候选',state['message'])
+            self.assertEqual((candidate/repair.REGRESSION).read_text(encoding='utf-8'),result.edits[-1].after)
+            self.assertTrue((candidate/'validation-started').is_file())
+            self.assertEqual((self.root/'server/agent.py').read_bytes(),original)
+            self.assertFalse((self.root/repair.REGRESSION).exists())
+            with self.assertRaisesRegex(ValueError,'重新分析'):
+                await self.controller.validate(allow_local_code_execution=True)
+            with self.assertRaisesRegex(ValueError,'验证'):
+                self.controller.apply()
+        finally:
+            if not self.controller.task.done():
+                await asyncio.wait_for(self.controller.stop(),12)
+
     @unittest.skipUnless(os.name=='nt','Windows process-tree termination')
     async def test_stop_validation_terminates_child_process_and_closes_inherited_pipe(self):
         child_code='import time; time.sleep(30)'

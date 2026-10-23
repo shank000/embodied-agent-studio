@@ -3,7 +3,7 @@ const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 const names={agent:'视觉 Agent',smolvla:'SmolVLA',vla:'自定义 VLA',wam:'自定义 WAM'};
 const statuses={idle:'等待任务',loading:'加载模型',preparing:'准备实验',observing:'采集观察',thinking:'策略推理',executing:'执行动作',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型报告完成',blocked:'无法继续',error:'运行错误',failed:'执行失败',stopped:'已停止',cancelled:'已取消',canceled:'已取消',interrupted:'服务中断',returned:'已返回',round_complete:'本轮结束',limit:'达到上限',running:'运行中',complete:'实验完成',unfinished:'未结束'};
 let context, catalog, configs={}, lastGeneration=-1, lastRows='', lastPolicy='', currentPage='workspace', runs=[], selectedRun='',resultsOffset=0,resultsHasMore=true,analysisCatalog=[],refreshingResults=false,lastResultRefresh=0,lastRunStates='';
-let selectedResult=null,resultsGeneration=0,detailGeneration=0,analysisGeneration=0,analysisCatalogGeneration=0,hasAnalysisResults=false,resultMutationPending=false;
+let selectedResult=null,resultsGeneration=0,detailGeneration=0,analysisGeneration=0,analysisCatalogGeneration=0,hasAnalysisResults=false,resultMutationPending=false,lastDetailKey='';
 const checkedResults=new Set();
 let batchDeleteIds=[];
 let pricingState=null,pricingLoading=false,pricingRefreshing=false,lastPricingCheck=0,pricingGeneration=0,pricingError='',pricingErrorIsManual=false;
@@ -221,15 +221,16 @@ function renderBatchControls(){
   $('#selected-results-count').textContent=`已选择 ${checkedResults.size} 条${checkedResults.size>1000?'，每批最多 1000 条，请减少选择。':'；全选仅覆盖已显示的可删除记录。'}`;$('#delete-selected-results').disabled=resultMutationPending||!checkedResults.size||checkedResults.size>1000;
 }
 async function showRun(run){
-  const id=run.run_id,generation=++detailGeneration;selectedRun=id;selectedResult=run;renderRunList();$('#results-error').hidden=true;renderResultActions(run);
+  const id=run.run_id;if(selectedRun!==id)clearResult();const generation=++detailGeneration;selectedRun=id;selectedResult=run;renderRunList();$('#results-error').hidden=true;renderResultActions(run);
   try{const [analysis,events]=await Promise.all([request(`runs/${encodeURIComponent(id)}/analysis`),request(`runs/${encodeURIComponent(id)}/events`)]);if(selectedRun!==id||generation!==detailGeneration)return;
     selectedResult={...run,...analysis};renderResultActions(selectedResult);
+    const detailKey=JSON.stringify([id,analysis,events]);if(detailKey===lastDetailKey)return;
     $('#log-download').hidden=false;$('#log-download').href=`/api/runs/${encodeURIComponent(id)}/download`;$('#log-detail').textContent=events.map(event=>JSON.stringify(event,null,2)).join('\n\n');
-    renderRunVideo($('#log-video'),id,analysis.video||run.artifacts?.video||run.video);renderResultAnalysis(analysis,run);
+    renderRunVideo($('#log-video'),id,analysis.video||run.artifacts?.video||run.video);renderResultAnalysis(analysis,run);lastDetailKey=detailKey;
   }catch(error){if(selectedRun===id&&generation===detailGeneration)resultError(error);}
 }
 function clearResult(){
-  selectedRun='';selectedResult=null;detailGeneration++;$('#log-detail-title').textContent='选择一条实验结果';$('#log-detail-id').textContent='';$('#log-download').hidden=true;$('#result-actions').hidden=true;$('#result-management-note').hidden=true;
+  selectedRun='';selectedResult=null;lastDetailKey='';detailGeneration++;$('#log-detail-title').textContent='选择一条实验结果';$('#log-detail-id').textContent='';$('#log-download').hidden=true;$('#result-actions').hidden=true;$('#result-management-note').hidden=true;
   for(const selector of ['#result-summary','#result-calls','#result-children','#result-task-text'])$(selector).replaceChildren();
   for(const selector of ['#result-round-charts','#result-chart-note','#result-outcome-message','#result-data-issues','#result-cost-panel'])$(selector).hidden=true;
   renderRunVideo($('#log-video'),'',null);$('#result-description').textContent='接口未返回的用量与推理文本会标记缺失，不推测补齐。';$('#log-detail').textContent='运行记录将在这里展示。';
@@ -353,15 +354,21 @@ function renderResultAnalysis(analysis,run){
   renderResultCost(analysis.cost);
   const points=rounds.map((row,index)=>({label:`第 ${row.round??'?'} 轮 / 调用 ${row.call_id??index+1}`,shortLabel:`${row.round??'?'} / ${index+1}`,value:row.output_tokens}));
   $('#result-round-charts').hidden=false;$('#result-chart-note').hidden=false;$('#result-token-chart').innerHTML=metricChartMarkup(points,'每轮接口输出 tokens');$('#result-time-chart').innerHTML=metricChartMarkup(points.map((point,index)=>({...point,value:rounds[index].inference_s})),'每轮模型调用耗时');
-  const open=new Set([...document.querySelectorAll('#result-calls details[open]')].map(details=>details.dataset.call));
-  $('#result-calls').replaceChildren();
+  const calls=$('#result-calls'),previous=new Map([...calls.querySelectorAll('details.result-call')].map(detail=>[detail.dataset.call,detail]));
   if(!rounds.length)$('#result-calls').innerHTML='<p class="empty-state">此运行没有模型调用记录。批量实验可打开下方子试验；接口调用前失败或取消也会保留整次运行。</p>';
+  else calls.querySelector('.empty-state')?.remove();
   for(const [index,row] of rounds.entries()){
-    const detail=document.createElement('details');detail.className='result-call';detail.dataset.call=String(row.call_id??index);detail.open=open.has(detail.dataset.call);
+    const id=String(row.call_id??index),detail=previous.get(id)||document.createElement('details');previous.delete(id);detail.className='result-call';detail.dataset.call=id;
+    const key=JSON.stringify([row,analysis.reasoning]),positions=[...detail.querySelectorAll('pre')].map(pre=>({top:pre.scrollTop,left:pre.scrollLeft}));
+    if(detail._resultKey!==key){
     const phase={agent:'视觉 Agent 调用',agent_inference:'视觉 Agent 调用',policy:'策略模型调用',policy_inference:'策略模型调用',planning:'主 Agent 规划',decision:'决策器调用',legacy_provider_output:'历史接口输出'}[row.phase]||row.phase||'模型调用',callStatus={complete:'调用完成',returned:'已返回',running:'调用中',cancelled:'已取消',error:'调用失败',interrupted:'服务中断'}[row.status]||row.status||'状态未记录';
     detail.innerHTML=`<summary><strong>第 ${escape(row.round??'?')} 轮 · ${escape(phase)}</strong><span>${secondsText(row.inference_s)} · 输出 ${numberText(row.output_tokens)} tokens · ${escape(callStatus)}</span></summary><div class="call-meta">${escape(row.provider||'接口未记录')} / ${escape(row.model||'模型未记录')} · 推理强度 ${escape(row.reasoning_effort||analysis.reasoning||'未记录')} · 输入 ${numberText(row.input_tokens)} / 输出 ${numberText(row.output_tokens)} / 推理 ${numberText(row.reasoning_tokens)} tokens</div><h4>接口公开输出 / 摘要</h4><pre>${escape(typeof row.public_text==='string'?row.public_text:row.public_text==null?'服务未返回可展示的公开文本。':JSON.stringify(row.public_text,null,2))}</pre><h4>服务返回的推理文字 / 摘要</h4><pre>${escape(row.reasoning?.availability==='returned'?row.reasoning.text||'返回字段为空。':'服务未返回可展示的推理文字或摘要。')}</pre>${row.error?`<p class="call-error">${escape(typeof row.error==='string'?row.error:JSON.stringify(row.error))}</p>`:''}`;
-    detail.insertAdjacentHTML('beforeend',callCostMarkup(row.cost));$('#result-calls').append(detail);
+    detail.insertAdjacentHTML('beforeend',callCostMarkup(row.cost));detail._resultKey=key;
+    }
+    if(calls.children[index]!==detail)calls.insertBefore(detail,calls.children[index]||null);
+    detail.querySelectorAll('pre').forEach((pre,index)=>{if(positions[index]){pre.scrollTop=positions[index].top;pre.scrollLeft=positions[index].left;}});
   }
+  for(const detail of previous.values())detail.remove();
   $('#result-children').replaceChildren();if(analysis.children?.length){const label=document.createElement('p');label.className='research-note';label.textContent='本实验的子试验结果（包括未生成独立运行编号的失败或取消）：';$('#result-children').append(label);for(const child of analysis.children){const row=typeof child==='string'?{run_id:child}:child||{},entry=document.createElement('article');entry.className='result-child';const title=document.createElement('strong');title.textContent=[row.display_name||row.method_name||names[row.method]||row.method||row.task||'子试验',row.seed==null?'':`种子 ${row.seed}`,statuses[row.status||row.analysis_status]||row.status||row.analysis_status||'',row.deleted_at?'已移入回收站':''].filter(Boolean).join(' · ');entry.append(title);const messages=[row.message,row.error,row.analysis_error].filter(Boolean);if(messages.length){const reason=document.createElement('p');reason.textContent=messages.map(value=>typeof value==='string'?value:JSON.stringify(value)).join('；');entry.append(reason);}if(row.run_id){const button=document.createElement('button');button.type='button';button.className='text-button';button.dataset.resultRun=row.run_id;button.textContent=`查看 ${row.run_id}`;entry.append(button);}else{const note=document.createElement('small');note.textContent='未生成独立运行编号，状态和错误由本批实验保留。';entry.append(note);}$('#result-children').append(entry);}}
 }
 async function refreshAnalysisCatalog(){

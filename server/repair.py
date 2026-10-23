@@ -402,7 +402,9 @@ sys.exit(0 if result.wasSuccessful() else 1)
                 message='候选通过固定接口与回归测试；可查看差异后应用。' if passed else '候选未通过测试，工作区未修改。',
                 validation={'passed':passed, 'output':text, 'scope':'固定本地接口契约和候选回归；未验证真实供应商账号或物理任务成功率。'})
         except asyncio.CancelledError:
-            self.state.update(status='proposed', message='候选验证已取消，工作区未修改。'); raise
+            self.state.update(status='validation_failed',
+                message='候选验证已取消，工作区未修改；候选副本已保留，请重新分析生成新候选后再验证。')
+            raise
         except Exception as exc:
             self.state.update(status='validation_failed', message=redact(str(exc), self.current['secrets']))
         finally: self._finish_timing()
