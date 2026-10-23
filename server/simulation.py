@@ -487,6 +487,7 @@ class Simulation:
         self.paused = True
         mujoco.mj_setState(self.model, self.data, values, spec)
         mujoco.mj_forward(self.model, self.data)
+        self.evaluator = TaskEvaluator(self, self.task_id)
         self.playback = {'time': float(self.data.time), 'frame_index': frame.get('index'),
                          'recorded_evaluation': frame.get('evaluation')}
         self.task = {'status': 'idle', 'title': '记录状态回放 · 未重新推理或执行动作',
@@ -552,6 +553,25 @@ class Simulation:
         self.paused = False
         self.event('已从桌面上方释放红色方块，由 MuJoCo 计算自由落体和桌面接触。')
 
+    def verify_task(self, generation, on_step=None):
+        """Validate final state over real physics time within the episode budget."""
+        if generation != self.generation:
+            raise ValueError('场景已切换，完成声明未被验收。')
+        if not self.paused or self.motion is not None:
+            raise ValueError('请在当前动作结束并暂停后验收任务。')
+        self.evaluator.update(self)
+        started = float(self.data.time)
+        deadline = started + self.evaluator.snapshot()['required_hold_s']
+        if self.run_deadline is not None:
+            deadline = min(deadline, self.run_deadline)
+        try:
+            while not self.evaluator.success and self.data.time + self.model.opt.timestep <= deadline + 1e-9:
+                self.step()
+                if on_step is not None: on_step()
+        finally:
+            self.paused = True
+        return {**self.evaluator.snapshot(), 'verification_sim_time_s': float(self.data.time)-started}
+
     def command(self, payload):
         action = payload['action']
         if action != 'replay_frame' and action not in ('view', 'camera', 'flags', 'checkpoint', 'observe'):
@@ -574,8 +594,10 @@ class Simulation:
             self.cancel_motion(); self.paused = True
             self.run_deadline = None; self.stop_on_success = False
         elif action == 'run_limits':
+            self.evaluator = TaskEvaluator(self, self.task_id)
             self.run_deadline = self.data.time + payload['duration_s']
             self.stop_on_success = payload['evaluator_stop']
+        elif action == 'verify_task': return self.verify_task(payload['generation'])
         elif action == 'instruction': return self.instruction(payload['text'])
         elif action == 'observe': return self.observe()
         elif action == 'move_tcp': return self.move_tcp(payload)

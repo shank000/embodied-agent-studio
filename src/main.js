@@ -125,7 +125,7 @@ function renderState(){
 }
 function renderAgent(){
   const agent=state.agent;if(!agent)return;
-  const names={idle:'等待任务',observing:'采集观察',thinking:'模型决策中',executing:'正在执行',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型判断已完成',blocked:'模型无法继续',error:'调用或执行失败',stopped:'接管已停止',round_complete:'本轮已结束',limit:'已达到运行预算'};
+  const names={idle:'等待任务',observing:'采集观察',thinking:'模型决策中',executing:'正在执行',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verifying:'环境核验中',replan:'未通过核验 · 重新决策',unverified:'未通过环境验收',verified:'评价器确认成功',model_done:'模型自报完成（非验收）',blocked:'模型无法继续',error:'调用或执行失败',stopped:'接管已停止',round_complete:'本轮已结束',limit:'已达到运行预算'};
   $('#agent-status').textContent=names[agent.status]||agent.status;
   $('#agent-message').textContent=agent.message;
   const roundLimit=Object.hasOwn(agent,'max_rounds')?agent.max_rounds:agentConfig?.max_rounds;
@@ -137,7 +137,7 @@ function renderAgent(){
   if(action){$('#action-position').textContent=action.position_m.map(x=>x.toFixed(4)).join(' / ');$('#action-quaternion').textContent=action.quaternion_wxyz.map(x=>x.toFixed(3)).join(' / ');$('#action-gripper').textContent=`张开 ${(action.gripper_open*100).toFixed(0)}% · ${action.duration_s.toFixed(1)} s`;$('#action-explanation').textContent=action.explanation;}
   const historyKey=JSON.stringify(agent.history);
   if(historyKey!==lastHistory){lastHistory=historyKey;const root=$('#agent-history');root.replaceChildren();
-    (agent.history||[]).slice(-5).reverse().forEach(record=>{const row=document.createElement('div');row.className='round-record';const title=document.createElement('strong');title.textContent=`第 ${record.round} 轮 · ${record.action.status==='move'?'末端动作':record.action.status==='done'?'模型完成判断':'无法继续'}`;const text=document.createElement('p');
+    (agent.history||[]).slice(-5).reverse().forEach(record=>{const row=document.createElement('div');row.className='round-record';const title=document.createElement('strong');title.textContent=`第 ${record.round} 轮 · ${record.action.status==='move'?'末端动作':record.action.status==='done'?record.verification?.accepted===true?'完成声明（环境接受）':record.verification?.accepted===false?'完成声明（环境拒绝）':'模型完成声明（未记录验收）':'无法继续'}`;const text=document.createElement('p');
       const result=record.result;
       text.textContent=typeof result==='string'?result:result?.message|| (result?`${result.status==='complete'?'实际末端到位':'动作未达到容差'}${result.position_error_m==null?'':` · 位置误差 ${(result.position_error_m*1000).toFixed(2)} mm`}`:'等待执行反馈');row.append(title,text);root.append(row);});
   }
@@ -187,7 +187,7 @@ async function submit(event,oneRound=false){
 $('#command-form').addEventListener('submit',submit);$('#command').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();submit();}});
 $('#help').addEventListener('click',()=>$('#help-dialog').showModal());$('#close-help').addEventListener('click',()=>$('#help-dialog').close());
 $('#agent-one-round').addEventListener('click',()=>submit(null,true));
-$('#example-task').addEventListener('click',()=>{$('#command').value='保持夹爪开度和当前末端姿态，将末端沿世界坐标 Z 轴抬高 2 厘米。';$('#command').focus();});
+$('#example-task').addEventListener('click',()=>{$('#command').value=state?.evaluation?.instruction||'';$('#command').focus();});
 $('#agent-stop').addEventListener('click',async()=>{try{await agentApi('stop',{});await poll();}catch(error){toast(error.message);}});
 $('#capture-observation').addEventListener('click',async()=>{busy=true;enableControls();try{await agentApi('observe',{});await poll();}catch(error){toast(error.message);}finally{busy=false;enableControls();}});
 const providerNames={codex:'Codex · 本机登录',openai:'OpenAI · Responses API',compatible:'兼容服务 · Chat Completions',anthropic:'Claude · Messages API',custom:'自定义 Agent 服务'};

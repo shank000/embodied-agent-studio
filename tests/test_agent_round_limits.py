@@ -4,6 +4,7 @@ import base64
 from copy import deepcopy
 import io
 import json
+import math
 from pathlib import Path
 import tempfile
 from threading import RLock
@@ -30,8 +31,9 @@ class DeterministicWorker:
         self.moves = 0
         self.pose = {'frame': 'world', 'position_m': [.2, 0., .3], 'quaternion_wxyz': [1., 0., 0., 0.]}
         self.snapshot = {'model': 'fixture', 'scene_id': 'fixture', 'seed': 42, 'ready': True,
-                         'time': 0., 'generation': 1, 'task': {'status': 'complete'},
-                         'evaluation': {'success': False}, 'tcp_pose': deepcopy(self.pose)}
+                         'time': 0., 'timestep': .002, 'generation': 1, 'task': {'status': 'complete'},
+                         'evaluation': {'success': False, 'source': 'mujoco_privileged_state'},
+                         'tcp_pose': deepcopy(self.pose)}
         image = io.BytesIO()
         Image.new('RGB', (8, 8), 'gray').save(image, 'JPEG')
         self.jpeg = base64.b64encode(image.getvalue()).decode()
@@ -51,6 +53,14 @@ class DeterministicWorker:
             self.snapshot['time'] += self.time_per_move
             self.snapshot['evaluation']['success'] = self.success_after is not None and self.moves >= self.success_after
             return {'joint_targets_rad': []}
+        if kind == 'run_limits':
+            self.deadline = self.snapshot['time'] + command['duration_s']
+            return None
+        if kind == 'verify_task':
+            duration = min(.3, self.deadline - self.snapshot['time'])
+            steps = math.floor((duration + 1e-9) / self.snapshot['timestep'])
+            self.snapshot['time'] += steps * self.snapshot['timestep']
+            return deepcopy(self.snapshot['evaluation'])
         if kind in ('stop', 'pause', 'record_start', 'record_stop', 'run_limits'): return None
         raise AssertionError(f'Unexpected worker command: {kind}')
 
@@ -102,12 +112,12 @@ class AgentRoundLimitTests(unittest.IsolatedAsyncioTestCase):
         for value in (-1, True, 1.5, '31'):
             with self.subTest(value=value), self.assertRaises(ValidationError): AgentConfig(max_rounds=value)
 
-    async def test_unlimited_reaches_model_done_after_old_thirty_round_boundary(self):
-        agent, worker = self.controller()
-        rounds = await self.finish(agent, done_after=32)
+    async def test_unlimited_verifies_completion_after_old_thirty_round_boundary(self):
+        agent, worker = self.controller(success_after=31)
+        rounds = await self.finish(agent, done_after=32, evaluator_stop=False)
         self.assertEqual(len(rounds), 32)
         self.assertEqual(worker.moves, 31)
-        self.assertEqual(agent.state['status'], 'model_done', agent.state)
+        self.assertEqual(agent.state['status'], 'verified', agent.state)
         self.assertIsNone(agent.state['max_rounds'])
 
     async def test_positive_budget_above_thirty_stops_exactly_at_requested_round(self):
@@ -168,6 +178,16 @@ class AgentRoundLimitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(worker.moves, 1)
                 self.assertEqual(agent.state['status'], expected, agent.state)
                 self.assertEqual(agent.state['metrics']['sim_time_s'], 1.)
+
+    async def test_unlimited_repeated_done_stops_when_less_than_one_physics_step_remains(self):
+        agent, worker = self.controller()
+        rounds = await self.finish(agent, done_after=1, max_sim_time_s=1.001)
+        self.assertEqual(rounds, [1, 2, 3, 4])
+        self.assertEqual(worker.commands.count('verify_task'), 4)
+        self.assertEqual(worker.moves, 0)
+        self.assertAlmostEqual(worker.snapshot['time'], 1.)
+        self.assertEqual(agent.state['status'], 'limit', agent.state)
+        self.assertFalse(agent.state['metrics']['success'])
 
 
 if __name__ == '__main__': unittest.main()

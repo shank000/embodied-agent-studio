@@ -25,13 +25,14 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0]||null; }
   insertAdjacentHTML(_,value) { this.html=(this.html||'')+value; }
   setAttribute() {}
-  addEventListener() {}
+  addEventListener(type,listener) { (this.listeners??={})[type]=listener; }
+  focus() { this.focused=true; }
   after() {}
 }
 
 function moduleContext(file,extra={}) {
   const nodes=new Map(),element=id=>{if(!nodes.has(id))nodes.set(id,new Element('div',id));return nodes.get(id);};
-  const scope=vm.createContext({console,URLSearchParams,...extra,document:{querySelector:selector=>element(selector.slice(1)),createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
+  const scope=vm.createContext({console,URLSearchParams,...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
   const code=readFileSync(new URL('../src/'+file,import.meta.url),'utf8').replace(/^import .*;\s*$/gm,'').replace(/\bexport /g,'');
   vm.runInContext(code,scope);
   return {scope,element,run:code=>vm.runInContext(code,scope)};
@@ -186,4 +187,101 @@ test('Agent provider fields disable hidden token inputs and restore API validati
     assert.equal(element('config-output-tokens').disabled,provider!=='openai');
     assert.equal(element('config-base-url').disabled,provider==='codex');
   }
+});
+
+test('experiment categories use environment metrics and never promote model completion claims',()=>{
+  const {scope,run}=resultsContext();
+  for(const [record,expected] of [
+    [{status:'model_done',success:true,metrics:{success:false}},'error'],
+    [{status:'verified',metrics:{success:false}},'error'],
+    [{status:'verified',success:true},'error'],
+    [{status:'model_done'},'error'],
+    [{status:'complete',metrics:{success:'true'}},'error'],
+    [{status:'verified',metrics:{success:true}},'success'],
+    [{status:'complete',metrics:{success:true}},'success'],
+    [{status:'error',metrics:{success:true}},'error'],
+    [{status:'stopped',metrics:{success:true}},'stopped'],
+    [{active:true,status:'verified',metrics:{success:true}},'unfinished'],
+    [{status:'verifying',metrics:{success:false}},'unfinished'],
+    [{status:'replan',metrics:{success:false}},'unfinished']
+  ]){scope.record=record;assert.equal(run('category(record)'),expected,JSON.stringify(record));}
+});
+
+test('drawer evaluation shows physical measurements, thresholds, hold time, and rejected conditions',()=>{
+  const {scope,element,run}=resultsContext();
+  scope.evaluation={task_id:'open_drawer',name:'打开抽屉',criterion:'打开距离 ≥ 0.18 m 并稳定 0.3 s',source:'mujoco_privileged_state',version:'task-evaluation-v2',success:false,currently_satisfied:false,hold_s:0,required_hold_s:0.3,evaluated_at_sim_s:2.5,checks:[{key:'drawer_open',label:'抽屉打开距离',actual:0,expected:'≥ 0.18 m',unit:'m',passed:false}],failure_reasons:['抽屉尚未打开']};
+  run('renderSceneEvaluation(evaluation)');
+  assert.equal(element('evaluation-result').textContent,'未通过环境验收');
+  const evidence=element('evaluation-evidence').innerHTML;
+  for(const text of ['MuJoCo 特权状态','task-evaluation-v2','抽屉打开距离','0 m','≥ 0.18 m','0.000 / 0.300 s','抽屉尚未打开','failed'])assert.ok(evidence.includes(text),text);
+  scope.evaluation.currently_satisfied=true;scope.evaluation.hold_s=0.1;
+  run('renderSceneEvaluation(evaluation)');
+  assert.equal(element('evaluation-result').textContent,'未通过环境验收');
+  assert.match(element('evaluation-evidence').innerHTML,/正在等待稳定性验收/);
+  scope.evaluation.success=true;scope.evaluation.hold_s=0.3;scope.evaluation.checks[0].passed=true;
+  run('renderSceneEvaluation(evaluation)');
+  assert.equal(element('evaluation-result').textContent,'环境验收通过');
+});
+
+test('record details retain rejected model claims and never replace failed final environment metrics',async()=>{
+  const {scope,element,run}=resultsContext();
+  scope.evaluation={source:'mujoco_privileged_state',version:'task-evaluation-v2',success:false,checks:[{label:'抽屉打开距离',actual:0,unit:'m',expected:'≥ 0.18 m',passed:false}],failure_reasons:['抽屉未打开 <unsafe>'],hold_s:0,required_hold_s:0.3};
+  scope.analysis={run_id:'A',status:'unverified',metrics:{success:false,evaluation:scope.evaluation},completion_verifications:[{round:1,accepted:false,model_claim:'抽屉已打开 <unsafe>',message:'模型自报完成，环境未通过',timestamp:'2026-10-23T00:00:00Z',evaluation:scope.evaluation}],rounds:[],total:{}};
+  run("request=async path=>path.endsWith('/analysis')?analysis:[];");
+  await run("showRun({run_id:'A',status:'verified',success:true})");
+  assert.equal(element('result-evaluation-result').textContent,'未通过环境验收');
+  assert.match(element('result-evaluation-evidence').innerHTML,/0 m/);
+  assert.match(element('result-evaluation-evidence').innerHTML,/&lt;unsafe&gt;/);
+  assert.match(element('result-completion-verifications').innerHTML,/第 1 轮 · 模型完成声明/);
+  assert.match(element('result-completion-verifications').innerHTML,/环境拒绝/);
+  assert.match(element('result-completion-verifications').innerHTML,/模型声明：抽屉已打开 &lt;unsafe&gt;/);
+  assert.match(element('result-completion-note').textContent,/逐条保留/);
+  assert.doesNotMatch(element('result-completion-verifications').innerHTML,/环境接受/);
+  run("request=async()=>{throw new Error('Not found');};");
+  await run("showRun({run_id:'B'})");
+  assert.equal(element('result-evaluation').hidden,true);
+});
+
+test('historical model_done records visibly remain unverified when evidence is absent',()=>{
+  const {scope,element,run}=resultsContext();scope.analysis={status:'model_done',rounds:[],total:{}};
+  run("renderResultAnalysis(analysis,{run_id:'legacy',status:'model_done'})");
+  assert.match(element('result-description').textContent,/模型自报完成（非验收）/);
+  assert.equal(element('result-evaluation-result').textContent,'未记录环境验收');
+  assert.match(element('result-evaluation-evidence').innerHTML,/未记录环境评价证据/);
+  assert.match(element('result-completion-note').textContent,/最近 50 条/);
+});
+
+test('task shortcut uses the selected environment instruction without changing the scene or criterion',()=>{
+  const {element,run}=resultsContext();
+  run("let state={evaluation:{task_id:'open_drawer',instruction:'抓住把手并将抽屉拉开。'}};");
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8'),statement=source.split('\n').find(line=>line.startsWith("$('#example-task').addEventListener"));
+  run(statement);element('example-task').listeners.click();
+  assert.equal(element('command').value,'抓住把手并将抽屉拉开。');
+  assert.equal(element('command').focused,true);
+  assert.equal(run('state.evaluation.task_id'),'open_drawer');
+});
+
+test('live policy rejection history renders without action-block fields or fabricated metrics',()=>{
+  const {scope,element,run}=resultsContext();
+  scope.fixtureState={policy:{active:true,status:'replan',round:2,history:[{round:2,result:{status:'completion_rejected',message:'环境尚未验收，请继续尝试 <retry>。'}}]},comparison:{}};
+  run('renderResearch(fixtureState)');
+  const html=element('policy-history').innerHTML;
+  assert.match(html,/第 2 轮 · 完成声明被环境拒绝/);
+  assert.match(html,/环境尚未验收，请继续尝试 &lt;retry&gt;。/);
+  assert.doesNotMatch(html,/undefined|NaN|推理|帧|执行目标限幅/);
+  assert.equal(element('policy-status').textContent,'未通过核验 · 重新决策');
+  scope.fixtureState.policy.history.push({round:3,frames:12,latency_s:1.25,limited_targets:0});
+  run('renderResearch(fixtureState)');
+  assert.match(element('policy-history').innerHTML,/动作块 3 · 12 帧/);
+  assert.match(element('policy-history').innerHTML,/推理 1.25 s · 执行目标限幅 0 项/);
+});
+
+test('composition rejection history renders without an action or selected candidate',()=>{
+  const {scope,element,run}=moduleContext('rsi.js');
+  scope.fixtureRun={run_id:'composition',step:4,history:[{step:4,result:{status:'completion_rejected',message:'环境尚未验收，请重新规划。'}}]};
+  run('renderRunFeedback(fixtureRun)');
+  const html=element('rsi-run-history').innerHTML;
+  assert.match(html,/第 4 轮 · 完成声明被环境拒绝/);
+  assert.match(html,/环境尚未验收，请重新规划。/);
+  assert.doesNotMatch(html,/undefined|NaN|completion_rejected|位置误差|姿态误差/);
 });

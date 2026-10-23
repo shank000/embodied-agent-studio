@@ -1,7 +1,7 @@
 const $=selector=>document.querySelector(selector);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const names={agent:'视觉 Agent',smolvla:'SmolVLA',vla:'自定义 VLA',wam:'自定义 WAM'};
-const statuses={idle:'等待任务',loading:'加载模型',preparing:'准备实验',observing:'采集观察',thinking:'策略推理',executing:'执行动作',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verified:'评价器确认成功',model_done:'模型报告完成',blocked:'无法继续',error:'运行错误',failed:'执行失败',stopped:'已停止',cancelled:'已取消',canceled:'已取消',interrupted:'服务中断',returned:'已返回',round_complete:'本轮结束',limit:'达到上限',running:'运行中',complete:'实验完成',unfinished:'未结束'};
+const statuses={idle:'等待任务',loading:'加载模型',preparing:'准备实验',observing:'采集观察',thinking:'策略推理',executing:'执行动作',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verifying:'环境核验中',replan:'未通过核验 · 重新决策',unverified:'未通过环境验收',verified:'评价器确认成功',model_done:'模型自报完成（非验收）',blocked:'无法继续',error:'运行错误',failed:'执行失败',stopped:'已停止',cancelled:'已取消',canceled:'已取消',interrupted:'服务中断',returned:'已返回',round_complete:'本轮结束',limit:'达到上限',running:'运行中',complete:'实验结束',unfinished:'未结束'};
 let context, catalog, configs={}, lastGeneration=-1, lastRows='', lastPolicy='', currentPage='workspace', runs=[], selectedRun='',resultsOffset=0,resultsHasMore=true,analysisCatalog=[],refreshingResults=false,lastResultRefresh=0,lastRunStates='';
 let selectedResult=null,resultsGeneration=0,detailGeneration=0,analysisGeneration=0,analysisCatalogGeneration=0,hasAnalysisResults=false,resultMutationPending=false,lastDetailKey='';
 const checkedResults=new Set();
@@ -32,6 +32,34 @@ export function renderRunVideo(container,runId,video){
 const metric=value=>typeof value==='number'&&Number.isFinite(value)?value:null;
 const numberText=value=>metric(value)==null?'—':value.toLocaleString('zh-CN',{maximumFractionDigits:2});
 const secondsText=value=>metric(value)==null?'—':`${Number(value).toFixed(2)} s`;
+const evaluationOutcome=(evaluation,success)=>typeof success==='boolean'?success:evaluation?.success;
+const evaluationOutcomeText=value=>value===true?'环境验收通过':value===false?'未通过环境验收':'未记录环境验收';
+function evaluationValue(value,unit=''){
+  const text=value==null?'未记录':typeof value==='number'&&Number.isFinite(value)?value.toLocaleString('zh-CN',{maximumFractionDigits:6}):typeof value==='boolean'?value?'是':'否':typeof value==='string'?value:JSON.stringify(value);
+  return escape(text)+(value==null||!unit?'':` ${escape(unit)}`);
+}
+export function evaluationEvidenceMarkup(evaluation,{success}={}){
+  if(!evaluation)return '<p class="evaluation-note">未记录环境评价证据；模型自报完成不能作为任务成功依据。</p>';
+  const result=evaluationOutcome(evaluation,success),source=evaluation.source==='mujoco_privileged_state'?'MuJoCo 特权状态':evaluation.source||'来源未记录',checks=Array.isArray(evaluation.checks)?evaluation.checks:[],reasons=Array.isArray(evaluation.failure_reasons)?evaluation.failure_reasons:[];
+  const hold=metric(evaluation.hold_s),required=metric(evaluation.required_hold_s),sim=metric(evaluation.evaluated_at_sim_s);
+  return `<p class="evaluation-note">评价来源：${escape(source)} · 版本 ${escape(evaluation.version||'未记录')}${sim==null?'':` · 仿真时刻 ${sim.toFixed(3)} s`}。物体与关节真值用于独立验收。</p>${hold==null&&required==null?'':`<p class="evaluation-hold">条件连续满足 <strong>${hold==null?'未记录':hold.toFixed(3)} / ${required==null?'未记录':required.toFixed(3)} s</strong>${evaluation.currently_satisfied===true&&result!==true?' · 正在等待稳定性验收':''}</p>`}${checks.length?`<div class="evaluation-table-wrap"><table class="evaluation-checks"><thead><tr><th>验收条件</th><th>实际值</th><th>要求</th><th>结果</th></tr></thead><tbody>${checks.map(check=>`<tr><td>${escape(check.label||check.key)}</td><td>${evaluationValue(check.actual,check.unit)}</td><td>${evaluationValue(check.expected)}</td><td><span class="evaluation-check ${check.passed===true?'passed':check.passed===false?'failed':'unknown'}">${check.passed===true?'通过':check.passed===false?'未通过':'未评价'}</span></td></tr>`).join('')}</tbody></table></div>`:'<p class="evaluation-note">这条历史记录没有逐项判据与测量值。</p>'}${reasons.length?`<ul class="evaluation-failures">${reasons.map(reason=>`<li>${escape(reason)}</li>`).join('')}</ul>`:''}${evaluation.ever_success===true&&result!==true?'<p class="evaluation-note">过程中曾满足成功条件，但当前状态未通过验收；最终结果以结束时的环境证据为准。</p>':''}`;
+}
+export function renderSceneEvaluation(evaluation){
+  $('#evaluation-name').textContent=evaluation?.name||'场景任务评价';$('#evaluation-criterion').textContent=evaluation?.criterion||'等待环境返回任务判据。';
+  $('#evaluation-result').textContent=evaluationOutcomeText(evaluation?.success);$('#evaluation-result').classList.toggle('success',evaluation?.success===true);
+  const evidence=$('#evaluation-evidence'),key=JSON.stringify(evaluation??null);if(evidence.dataset.evaluationKey!==key){evidence.dataset.evaluationKey=key;evidence.innerHTML=evaluationEvidenceMarkup(evaluation);}
+}
+export function completionVerificationMarkup(records){
+  if(!records.length)return '<p class="evaluation-note">未记录模型完成声明的环境核验事件；这不代表模型声明已被接受。</p>';
+  return records.map(record=>{const entry=record.data||record,accepted=entry.accepted===true,label=accepted?'环境接受':entry.accepted===false?'环境拒绝':'未记录核验结果';return `<details class="completion-verification"><summary>第 ${escape(entry.round??entry.step??'?')} 轮 · 模型完成声明 · <span class="evaluation-check ${accepted?'passed':entry.accepted===false?'failed':'unknown'}">${label}</span></summary>${entry.model_claim?`<p class="evaluation-note">模型声明：${escape(entry.model_claim)}</p>`:''}${entry.message?`<p class="evaluation-note">${escape(entry.message)}</p>`:''}${record.timestamp?`<p class="evaluation-note">${escape(record.timestamp)}</p>`:''}${evaluationEvidenceMarkup(entry.evaluation,{success:entry.accepted})}</details>`;}).join('');
+}
+function renderResultCompletion(analysis,run,events){
+  const metrics=analysis.metrics??run.metrics,evaluation=metrics?.evaluation||analysis.evaluation,success=typeof metrics?.success==='boolean'?metrics.success:undefined;
+  $('#result-evaluation').hidden=false;$('#result-evaluation-result').textContent=evaluationOutcomeText(success);$('#result-evaluation-result').classList.toggle('success',success===true);
+  const evidence=$('#result-evaluation-evidence'),key=JSON.stringify([evaluation,success]);if(evidence.dataset.evaluationKey!==key){evidence.dataset.evaluationKey=key;evidence.innerHTML=evaluationEvidenceMarkup(evaluation,{success});}
+  const complete=Array.isArray(analysis.completion_verifications),records=complete?analysis.completion_verifications:events.filter(event=>event.event==='completion_verification');
+  const verifications=$('#result-completion-verifications'),verificationKey=JSON.stringify(records);if(verifications.dataset.verificationKey!==verificationKey){verifications.dataset.verificationKey=verificationKey;verifications.innerHTML=completionVerificationMarkup(records);}$('#result-completion-note').textContent=complete?'逐条保留模型完成声明与环境的接受／拒绝结果。':'此处读取最近 50 条公开事件；完整核验过程请下载 JSONL。历史模型自报完成不作为成功验收。';
+}
 export function renderRunTimer(container,run){
   if(!container)return;const timing=run?.timing||{},wall=metric(timing.elapsed_wall_s)??metric(run?.elapsed_s)??metric(run?.metrics?.wall_time_s),inference=metric(timing.inference_elapsed_s);
   container.hidden=wall==null&&inference==null;if(container.hidden)return;
@@ -144,8 +172,7 @@ export function renderResearch(state){
     tasksFor(state.scene_id,$('#task-select'),state.evaluation?.task_id);updateSceneInfo();
     $('#model-note').hidden=!state.model_note;$('#model-note').textContent=state.model_note;
   }
-  const evaluation=state.evaluation;
-  if(evaluation){$('#evaluation-name').textContent=evaluation.name;$('#evaluation-criterion').textContent=evaluation.criterion;$('#evaluation-result').textContent=evaluation.success?'已达成':'尚未达成';$('#evaluation-result').classList.toggle('success',evaluation.success);}
+  renderSceneEvaluation(state.evaluation);
   if(state.model==='rm65_gaia'){$('#gripper-label').textContent='灵巧手';$('#gripper-status').textContent='15 关节';$('#gripper-detail').textContent='可在关节控制中逐指调节';}
   const policy=state.policy||{},comparison=state.comparison||{},locked=!!(state.agent?.active||policy.active||comparison.active||state.research?.active||state.experiment?.active);
   $('#policy-status').textContent=statuses[policy.status]||policy.status||'等待任务';$('#policy-message').textContent=policy.message||'';
@@ -159,7 +186,11 @@ export function renderResearch(state){
   document.querySelectorAll('#comparison-form input,#comparison-form select').forEach(input=>input.disabled=comparison.active);
   $('#policy-log-link').hidden=!policy.run_id;if(policy.run_id)$('#policy-log-link').href=`/api/runs/${policy.run_id}/download`;
   const key=JSON.stringify(policy.history||[]);
-  if(key!==lastPolicy){lastPolicy=key;$('#policy-history').innerHTML=(policy.history||[]).slice(-5).reverse().map(row=>`<div class="round-record"><strong>动作块 ${row.round} · ${row.frames} 帧</strong><p>推理 ${row.latency_s.toFixed(2)} s · 执行目标限幅 ${row.limited_targets} 项</p></div>`).join('');}
+  if(key!==lastPolicy){lastPolicy=key;$('#policy-history').innerHTML=(policy.history||[]).slice(-5).reverse().map(row=>{
+    if(row.result?.status==='completion_rejected')return `<div class="round-record"><strong>第 ${escape(row.round??'?')} 轮 · 完成声明被环境拒绝</strong><p>${escape(row.result.message||'')}</p></div>`;
+    const details=[metric(row.latency_s)==null?'':`推理 ${row.latency_s.toFixed(2)} s`,metric(row.limited_targets)==null?'':`执行目标限幅 ${row.limited_targets} 项`].filter(Boolean);
+    return `<div class="round-record"><strong>动作块 ${escape(row.round??'?')}${metric(row.frames)==null?'':` · ${row.frames} 帧`}</strong>${details.length?`<p>${details.join(' · ')}</p>`:''}</div>`;
+  }).join('');}
   $('#comparison-message').textContent=comparison.message||'尚未运行。';
   const rowsKey=JSON.stringify(comparison.rows||[]);
   if(rowsKey!==lastRows){lastRows=rowsKey;renderComparison(comparison.rows||[]);}
@@ -172,16 +203,16 @@ function renderComparison(rows){
   const root=$('#comparison-rows');
   if(!rows.length){root.innerHTML='<tr><td colspan="8" class="empty-state">选择方法并开始实验，真实运行结果会出现在这里。</td></tr>';$('#comparison-cards').replaceChildren();return;}
   const seconds=value=>value==null?'—':Number(value).toFixed(2)+' s';
-  root.innerHTML=rows.map(row=>{const m=row.metrics||{},valid=!!row.metrics&&!['error','stopped'].includes(row.status);return `<tr><td><strong>${escape(names[row.method])}</strong><small>种子 ${row.seed}</small></td><td><code>${escape(row.initial_state_id)}</code></td><td title="${escape(row.message)}">${escape(statuses[row.status]||row.status)}</td><td>${valid?(m.success?'<span class="result-pill success">成功</span>':'<span class="result-pill">未达成</span>'):'—'}</td><td>${seconds(m.sim_time_s)}</td><td>${seconds(m.mean_inference_s)}</td><td>${m.inference_count??'—'}</td><td>${row.run_id?`<a href="/api/runs/${escape(row.run_id)}/download">JSONL ↗</a>${runVideoMarkup(row.run_id,row.video,true)}`:'—'}</td></tr>`;}).join('');
+  root.innerHTML=rows.map(row=>{const m=row.metrics||{},valid=!!row.metrics&&!['error','stopped'].includes(row.status);return `<tr><td><strong>${escape(names[row.method])}</strong><small>种子 ${row.seed}</small></td><td><code>${escape(row.initial_state_id)}</code></td><td title="${escape(row.message)}">${escape(statuses[row.status]||row.status)}</td><td>${valid?(m.success===true?'<span class="result-pill success">成功</span>':'<span class="result-pill">未达成</span>'):'—'}</td><td>${seconds(m.sim_time_s)}</td><td>${seconds(m.mean_inference_s)}</td><td>${m.inference_count??'—'}</td><td>${row.run_id?`<a href="/api/runs/${escape(row.run_id)}/download">JSONL ↗</a>${runVideoMarkup(row.run_id,row.video,true)}`:'—'}</td></tr>`;}).join('');
   const methods=[...new Set(rows.map(row=>row.method))];
   $('#comparison-cards').innerHTML=methods.map(method=>{
-    const group=rows.filter(row=>row.method===method),last=group.at(-1),success=group.filter(row=>row.metrics?.success&&!['error','stopped'].includes(row.status)).length;
+    const group=rows.filter(row=>row.method===method),last=group.at(-1),success=group.filter(row=>row.metrics?.success===true&&!['error','stopped'].includes(row.status)).length;
     return `<article class="panel comparison-card"><div class="comparison-card-heading"><strong>${escape(names[method])}</strong><span>${escape(statuses[last.status]||last.status)}</span></div>${last.run_id?`<img src="/api/runs/${escape(last.run_id)}/frame" alt="${escape(names[method])} 运行最终画面">`:'<div class="comparison-placeholder">正在运行，结束后显示真实画面</div>'}<div class="comparison-card-metrics"><div><small>成功 / 全部分配试验</small><strong>${success} / ${group.length}</strong></div><div><small>错误 / 停止</small><strong>${group.filter(row=>row.status==='error').length} / ${group.filter(row=>row.status==='stopped').length}</strong></div></div><p>${escape(last.message||'等待执行结果。')}</p>${last.run_id?runVideoMarkup(last.run_id,last.video):''}</article>`;
   }).join('');
 }
 
 function resultError(error){$('#results-error').textContent=error.message;$('#results-error').hidden=false;context.toast(error.message);}
-function category(run){if(run.metrics?.success||run.success||run.status==='verified')return 'success';if(['stopped','cancelled','canceled'].includes(run.status))return 'stopped';if(run.active||['unfinished','interrupted','running','preparing','observing','thinking','executing','loading','planning','deciding'].includes(run.status))return 'unfinished';return 'error';}
+export function category(run){if(run.active||['unfinished','interrupted','running','preparing','observing','thinking','executing','loading','planning','deciding','verifying','replan'].includes(run.status))return 'unfinished';if(['stopped','cancelled','canceled'].includes(run.status))return 'stopped';if(run.metrics?.success===true&&!['error','failed'].includes(run.status))return 'success';return 'error';}
 function resultModel(run){return run.model||run.config?.model||run.recipe?.agent?.model||run.recipe?.policy?.model||'';}
 function resultName(run){return run.display_name||run.default_name||run.run_id||'实验记录';}
 function resultIsActive(run){return !!run.active||run.status==='running';}
@@ -226,13 +257,13 @@ async function showRun(run){
     selectedResult={...run,...analysis};renderResultActions(selectedResult);
     const detailKey=JSON.stringify([id,analysis,events]);if(detailKey===lastDetailKey)return;
     $('#log-download').hidden=false;$('#log-download').href=`/api/runs/${encodeURIComponent(id)}/download`;$('#log-detail').textContent=events.map(event=>JSON.stringify(event,null,2)).join('\n\n');
-    renderRunVideo($('#log-video'),id,analysis.video||run.artifacts?.video||run.video);renderResultAnalysis(analysis,run);lastDetailKey=detailKey;
+    renderRunVideo($('#log-video'),id,analysis.video||run.artifacts?.video||run.video);renderResultAnalysis(analysis,run,events);lastDetailKey=detailKey;
   }catch(error){if(selectedRun===id&&generation===detailGeneration)resultError(error);}
 }
 function clearResult(){
   selectedRun='';selectedResult=null;lastDetailKey='';detailGeneration++;$('#log-detail-title').textContent='选择一条实验结果';$('#log-detail-id').textContent='';$('#log-download').hidden=true;$('#result-actions').hidden=true;$('#result-management-note').hidden=true;
   for(const selector of ['#result-summary','#result-calls','#result-children','#result-task-text'])$(selector).replaceChildren();
-  for(const selector of ['#result-round-charts','#result-chart-note','#result-outcome-message','#result-data-issues','#result-cost-panel'])$(selector).hidden=true;
+  for(const selector of ['#result-round-charts','#result-chart-note','#result-outcome-message','#result-data-issues','#result-cost-panel','#result-evaluation'])$(selector).hidden=true;
   renderRunVideo($('#log-video'),'',null);$('#result-description').textContent='接口未返回的用量与推理文本会标记缺失，不推测补齐。';$('#log-detail').textContent='运行记录将在这里展示。';
 }
 function renderResultActions(run){
@@ -345,12 +376,13 @@ async function refreshPricingStatus(manual=false){
   }catch(error){if(generation===pricingGeneration){if(manual||!pricingErrorIsManual){pricingError=`价格状态更新失败：${error.message}${pricingState?'；仍显示上次取得的来源状态。':''}`;pricingErrorIsManual=manual;}if(manual)context.toast(pricingError);}}
   finally{if(generation===pricingGeneration){pricingLoading=false;pricingRefreshing=false;renderPricingStatus();}}
 }
-function renderResultAnalysis(analysis,run){
+function renderResultAnalysis(analysis,run,events=[]){
   const total=analysis.total||{},rounds=analysis.rounds||[],wall=metric(analysis.elapsed_s)??metric(run.metrics?.wall_time_s),state=statuses[analysis.status]||analysis.status;
   $('#result-description').textContent=`${runKinds(analysis.kind||run.kind)} · ${analysis.model||resultModel(run)||'模型未记录'} · 推理强度 ${analysis.reasoning||'未记录'} · ${state||'状态未记录'}${analysis.started_at?` · 开始 ${analysis.started_at}`:''}${analysis.recovery_assisted?` · 恢复辅助 · ${numberText(analysis.recovery_attempts)} 次（调用总量含修复诊断与重试）`:''}`;
   $('#result-task-text').textContent=analysis.task||run.task||'';const message=analysis.message||analysis.error||run.message||'';$('#result-outcome-message').textContent=typeof message==='string'?message:JSON.stringify(message);$('#result-outcome-message').hidden=!message;$('#result-outcome-message').classList.toggle('error',['error','failed','blocked'].includes(analysis.status||run.status));
   $('#result-data-issues').textContent=(analysis.issues||[]).length?`记录读取提示：${analysis.issues.join('；')}`:'';$('#result-data-issues').hidden=!analysis.issues?.length;
   $('#result-summary').innerHTML=[['完整墙钟',secondsText(wall)],['模型调用次数',numberText(total.calls)],['总 tokens',numberText(total.total_tokens)],['输出 tokens',numberText(total.output_tokens)],['累计调用耗时',secondsText(total.inference_s)],['用量记录',total.usage_complete?'完整':'存在缺失']].map(([label,value])=>`<div><small>${escape(label)}</small><strong>${escape(value)}</strong></div>`).join('');
+  renderResultCompletion(analysis,run,events);
   renderResultCost(analysis.cost);
   const points=rounds.map((row,index)=>({label:`第 ${row.round??'?'} 轮 / 调用 ${row.call_id??index+1}`,shortLabel:`${row.round??'?'} / ${index+1}`,value:row.output_tokens}));
   $('#result-round-charts').hidden=false;$('#result-chart-note').hidden=false;$('#result-token-chart').innerHTML=metricChartMarkup(points,'每轮接口输出 tokens');$('#result-time-chart').innerHTML=metricChartMarkup(points.map((point,index)=>({...point,value:rounds[index].inference_s})),'每轮模型调用耗时');

@@ -185,6 +185,8 @@ def analyze_run(run_id, *, _ancestors=()):
         'message': result.get('message'), 'task': result.get('task'), 'model': model, 'reasoning': effort,
         'started_at': started_at, 'ended_at': ended_at, 'elapsed_s': elapsed,
         'metrics': result.get('metrics'), 'video': (result.get('artifacts') or {}).get('video'),
+        'completion_verifications': [{'timestamp': event.get('timestamp'), **event.get('data', {})}
+            for event in events if event.get('event') == 'completion_verification'],
         'recovery_assisted':bool(result.get('recovery_assisted') or any(event.get('event')=='recoverable_error' for event in events)),
         'recovery_attempts':sum(event.get('event')=='recoverable_error' for event in events),
         'total': totals, 'rounds': ordered, 'children': children, 'trials': rows, 'cost': cost,

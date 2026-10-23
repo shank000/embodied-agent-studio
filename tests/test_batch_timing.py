@@ -101,7 +101,8 @@ class NativeBatchTimingTests(unittest.TestCase):
                 async def check():
                     base_url = f'http://127.0.0.1:{server.server_port}'
                     agent = AgentController(worker)
-                    agent.configure(AgentConfig(provider='custom', model='local-agent', base_url=base_url+'/agent'))
+                    # One-call timing fixture: a model's done proposal is not an episode stop.
+                    agent.configure(AgentConfig(provider='custom', model='local-agent', base_url=base_url+'/agent', max_rounds=1))
                     policy = PolicyController(worker)
                     policy.configure(PolicyConfig(kind='vla', model='local-policy', endpoint=base_url+'/policy'))
                     parent = ComparisonController(worker, agent, policy)

@@ -25,6 +25,20 @@ def action_at(pose, **changes):
 
 
 class TCPTests(unittest.TestCase):
+    def test_policy_feedback_withholds_privileged_verification_evidence(self):
+        pose = {'frame': 'world', 'position_m': [.2, 0., .3], 'quaternion_wxyz': [1., 0., 0., 0.]}
+        observation = {'tcp': pose, 'cameras': []}
+        evaluation = {'values': {'drawer_open_m': .001}, 'checks': [{'actual': .001}]}
+        history = [{'round': 1, 'verification': {'accepted': False, 'evaluation': evaluation},
+                    'result': {'message': '环境未确认任务完成。', 'actual_tcp': pose,
+                               'evaluation': evaluation}}]
+        payload = observation_text('拉开抽屉', observation, history, pose)
+        self.assertNotIn('drawer_open_m', payload)
+        self.assertNotIn('checks', payload)
+        self.assertNotIn('evaluation', payload)
+        self.assertIn('actual_tcp', payload)
+        self.assertIn('环境未确认任务完成', payload)
+
     def test_absolute_pose_reaches_with_actuators_on_both_models(self):
         for model in ('panda', 'so101'):
             with self.subTest(model=model):
@@ -124,7 +138,7 @@ class VisualLoopTests(unittest.TestCase):
     def test_controller_waits_for_physics_and_observes_again(self):
         # Stub only the external model boundary. Images, IK and physics are real.
         async def check():
-            await self.worker.execute({'action': 'load', 'model': 'panda'})
+            await self.worker.execute({'action': 'load', 'model': 'panda', 'scene_id': 'tabletop', 'task_id': 'reach_up'})
             agent = AgentController(self.worker)
             seen = []
             async def model_boundary(config, prompt, cameras):
@@ -135,13 +149,50 @@ class VisualLoopTests(unittest.TestCase):
                     return action_at(pose), None
                 return action_at(pose, status='done', explanation='已看到末端抬高。'), None
             with patch('server.agent.codex_action', model_boundary):
-                await agent.start(AgentStart(task='抬高两厘米'))
+                await agent.start(AgentStart(task='抬高两厘米', evaluator_stop=False))
                 await asyncio.wait_for(agent.task, 20)
-            self.assertEqual(agent.state['status'], 'model_done', agent.state)
+            self.assertEqual(agent.state['status'], 'verified', agent.state)
+            self.assertTrue(agent.state['metrics']['success'])
             self.assertEqual(len(seen), 2)
             self.assertGreater(seen[1]['time'], seen[0]['time'])
             self.assertEqual(agent.state['history'][0]['result']['status'], 'complete')
             self.assertFalse(agent.state['active'])
+        asyncio.run(check())
+
+    def test_closed_drawer_rejects_false_done_reobserves_and_archives_evidence(self):
+        async def check():
+            await self.worker.execute({'action': 'load', 'model': 'panda',
+                'scene_id': 'drawer', 'task_id': 'open_drawer', 'seed': 42})
+            await self.worker.execute({'action': 'settle'})
+            agent = AgentController(self.worker)
+            agent.configure(AgentConfig(provider='custom', model='completion-fixture',
+                base_url='http://127.0.0.1:9/unused', max_rounds=2))
+            seen = []
+            async def false_completion(config, prompt, cameras):
+                payload = json.loads(prompt)
+                seen.append(payload)
+                self.assertNotIn('drawer_open_m', prompt)
+                self.assertNotIn('mujoco_privileged_state', prompt)
+                return action_at(payload['observation']['tcp'], status='done',
+                    explanation='故意错误的模型声明：抽屉已经打开。'), None
+            with patch('server.agent.api_action', false_completion):
+                await agent.start(AgentStart(task='拉开抽屉'))
+                await asyncio.wait_for(agent.task, 20)
+            self.assertEqual(agent.state['status'], 'limit', agent.state)
+            self.assertFalse(agent.state['metrics']['success'])
+            self.assertEqual(len(seen), 2)
+            self.assertGreater(seen[1]['observation']['time'], seen[0]['observation']['time'])
+            self.assertIn('环境未确认任务完成', json.dumps(seen[1], ensure_ascii=False))
+            final = agent.state['metrics']['evaluation']
+            self.assertEqual(final['source'], 'mujoco_privileged_state')
+            self.assertLess(final['values']['drawer_open_m'], final['values']['drawer_threshold_m'])
+            from server.analysis import analyze_run
+            analysis = analyze_run(agent.state['run_id'])
+            verifications = analysis['completion_verifications']
+            self.assertEqual(len(verifications), 2)
+            self.assertTrue(all(row['accepted'] is False for row in verifications))
+            self.assertTrue(all(row['evaluation']['checks'] for row in verifications))
+            self.assertEqual(analysis['metrics']['evaluation'], final)
         asyncio.run(check())
 
     def test_stopping_inference_prevents_late_control(self):
@@ -176,7 +227,7 @@ class VisualLoopTests(unittest.TestCase):
             repair=RepairController(root)
             repair.configure(RepairConfig(provider='custom',model='local-coding-fixture',
                 base_url='http://127.0.0.1:1/unused',auto_analyze=True))
-            await self.worker.execute({'action':'load','model':'panda'})
+            await self.worker.execute({'action':'load','model':'panda','scene_id':'tabletop','task_id':'reach_up'})
             agent=AgentController(self.worker)
             agent.configure(AgentConfig(provider='compatible',model='local-visual-fixture',api_key='fixture-key'))
             agent.recovery=RecoveryCoordinator(repair)
@@ -205,10 +256,10 @@ class VisualLoopTests(unittest.TestCase):
                 return proposal,usage
             with patch('server.agent.api_action',boundary),patch('server.repair.api_action',diagnose), \
                     patch.object(self.worker,'execute',wraps=self.worker.execute) as execute:
-                await agent.start(AgentStart(task='抬高两厘米并确认',record_video=True))
+                await agent.start(AgentStart(task='抬高两厘米并确认',record_video=True,evaluator_stop=False))
                 await asyncio.wait_for(agent.task,25)
                 commands=[call.args[0]['action'] for call in execute.call_args_list]
-            self.assertEqual(agent.state['status'],'model_done',agent.state)
+            self.assertEqual(agent.state['status'],'verified',agent.state)
             self.assertEqual(agent.state['round'],2);self.assertEqual(len(seen),3)
             self.assertEqual(seen[0]['observation']['time'],seen[1]['observation']['time'])
             self.assertGreater(seen[2]['observation']['time'],seen[1]['observation']['time'])

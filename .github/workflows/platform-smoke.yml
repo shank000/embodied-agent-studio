@@ -66,6 +66,9 @@ jobs:
       - name: Check real robot motion
         run: node tools/python.mjs -m unittest tests.test_simulation.PhysicsTests.test_real_models_and_actuated_joint_motion -v
 
+      - name: Check environment task criteria and completion gates
+        run: node tools/python.mjs -m unittest tests.test_task_evaluation tests.test_completion_controllers -v
+
   linux-rendering:
     name: Native rendering / Linux OSMesa
     runs-on: ubuntu-latest
@@ -101,4 +104,4 @@ jobs:
           .venv/bin/python -m pip install -r requirements.txt
 
       - name: Check native rendering and service controls
-        run: .venv/bin/python -m unittest tests.test_simulation.NativeServiceTests.test_render_pause_single_step_model_switch_and_resume -v
+        run: .venv/bin/python -m unittest tests.test_simulation.NativeServiceTests.test_render_pause_single_step_model_switch_and_resume tests.test_agent.VisualLoopTests.test_closed_drawer_rejects_false_done_reobserves_and_archives_evidence -v

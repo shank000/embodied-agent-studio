@@ -16,9 +16,10 @@ from . import agent as agent_module
 from . import recovery as recovery_module
 from .control import PoseAction
 from .decision import DecisionConfig, choose_candidate, choose_decisions
-from .policy import PolicyConfig, PolicyOutput, predict_policy, warmup_policy, release_local_service
+from .policy import PolicyConfig, PolicyOutput, predict_policy, warmup_policy, release_local_service, policy_task_with_feedback
 from .runlog import RunLog, CURRENT_LOG
 from .telemetry import controller_timing
+from .task_verification import verify_completion, environment_success
 
 
 class CompositionStart(BaseModel):
@@ -63,8 +64,8 @@ class PlannerOutput(BaseModel):
 PLANNER_PROMPT = """Plan a short subgoal for one simulated robot from three synchronized images and proprioception.
 Output exactly one JSON object matching the provided schema. Do not use tools, shell or files.
 You do not command actuators. A separate typed decision model chooses among locally generated candidates.
-status=plan caches this subgoal until expiry or execution failure; done is your completion judgment,
-not simulator verification. blocked must preserve the real reason. visual_summary is a short public
+status=plan caches this subgoal until expiry or execution failure; done requests independent simulator
+verification. A rejected completion request requires a new plan. blocked must preserve the real reason. visual_summary is a short public
 description of visible facts, not private reasoning or hidden simulator object coordinates.
 For local translate/gripper/hold skills, robot_id selects a robot from observation.robots;
 null keeps observation.active_robot. Read the selected robot's TCP, limits and gripper,
@@ -304,7 +305,8 @@ class CompositionController:
         self.policy_calls += 1
         remaining = request.max_sim_time_s - (observation['time'] - self.initial_state['time'])
         body = {'protocol': 'embodied-policy-v1', 'model': config.model, 'device': config.device,
-            'task': self.state.get('subgoal', self.state['task']), 'observation': observation,
+            'task': policy_task_with_feedback(self.state.get('subgoal', self.state['task']), self.state['history']),
+            'observation': observation,
             'seed': self.initial_state.get('seed', 42)+number-1, 'reset': self.policy_calls == 1,
             'horizon': min(config.horizon, max(1, int(remaining/config.dt_s))), 'dt_s': config.dt_s}
         async def infer(feedback, effective_config):
@@ -319,6 +321,17 @@ class CompositionController:
         self._assert_current(observation)
         self.log.write('policy_output', {'step': number, 'observation_id': observation['observation_id'], 'response': raw})
         return output
+
+    async def _verify_done(self, explanation, observation):
+        accepted = await verify_completion(self, self.worker, self.log, self.state['step'],
+            explanation, observation['generation'])
+        if not accepted:
+            self.state['history'].append({'step': self.state['step'],
+                'observation_id': observation['observation_id'], 'observed_time': observation['time'],
+                'result': {'status': 'completion_rejected', 'message': self.state['message']}})
+            self.state['history'] = self.state['history'][-30:]
+            self.log.write('replan_trigger', {'step': self.state['step'], 'reason': 'completion_rejected'})
+        return accepted
 
     @staticmethod
     def _policy_candidates(output):
@@ -398,36 +411,53 @@ class CompositionController:
                     current = self._snapshot()
                     if current.get('evaluation', {}).get('success'):
                         self.state.update(status='verified', message='场景评价器确认任务成功。'); return
-                    if current['time'] - self.initial_state['time'] >= request.max_sim_time_s - 1e-8:
+                    remaining = request.max_sim_time_s - (current['time'] - self.initial_state['time'])
+                    if remaining <= 1e-8 or remaining + 1e-8 < current.get('timestep', 0):
                         self.state.update(status='limit', message='已达到仿真时间上限。'); return
                     step_start = time.monotonic()
                     observation = await self._timed('observation', self._capture(number))
                     if number == 1: self.initial_tcp = deepcopy(observation['tcp'])
                     if recipe['mode'] == 'agent':
                         action = await self._agent(agent_config, observation)
-                        if action.status != 'move':
-                            self.state.update(status='model_done' if action.status == 'done' else 'blocked', message=action.explanation); return
+                        if action.status == 'done':
+                            if await self._verify_done(action.explanation, observation): return
+                            continue
+                        if action.status == 'blocked':
+                            self.state.update(status='blocked', message=action.explanation); return
                         candidates = [{'id': 'agent_pose', 'description': action.explanation,
                             'action_type': 'tcp_pose', 'pose': action.model_dump()}]
                         selected = candidates[0]
                     elif recipe['mode'] == 'policy':
                         output = await self._policy(policy_config, observation, request, number)
-                        if output.action_type == 'tcp_pose' and output.pose.status != 'move':
-                            self.state.update(status='model_done' if output.pose.status == 'done' else 'blocked', message=output.pose.explanation); return
+                        if output.action_type == 'tcp_pose' and output.pose.status == 'done':
+                            if await self._verify_done(output.pose.explanation, observation): return
+                            continue
+                        if output.action_type == 'tcp_pose' and output.pose.status == 'blocked':
+                            self.state.update(status='blocked', message=output.pose.explanation); return
                         candidates = self._policy_candidates(output); selected = candidates[0]
                     else:
                         if plan is None:
                             plan = await self._agent(agent_config, observation, planner=True, reason=reason)
                             plan_age = 0; plan_observation = {'observation_id': self.observation_id, 'time': observation['time']}
                             self.state['subgoal'] = plan.subgoal
-                            if plan.status != 'plan':
-                                self.state.update(status='model_done' if plan.status == 'done' else 'blocked', message=plan.explanation); return
+                            if plan.status == 'done':
+                                if await self._verify_done(plan.explanation, observation): return
+                                plan = None; reason = 'completion_rejected'
+                                continue
+                            if plan.status == 'blocked':
+                                self.state.update(status='blocked', message=plan.explanation); return
                         generation_start = time.monotonic()
                         policy_source = recipe.get('skills', {}).get('candidate_source') == 'policy' or plan.skill == 'policy'
                         if policy_source:
                             if policy_config is None:
                                 self.state.update(status='blocked', message='子目标要求策略候选，但该方法未配置策略。'); return
                             output = await self._policy(policy_config, observation, request, number)
+                            if output.action_type == 'tcp_pose' and output.pose.status == 'done':
+                                if await self._verify_done(output.pose.explanation, observation): return
+                                plan = None; reason = 'completion_rejected'
+                                continue
+                            if output.action_type == 'tcp_pose' and output.pose.status == 'blocked':
+                                self.state.update(status='blocked', message=output.pose.explanation); return
                             candidates = self._policy_candidates(output)
                         else:
                             candidates = skill_candidates(observation, plan, recipe.get('skills'))
@@ -489,7 +519,7 @@ class CompositionController:
                             plan = None; reason = 'subgoal_expired'
                             self.log.write('replan_trigger', {'step': number, 'reason': reason})
                 if self.state['status'] == 'replan':
-                    self.state['message'] += ' 已达到本次决策步数上限，未执行该步动作。'
+                    self.state.update(status='limit', message=self.state['message'] + ' 已达到本次决策步数上限，未执行该步动作。')
                     return
                 failed = self.state['history'] and self.state['history'][-1]['result']['status'] == 'failed'
                 self.state.update(status='failed' if failed else 'round_complete' if request.one_step else 'limit',
@@ -537,7 +567,9 @@ class CompositionController:
             inference = [value for phase, value in self.state['timings'].items()
                          if phase in ('planning', 'agent_inference', 'policy_inference', 'decision')]
             inference_count = sum(value['calls'] for value in inference)
-            self.state['metrics'] = {'success': final.get('evaluation', {}).get('success', False),
+            self.log.write('task_evaluation', {'phase': 'final', 'termination': self.state['status'],
+                'engine_ready': final.get('ready', False), 'evaluation': final.get('evaluation')})
+            self.state['metrics'] = {'success': environment_success(final),
                 'engine_ready': final.get('ready', False), 'wall_time_s': time.monotonic()-started,
                 'sim_time_s': final.get('time', 0)-self.initial_state.get('time', 0),
                 'steps': len(self.state['history']), 'decision_steps': self.state['step'],

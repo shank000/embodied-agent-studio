@@ -1,6 +1,7 @@
 """Seeded manipulation scenes and evaluator-only ground truth; never policy observations."""
 import xml.etree.ElementTree as ET
 import numpy as np
+import mujoco
 
 SCENES = {
     'tabletop': {'name': '桌面抓取', 'description': '彩色方块与目标托盘，测试观察、接近和抓取。', 'tasks': ['lift_red', 'place_red', 'reach_up']},
@@ -17,7 +18,7 @@ TASKS = {
     'stack_red': {'name': '红块叠在蓝块上', 'instruction': '把红色方块叠放在蓝色方块上，松开并移开手。', 'criterion': '两块水平对齐、红块比蓝块高约一个块高、静止且与手无接触，持续 0.3 秒。'},
     'open_drawer': {'name': '拉开抽屉', 'instruction': '抓住前方抽屉的把手，把抽屉向外拉开。', 'criterion': '抽屉滑轨位移超过 12 cm（随工作台缩放），持续 0.3 秒。'},
     'insert_peg': {'name': '圆柱销插入插座', 'instruction': '把橙色圆柱销竖直插入右侧的深色方形插座，松开并移开手。', 'criterion': '销轴竖直对中，底端进入插座，静止且与手无接触，持续 0.3 秒。'},
-    'reach_up': {'name': '末端抬高 2 cm', 'instruction': '保持夹爪开度和当前末端姿态，将末端沿世界坐标 Z 轴抬高 2 厘米。', 'criterion': '末端距初始位置正上方 2 cm 的目标小于 6 mm（小机械臂按比例），持续 0.3 秒。'},
+    'reach_up': {'name': '末端抬高 2 cm', 'instruction': '保持夹爪开度和当前末端姿态，将末端沿世界坐标 Z 轴抬高 2 厘米。', 'criterion': '目标位移固定为世界坐标 Z 轴正向 2 cm；末端距目标小于 6 mm（容差随工作台缩放），持续 0.3 秒。'},
     'sort_red_blue': {'name': '红蓝方块分别入盒', 'instruction': '把红色方块放入绿色收纳盒，把蓝色方块放入蓝色收纳盒；可按 robot_id 分配机械臂，完成后所有手都松开并移开。', 'criterion': '红蓝方块分别完整位于对应盒内、高度正确、静止且与任何机械臂无接触，持续 0.3 秒；评价物理结果，不要求使用指定数量的机械臂。'},
 }
 
@@ -98,13 +99,26 @@ def add_scene(world, scale, scene_id, seed):
 
 
 class TaskEvaluator:
+    """Read privileged physics state; model declarations never set task success.
+
+    Success describes the present state after a continuous hold, not an earlier
+    transient achievement. ``ever_success`` records that separate historical fact.
+    Paused observations cannot contribute simulated hold time.
+    """
+    VERSION = 'task-evaluation-v2'
+    REQUIRED_HOLD_S = .3
+
     def __init__(self, sim, task_id):
+        if task_id not in TASKS:
+            raise ValueError(f'未知评价任务：{task_id}')
         self.task_id, self.scale = task_id, sim.config['scale']
         self.initial_tcp = sim.data.site_xpos[sim.site_id].copy()
         self.initial_tcps = {key: sim.data.site_xpos[robot['site_id']].copy() for key, robot in sim.robots.items()}
         self.hold_s = 0.
-        self.success = False
+        self.success = self.ever_success = False
         self.steps = 0
+        self.last_time = float(sim.data.time)
+        self.previous_valid = False
         self.robot_bodies = set()
         for actuator in sim.all_actuators:
             body = int(sim.model.jnt_bodyid[sim.model.joint(actuator['name']).id])
@@ -114,7 +128,7 @@ class TaskEvaluator:
         # Include fixed descendants (fingertips) of moving robot bodies.
         for body in range(1, sim.model.nbody):
             if int(sim.model.body_parentid[body]) in self.robot_bodies: self.robot_bodies.add(body)
-        self.last = {'success': False, 'progress': 0., 'values': {}}
+        self.update(sim)
 
     def touches_robot(self, sim, body_name):
         body_id = sim.model.body(body_name).id
@@ -125,60 +139,142 @@ class TaskEvaluator:
 
     def update(self, sim):
         self.steps += 1
-        s = self.scale; data = sim.data
-        red = data.body('block_red').xpos / s
-        red_joint = sim.model.joint('block_red_joint').id
-        speed = np.linalg.norm(data.qvel[sim.model.jnt_dofadr[red_joint]:sim.model.jnt_dofadr[red_joint]+3]) / s
+        s = self.scale; data = sim.data; model = sim.model
+        # mj_step integrates qpos after computing xpos. Refresh positions without
+        # mj_forward's changes to dynamics/warm-start state.
+        mujoco.mj_kinematics(model, data)
+        checks = []
+        def plain(value):
+            if isinstance(value, (list, tuple, np.ndarray)):
+                return [plain(item) for item in value]
+            if isinstance(value, (float, np.floating)):
+                return float(value) if np.isfinite(value) else None
+            if isinstance(value, (bool, np.bool_)): return bool(value)
+            if isinstance(value, np.integer): return int(value)
+            if isinstance(value, dict): return {key: plain(item) for key, item in value.items()}
+            return value
+        def check(key, label, actual, expected, passed, unit=None):
+            checks.append({'key': key, 'label': label, 'actual': plain(actual),
+                           'expected': expected, 'passed': bool(passed), 'unit': unit})
+        finite = bool(np.isfinite(data.qpos).all() and np.isfinite(data.qvel).all() and np.isfinite(data.time))
+        check('state_finite', '物理状态数值有效', finite, True, finite)
+        def speed_of(name):
+            adr = model.jnt_dofadr[model.joint(name + '_joint').id]
+            return float(np.linalg.norm(data.qvel[adr:adr+3]))
+        def placed(name, tray):
+            body_name = 'block_' + name
+            pos = data.body(body_name).xpos
+            geom = data.geom(body_name + '_geom')
+            # The rotated box's extent is measured from actual MuJoCo geometry.
+            # A center-only test can accept corners protruding through bin walls.
+            half = np.abs(geom.xmat.reshape(3, 3)) @ model.geom(body_name + '_geom').size
+            lower = np.array([data.geom(tray+'_wall0').xpos[0] + model.geom(tray+'_wall0').size[0],
+                              data.geom(tray+'_wall2').xpos[1] + model.geom(tray+'_wall2').size[1]])
+            upper = np.array([data.geom(tray+'_wall1').xpos[0] - model.geom(tray+'_wall1').size[0],
+                              data.geom(tray+'_wall3').xpos[1] - model.geom(tray+'_wall3').size[1]])
+            bounds = [pos[:2] - half[:2], pos[:2] + half[:2]]
+            contained = bool(np.all(bounds[0] > lower) and np.all(bounds[1] < upper))
+            prefix = name + '_'
+            check(prefix+'inside_bin_xy', f'{name} 方块完整位于盒内', bounds,
+                  plain([lower, upper]), contained, 'm')
+            check(prefix+'height', f'{name} 方块高度', pos[2], f'{.030*s:g} < z < {.052*s:g}',
+                  .030*s < pos[2] < .052*s, 'm')
+            speed = speed_of(body_name)
+            check(prefix+'speed', f'{name} 方块线速度', speed, f'< {.03*s:g}', speed < .03*s, 'm/s')
+            touched = self.touches_robot(sim, body_name)
+            check(prefix+'released', f'{name} 方块已脱离机械臂接触', not touched, True, not touched)
+            center = data.geom(tray+'_base').xpos[:2]
+            return all(item['passed'] for item in checks[-4:]), float(np.linalg.norm(pos[:2]-center)), speed
+
+        red = data.body('block_red').xpos
+        speed = speed_of('block_red')
         if self.task_id == 'lift_red':
-            valid = red[2] > .08
-            progress = (red[2] - .024) / (.08 - .024)
-            values = {'red_height_m': float(red[2]*s)}
+            table = model.geom('workbench')
+            table_top = float(table.pos[2] + table.size[2])
+            height = float(red[2] - table_top)
+            check('red_height', '红块中心高于桌面', height, f'> {.08*s:g}', height > .08*s, 'm')
+            progress = (height/s - .024) / (.08 - .024)
+            values = {'red_height_m': float(red[2]), 'height_above_table_m': height,
+                      'table_top_world_z_m': table_top, 'height_threshold_m': .08*s}
         elif self.task_id == 'place_red':
-            error = np.abs(red[:2] - [.5, .25])
-            valid = bool(np.all(error < [.115, .125]) and .030 < red[2] < .052 and speed < .03 and not self.touches_robot(sim, 'block_red'))
-            progress = max(0., 1 - np.linalg.norm(error)/.5)
-            values = {'target_distance_m': float(np.linalg.norm(error)*s), 'object_speed_m_s': float(speed*s)}
+            _, distance, speed = placed('red', 'tray')
+            progress = max(0., 1 - distance / (.5*s))
+            values = {'target_distance_m': distance, 'object_speed_m_s': speed}
         elif self.task_id == 'sort_red_blue':
             satisfied = {}; distances = {}
-            for name, center, tolerance in [('red', [.5, .25], [.115, .125]), ('blue', [.17, .26], [.070, .085])]:
-                body_name = 'block_' + name
-                position = data.body(body_name).xpos / s
-                error = np.abs(position[:2]-center)
-                joint = sim.model.joint(body_name+'_joint').id
-                vadr = sim.model.jnt_dofadr[joint]
-                object_speed = np.linalg.norm(data.qvel[vadr:vadr+3])/s
-                satisfied[name] = bool(np.all(error < tolerance) and .030 < position[2] < .052
-                                       and object_speed < .03 and not self.touches_robot(sim, body_name))
-                distances[name] = float(np.linalg.norm(error)*s)
-            valid = all(satisfied.values())
+            for name, tray in [('red', 'tray'), ('blue', 'blue_bin')]:
+                satisfied[name], distances[name], _ = placed(name, tray)
             progress = sum(satisfied.values()) / 2
             values = {'objects_placed': satisfied, 'target_distances_m': distances}
         elif self.task_id == 'stack_red':
-            blue = data.body('block_blue').xpos / s
-            xy = np.linalg.norm(red[:2] - blue[:2]); dz = red[2]-blue[2]
-            valid = xy < .015 and abs(dz-.048) < .008 and speed < .03 and not self.touches_robot(sim, 'block_red')
-            progress = max(0., 1 - np.linalg.norm(red-blue-[0, 0, .048])/.3)
-            values = {'alignment_error_m': float(xy*s), 'height_difference_m': float(dz*s)}
+            blue = data.body('block_blue').xpos
+            xy = float(np.linalg.norm(red[:2] - blue[:2])); dz = float(red[2]-blue[2])
+            check('stack_alignment', '红蓝块水平对齐误差', xy, f'< {.015*s:g}', xy < .015*s, 'm')
+            check('stack_height', '红蓝块中心高度差', dz, f'|dz - {.048*s:g}| < {.008*s:g}', abs(dz-.048*s) < .008*s, 'm')
+            check('red_speed', '红块线速度', speed, f'< {.03*s:g}', speed < .03*s, 'm/s')
+            touched = self.touches_robot(sim, 'block_red')
+            check('red_released', '红块已脱离机械臂接触', not touched, True, not touched)
+            progress = max(0., 1 - np.linalg.norm(red-blue-[0, 0, .048*s])/(.3*s))
+            values = {'alignment_error_m': xy, 'height_difference_m': dz, 'object_speed_m_s': speed}
         elif self.task_id == 'open_drawer':
-            distance = float(data.joint('drawer_slide').qpos[0]); valid = distance > .12*s
-            progress = distance / (.12*s); values = {'drawer_open_m': distance}
+            joint = model.joint('drawer_slide')
+            position = float(data.joint('drawer_slide').qpos[0])
+            closed, maximum = map(float, joint.range)
+            distance = position - closed
+            threshold = .12*s
+            # MuJoCo joint limits are soft; small solver excursions at the stop
+            # are valid, while a displaced/off-rail state is not.
+            limit_tolerance = .002*s
+            check('drawer_displacement', '抽屉相对闭合位置的位移', distance, f'> {threshold:g}', distance > threshold, 'm')
+            check('drawer_joint_limits', '抽屉滑轨处于物理行程内', position,
+                  f'{closed:g} - {limit_tolerance:g} <= qpos <= {maximum:g} + {limit_tolerance:g}',
+                  closed-limit_tolerance <= position <= maximum+limit_tolerance, 'm')
+            progress = distance / threshold
+            values = {'drawer_open_m': distance, 'drawer_threshold_m': threshold,
+                      'drawer_joint_qpos_m': position, 'drawer_closed_qpos_m': closed,
+                      'drawer_joint_limits_m': [closed, maximum], 'limit_tolerance_m': limit_tolerance,
+                      'drawer_velocity_m_s': float(data.joint('drawer_slide').qvel[0])}
         elif self.task_id == 'insert_peg':
-            peg = data.body('peg'); pos = peg.xpos / s; vertical = abs(peg.xmat.reshape(3,3)[2,2])
-            error = np.linalg.norm(pos[:2] - [.55, .05])
-            joint = sim.model.joint('peg_joint').id; qadr = sim.model.jnt_dofadr[joint]
-            speed = np.linalg.norm(data.qvel[qadr:qadr+3]) / s
-            valid = error < .004 and vertical > .985 and .040 < pos[2] < .063 and speed < .03 and not self.touches_robot(sim, 'peg')
-            progress = max(0., 1 - error/.4)
-            values = {'alignment_error_m': float(error*s), 'axis_vertical_cosine': float(vertical), 'peg_height_m': float(pos[2]*s)}
-        else:
+            peg = data.body('peg'); pos = peg.xpos
+            vertical = float(abs(peg.xmat.reshape(3,3)[2,2]))
+            error = float(np.linalg.norm(pos[:2] - np.array([.55, .05])*s))
+            speed = speed_of('peg')
+            check('peg_alignment', '销轴水平对中误差', error, f'< {.004*s:g}', error < .004*s, 'm')
+            check('peg_vertical', '销轴与竖直方向夹角余弦绝对值', vertical, '> 0.985', vertical > .985)
+            check('peg_height', '销轴中心高度', pos[2], f'{.040*s:g} < z < {.063*s:g}', .040*s < pos[2] < .063*s, 'm')
+            check('peg_speed', '销轴线速度', speed, f'< {.03*s:g}', speed < .03*s, 'm/s')
+            touched = self.touches_robot(sim, 'peg')
+            check('peg_released', '销轴已脱离机械臂接触', not touched, True, not touched)
+            progress = max(0., 1 - error/(.4*s))
+            values = {'alignment_error_m': error, 'axis_vertical_cosine': vertical,
+                      'peg_height_m': float(pos[2]), 'object_speed_m_s': speed}
+        elif self.task_id == 'reach_up':
             target = self.initial_tcps[sim.active_robot] + [0, 0, .02]
-            error = np.linalg.norm(data.site_xpos[sim.site_id] - target)
-            valid = error < .006*s
-            progress = 1-error/.02; values = {'position_error_m': float(error)}
-        self.hold_s = self.hold_s + sim.model.opt.timestep if valid else 0.
-        self.success = self.success or self.hold_s >= .3
-        self.last = {'success': bool(self.success), 'currently_satisfied': bool(valid),
-                     'progress': float(np.clip(progress, 0, 1)), 'hold_s': round(self.hold_s, 3), 'values': values}
+            error = float(np.linalg.norm(data.site_xpos[sim.site_id] - target))
+            check('tcp_target_error', '末端距抬高目标的误差', error, f'< {.006*s:g}', error < .006*s, 'm')
+            progress = 1-error/.02
+            values = {'position_error_m': error, 'target_world_m': target.tolist(), 'position_tolerance_m': .006*s}
+        valid = all(item['passed'] for item in checks)
+        now = float(data.time)
+        elapsed = now - self.last_time
+        if valid and self.previous_valid and np.isfinite(elapsed) and elapsed >= 0:
+            self.hold_s += elapsed
+        else:
+            self.hold_s = 0.
+        self.previous_valid = valid
+        self.last_time = now
+        self.success = bool(valid and self.hold_s + 1e-9 >= self.REQUIRED_HOLD_S)
+        self.ever_success = self.ever_success or self.success
+        check('hold_duration', '物理条件连续满足的仿真时间', self.hold_s,
+              f'>= {self.REQUIRED_HOLD_S:g}', self.success, 's')
+        self.last = {'version': self.VERSION, 'source': 'mujoco_privileged_state',
+                     'success': self.success, 'ever_success': self.ever_success,
+                     'currently_satisfied': valid,
+                     'status': 'success' if self.success else 'holding' if valid else 'unsatisfied',
+                     'progress': float(np.clip(progress, 0, 1)) if np.isfinite(progress) else 0.,
+                     'hold_s': round(self.hold_s, 6), 'required_hold_s': self.REQUIRED_HOLD_S,
+                     'evaluated_at_sim_s': plain(now), 'values': plain(values), 'checks': checks,
+                     'failure_reasons': [item['label'] for item in checks if not item['passed']]}
 
     def snapshot(self):
         return {'task_id': self.task_id, **TASKS[self.task_id], **self.last}

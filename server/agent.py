@@ -23,6 +23,7 @@ from .control import PoseAction
 from .runlog import RunLog, CURRENT_LOG, model_output
 from .telemetry import track_inference, controller_timing
 from .recovery import invoke_with_recovery
+from .task_verification import public_feedback, verify_completion, environment_success
 
 
 class AgentConfig(BaseModel):
@@ -61,7 +62,7 @@ class AgentStart(BaseModel):
     task: str = Field(min_length=1, max_length=2000)
     one_round: bool = False
     max_sim_time_s: float = Field(default=120, ge=1, le=600)
-    evaluator_stop: bool = False
+    evaluator_stop: bool = True
     record_video: bool = False
 
 
@@ -126,8 +127,10 @@ camera local +X right, +Y up, -Z forward. Use numeric robot state to maintain sc
 gripper_open: 0 fully closed, 1 fully open. Preserve it unless the task requires a change.
 For a dexterous hand, hand_joint_positions_rad may contain all hand joint angles in the
 observation's hand_joints order; otherwise use null. Null uses the gripper_open grasp preset.
-status move executes one pose; done means you judge the task complete from the latest
-observation and feedback; blocked means you cannot proceed. For done/blocked repeat current pose.
+status move executes one pose; done requests independent environment verification of
+completion; it cannot declare success or end an unverified task. If verification is
+rejected, inspect the new images and continue acting. blocked means you cannot proceed.
+For done/blocked repeat current pose.
 explanation is a short Chinese description of the action or visible result, not private reasoning.
 Respect the per-round translation and rotation bounds in the observation, joint limits and table.
 Local IK and MuJoCo actuators handle movement; you never set joint state directly.
@@ -144,7 +147,7 @@ def observation_text(task, observation, history, initial_pose):
     payload = {k: v for k, v in observation.items() if k != 'cameras'}
     payload['cameras'] = [{k: v for k, v in camera.items() if k != 'image_base64'} for camera in observation['cameras']]
     return json.dumps({'task': task, 'initial_tcp': initial_pose, 'observation': payload,
-                       'recent_feedback': history[-8:]}, ensure_ascii=False)
+                       'recent_feedback': public_feedback(history[-8:])}, ensure_ascii=False)
 
 
 def _codex_npm_binary(package, target, package_name, filename):
@@ -463,7 +466,8 @@ class AgentController:
             for number in count(1):
                 if self.state['max_rounds'] is not None and number > self.state['max_rounds']: break
                 with self.worker.lock: current = self.worker.snapshot.copy()
-                if current['time'] - initial_state['time'] >= self.state['max_sim_time_s']:
+                remaining = self.state['max_sim_time_s'] - (current['time'] - initial_state['time'])
+                if remaining <= 1e-8 or remaining + 1e-8 < current.get('timestep', 0):
                     self.state.update(status='limit', message='已达到本次任务的仿真时间上限。'); return
                 if self.state['evaluator_stop'] and current.get('evaluation', {}).get('success'):
                     self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
@@ -492,10 +496,16 @@ class AgentController:
                 log.write('action', {'round': number, 'action': action.model_dump(), 'latency_s': latencies[-1], 'usage': usage})
                 record = {'round': number, 'observed_time': obs['time'], 'action': action.model_dump()}
                 self.state['history'].append(record)
-                if action.status != 'move':
+                if action.status == 'done':
+                    accepted = await verify_completion(self, self.worker, log, number,
+                                                       action.explanation, obs['generation'])
+                    record['verification'] = self.state['verification']
+                    record['result'] = self.state['message']
+                    if accepted: return
+                    continue
+                if action.status == 'blocked':
                     record['result'] = action.explanation
-                    self.state.update(status='model_done' if action.status == 'done' else 'blocked',
-                                      message=('模型判断任务完成：' if action.status == 'done' else '模型无法继续：') + action.explanation)
+                    self.state.update(status='blocked', message='模型无法继续：' + action.explanation)
                     return
                 self.state.update(status='executing', message='正在求解 IK，并通过执行器执行目标位姿。')
                 try:
@@ -534,7 +544,7 @@ class AgentController:
                         break
                 else: raise TimeoutError('动作在 45 秒内没有完成，请检查仿真速度与接触。')
             self.state.update(status='round_complete' if one_round else 'limit',
-                message='本轮已结束，可查看实际末端和执行反馈。' if one_round else '已达到轮数上限，任务未被模型判定完成。')
+                message='本轮已结束；任务结果以环境验收为准。' if one_round else '已达到轮数上限，环境未确认任务完成。')
         except asyncio.CancelledError:
             self.state.update(status='stopped', message='Agent 已停止；未执行的模型输出已丢弃。')
             raise
@@ -554,7 +564,9 @@ class AgentController:
             self.state['active'] = False
             self._accepting = False
             with self.worker.lock: final = self.worker.snapshot.copy()
-            self.state['metrics'] = {'success': final.get('evaluation', {}).get('success', False),
+            log.write('task_evaluation', {'phase': 'final', 'termination': self.state['status'],
+                'engine_ready': final.get('ready', False), 'evaluation': final.get('evaluation')})
+            self.state['metrics'] = {'success': environment_success(final),
                 'engine_ready': final.get('ready',False),
                 'wall_time_s': round(time.monotonic()-started, 3), 'sim_time_s': round(final.get('time', 0)-initial_state.get('time', 0), 3),
                 'inference_s': log.timing_snapshot()['timing']['inference_elapsed_s'],

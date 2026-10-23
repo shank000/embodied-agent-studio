@@ -15,6 +15,7 @@ from . import recovery as recovery_module
 from .control import PoseAction
 from .runlog import RunLog, CURRENT_LOG, model_output
 from .telemetry import track_inference, controller_timing
+from .task_verification import verify_completion, environment_success
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_KINDS = ('smolvla', 'vla', 'wam')
@@ -131,6 +132,13 @@ def http_result(response):
         except ValueError: detail = response.text
         raise ValueError(f'策略服务 HTTP {response.status_code}：{detail}')
     return response.json()
+
+
+def policy_task_with_feedback(task, history):
+    """Keep the v1 request shape; expose only a generic rejected-completion hint."""
+    if any(record.get('result', {}).get('status') == 'completion_rejected' for record in history[-8:]):
+        return task + '\n环境验收反馈：环境尚未确认任务完成，请根据当前三路图像和机器人状态继续操作。'
+    return task
 
 
 @track_inference('policy_inference')
@@ -250,7 +258,8 @@ class PolicyController:
                     self.observation = await self.worker.execute({'action': 'observe'}); self.observation_id += 1
                     obs = self.observation
                     body = {'protocol': 'embodied-policy-v1', 'model': config.model, 'device': config.device,
-                            'task': request.task, 'observation': obs, 'seed': initial.get('seed',42)+number-1,
+                            'task': policy_task_with_feedback(request.task, self.state['history']),
+                            'observation': obs, 'seed': initial.get('seed',42)+number-1,
                             'reset': number == 1, 'horizon': min(config.horizon, max(1, int(remaining/config.dt_s))), 'dt_s': config.dt_s}
                     saved = log.save_observation(obs, number)
                     log.write('observation', {'round': number, 'request': body, 'observation': saved})
@@ -270,8 +279,15 @@ class PolicyController:
                     log.write('model_output', {'round': number, 'response': raw, 'latency_s': latencies[-1]})
                     self.state.update(status='executing', message=output.summary or '执行策略动作块。', latency_s=round(latencies[-1],3))
                     if output.action_type == 'tcp_pose':
-                        if output.pose.status != 'move':
-                            self.state.update(status='model_done' if output.pose.status == 'done' else 'blocked', message=output.pose.explanation); return
+                        if output.pose.status == 'done':
+                            if await verify_completion(self, self.worker, log, number,
+                                    output.pose.explanation, obs['generation']): return
+                            self.state['history'].append({'round': number,
+                                'result': {'status': 'completion_rejected', 'message': self.state['message']}})
+                            self.state['history'] = self.state['history'][-30:]
+                            continue
+                        if output.pose.status == 'blocked':
+                            self.state.update(status='blocked', message=output.pose.explanation); return
                         result = await self.worker.execute({'action': 'move_tcp', 'generation': obs['generation'], 'pose': output.pose.model_dump()})
                         frames += 1
                     else:
@@ -310,7 +326,9 @@ class PolicyController:
                 try: await self.worker.execute({'action': 'record_stop'})
                 except Exception as exc: log.write('cleanup_error', {'phase': 'recording', 'message': str(getattr(exc, 'detail', exc))})
             with self.worker.lock: final = self.worker.snapshot.copy()
-            self.state['metrics'] = {'success': final.get('evaluation',{}).get('success',False),
+            log.write('task_evaluation', {'phase': 'final', 'termination': self.state['status'],
+                'engine_ready': final.get('ready', False), 'evaluation': final.get('evaluation')})
+            self.state['metrics'] = {'success': environment_success(final),
                 'engine_ready':final.get('ready',False),
                 'wall_time_s':round(time.monotonic()-started,3), 'sim_time_s':round(final.get('time',0)-initial['time'],3),
                 'inference_s': log.timing_snapshot()['timing']['inference_elapsed_s'],

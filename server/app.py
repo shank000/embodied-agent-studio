@@ -130,10 +130,13 @@ class Worker:
                                     self.recorder = None
                             result = {'trajectory_frames': self.record_frames,
                                       'video': recorder.artifacts.get('video') if recorder else None}
+                        elif payload['action'] == 'verify_task':
+                            result = simulation.verify_task(payload['generation'],
+                                on_step=lambda: self.record_frame(simulation))
                         else:
                             result = simulation.command(payload)
                         processed.append((future, result))
-                        if payload['action'] in ('reset', 'load', 'scene', 'restore', 'settle', 'pause', 'step'):
+                        if payload['action'] in ('reset', 'load', 'scene', 'restore', 'settle', 'pause', 'step', 'verify_task'):
                             accumulator = 0.
                             elapsed = 0.
                     except ValueError as exc:
