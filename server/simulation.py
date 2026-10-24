@@ -463,19 +463,20 @@ class Simulation:
         mujoco.mj_getState(self.model, self.data, values, spec)
         identity = f'{self.model_id}:{self.scene_id}:{self.seed}:{self.task_id}:{self.active_robot}'.encode() + values.tobytes()
         return {'model': self.model_id, 'scene_id': self.scene_id, 'seed': self.seed, 'task_id': self.task_id,
-                'active_robot': self.active_robot,
+                'active_robot': self.active_robot, 'backend': self.backend_identity(),
                 'state': values.tolist(), 'state_id': hashlib.sha256(identity).hexdigest()[:16]}
 
     def trajectory_frame(self):
         spec = mujoco.mjtState.mjSTATE_INTEGRATION
         values = np.empty(mujoco.mj_stateSize(self.model, spec))
         mujoco.mj_getState(self.model, self.data, values, spec)
-        return {'time': float(self.data.time), 'active_robot': self.active_robot, 'integration_state': values.tolist(),
+        return {'time': float(self.data.time), 'backend': self.backend_identity(), 'active_robot': self.active_robot, 'integration_state': values.tolist(),
                 'qpos': self.data.qpos.tolist(), 'qvel': self.data.qvel.tolist(),
                 'ctrl': self.data.ctrl.tolist(), 'actuator_force': self.data.actuator_force.tolist(),
                 'contacts': int(self.data.ncon), 'evaluation': self.evaluator.snapshot()}
 
     def replay_frame(self, frame):
+        self.validate_record_backend(frame)
         values = np.asarray(frame['integration_state'], dtype=float)
         spec = mujoco.mjtState.mjSTATE_INTEGRATION
         if values.shape != (mujoco.mj_stateSize(self.model, spec),) or not np.all(np.isfinite(values)):
@@ -495,6 +496,7 @@ class Simulation:
         return self.playback
 
     def restore(self, checkpoint):
+        self.validate_record_backend(checkpoint)
         if (self.model_id, self.scene_id, self.seed, self.task_id) != (checkpoint['model'], checkpoint['scene_id'], checkpoint['seed'], checkpoint['task_id']):
             self.load(checkpoint['model'], checkpoint['scene_id'], checkpoint['seed'], checkpoint['task_id'])
         self.cancel_motion()
@@ -526,6 +528,7 @@ class Simulation:
                                  'fovy_deg': float(self.model.cam_fovy[camera_id])})
         arm = self.actuators[:self.config['arm_dof']]
         return {'generation': self.generation, 'time': float(self.data.time), 'robot': self.model_id,
+                'backend': {'engine_id': 'mujoco', 'engine_version': mujoco.__version__, 'control_frame': 'world_z_up_m_wxyz'},
                 'active_robot': self.active_robot, 'robots': self.robot_states(),
                 'arm_dof': self.config['arm_dof'], 'tcp': pose,
                 'joints': [{'name': a['name'], 'position_rad': float(self.data.qpos[a['qpos_index']]),
@@ -668,7 +671,7 @@ class Simulation:
         for item in self.actuators:
             arm.append({**item, 'target': float(self.data.ctrl[item['index']]), 'actual': float(self.data.qpos[item['qpos_index']]),
                         'force': float(self.data.actuator_force[item['index']])})
-        return {'engine': 'MuJoCo', 'version': mujoco.__version__, 'model': self.model_id, 'name': self.platform_config['name'],
+        return {'ready': True, 'engine': 'MuJoCo', 'backend': self.backend_identity(), 'version': mujoco.__version__, 'model': self.model_id, 'name': self.platform_config['name'],
                 'active_robot': self.active_robot, 'robots': self.robot_states(),
                 'generation': self.generation, 'paused': self.paused, 'speed': self.speed, 'time': float(self.data.time),
                 'timestep': self.model.opt.timestep, 'steps': self.physics_steps, 'contacts': int(self.data.ncon),
@@ -683,6 +686,25 @@ class Simulation:
                 'blocks': {name: self.data.body(f'block_{name}').xpos.tolist() for name in ['red', 'blue', 'yellow']},
                 'has_wrist_camera': self.model.ncam > 0,
                 'source': self.config.get('source', f"https://github.com/google-deepmind/mujoco_menagerie/tree/822c2d8f877dd166c5b7d3c9f7e3c3b6589473b7/{self.config['folder']}")}
+
+    @property
+    def timestep(self):
+        return float(self.model.opt.timestep)
+
+    @staticmethod
+    def backend_identity():
+        from .simulators import backend_identity
+        return backend_identity('mujoco', mujoco.__version__)
+
+    def validate_record_backend(self, record):
+        # Older saved MuJoCo records have no backend identity.
+        saved = record.get('backend') or {'engine_id': 'mujoco'}
+        if saved.get('engine_id') != 'mujoco':
+            raise ValueError('此状态属于其他仿真引擎，请先切换到记录对应的后端。')
+        if saved.get('engine_version', mujoco.__version__) != mujoco.__version__:
+            raise ValueError('状态记录的 MuJoCo 版本与当前版本不一致。')
+        if saved.get('state_schema', 'mujoco-integration-v1') != 'mujoco-integration-v1':
+            raise ValueError('不支持的 MuJoCo 状态格式。')
 
     def render_rgb(self):
         self.renderer.update_scene(self.data, camera=self.cam, scene_option=self.opt)

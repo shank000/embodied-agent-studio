@@ -69,6 +69,9 @@ jobs:
       - name: Check environment task criteria and completion gates
         run: node tools/python.mjs -m unittest tests.test_task_evaluation tests.test_completion_controllers -v
 
+      - name: Check simulator isolation, selection and experiment identity
+        run: node tools/python.mjs -m unittest tests.test_backend_process tests.test_simulator_selection tests.test_analysis_simulators -v
+
   linux-rendering:
     name: Native rendering / Linux OSMesa
     runs-on: ubuntu-latest

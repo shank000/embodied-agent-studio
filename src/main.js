@@ -1,10 +1,11 @@
 import './style.css';
 import './research.css';
-import {initResearch,renderResearch,renderRunVideo,renderRunTimer} from './research.js';
-import {initRsi,renderRsi} from './rsi.js';
+import {initResearch,renderResearch,renderRunVideo,renderRunTimer,reloadResearchCatalog} from './research.js';
+import {initRsi,renderRsi,reloadRsiCatalog} from './rsi.js';
+import {initSimulators,renderSimulator} from './simulators.js';
 import {initLayout} from './layout.js';
 import {initRepair,renderRepair} from './repair.js';
-import {initMultiarm,renderMultiarm} from './multiarm.js';
+import {initMultiarm,renderMultiarm,updateModelCatalog} from './multiarm.js';
 
 const icons={
   cube:'<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9M8 5.2l8 4.6"/>',
@@ -21,12 +22,27 @@ document.querySelectorAll('[data-icon-before]').forEach(el=>el.insertAdjacentHTM
 const $=s=>document.querySelector(s);
 let state=null, generation=-1, activeRobot='', connected=false, busy=false, toastTimer, lastTaskKey='', lastEvent=0, frameStarted=false;
 let agentConfig=null, lastObservation=-1, lastHistory='';
+let catalogSession='',catalogLoading=false,catalogPromise=null;
+function reloadWorkspaceCatalog(){
+  if(catalogPromise)return catalogPromise;
+  catalogLoading=true;
+  catalogPromise=(async()=>{
+    try{
+      const response=await fetch('/api/models');if(!response.ok)throw new Error('模型目录读取失败');
+      const models=await response.json();updateModelCatalog(models,state?.model);
+      await Promise.all([reloadResearchCatalog(),reloadRsiCatalog()]);
+      catalogSession=state?.session_id||'';enableControls();return true;
+    }catch(error){toast(error.message);return false;}
+    finally{catalogLoading=false;catalogPromise=null;}
+  })();
+  return catalogPromise;
+}
 const frame=$('#sim-frame');
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),3500);}
 async function api(payload){
   const response=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   let data;
-  try{data=await response.json();}catch{throw new Error('MuJoCo 服务没有返回有效响应，请检查本地服务。');}
+  try{data=await response.json();}catch{throw new Error('仿真服务没有返回有效响应，请检查本地服务。');}
   if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:'控制参数无效，请检查输入。');
   return data;
 }
@@ -37,19 +53,23 @@ async function agentApi(path,payload){
   return data;
 }
 function enableControls(){
-  const enabled=connected&&!busy;
+  const enabled=connected&&!busy&&!state?.backend_switching;
   document.querySelectorAll('.sim-action, [data-model], #reset, #view-reset, #pause, #gripper-open, #gripper-close, #stop, #send, #command, #speed, #apply-scene, #scene-select, #task-select, #scene-seed, .viewer-options input, #joint-controls input, [data-view]').forEach(el=>el.disabled=!enabled);
   $('#step').disabled=!enabled||!state?.paused;
   const active=['running','settling'].includes(state?.task.status);
   document.querySelectorAll('[data-action="home"],[data-action="demo"]').forEach(el=>el.disabled=!enabled||active);
   const takeover=!!(state?.agent?.active||state?.policy?.active||state?.comparison?.active||state?.research?.active||state?.experiment?.active);
   $('#agent-record-video').disabled=!enabled||takeover;
-  $('#agent-stop').disabled=!connected||!state?.agent?.active;
+  $('#agent-stop').disabled=!state?.agent?.active;
   $('#agent-one-round').disabled=!enabled||takeover;
   $('#capture-observation').disabled=!enabled||takeover;
   const agentConfigEditable=state?.agent?.status==='repair_paused'&&!state?.policy?.active&&!state?.comparison?.active&&!state?.research?.active&&!state?.experiment?.active;
   $('#agent-settings').disabled=(takeover&&!agentConfigEditable)||busy;
   if(takeover)document.querySelectorAll('[data-model],#joint-controls input,.sim-action,#gripper-open,#gripper-close,#command,#send,#speed,#gravity,#step,#apply-scene,#scene-select,#task-select,#scene-seed').forEach(el=>el.disabled=true);
+  const capabilities=state?.backend?.capabilities;
+  if(capabilities){for(const el of document.querySelectorAll('[data-action]'))if(!capabilities.includes(el.dataset.action))el.disabled=true;
+    for(const name of ['contacts','joints','collision'])if(!capabilities.includes('flags'))$(`#show-${name}`).disabled=true;
+    if(!capabilities.includes('gravity'))$('#gravity').disabled=true;}
 }
 async function operate(payload,{message=false}={}){
   if(!connected||busy)return;
@@ -82,7 +102,10 @@ function buildJoints(){
     const meta=document.createElement('div');meta.className='joint-meta';meta.innerHTML=`<span>${toDisplay(a,a.min).toFixed(0)}${a.unit==='command'?'%':'°'}</span><span id="actual-${a.index}">实际 ${actualText(a)}</span><span>${toDisplay(a,a.max).toFixed(0)}${a.unit==='command'?'%':'°'}</span>`;
     row.append(header,input,meta);root.append(row);
   });
-  $('#engine-version').textContent=`MuJoCo ${state.version}`;$('#watermark-version').textContent=state.version;
+  $('#engine-version').textContent=`${state.engine} ${state.version}`;$('#watermark-version').textContent=state.version;
+  $('#viewer-engine').textContent=`${state.engine.toUpperCase()} VIEWER`;
+  frame.alt=`${state.engine} 原生仿真实时画面`;
+  const watermark=$('#watermark-engine');if(watermark)watermark.textContent=state.engine;
   $('#actuator-count').textContent=`${state.nu} 个`;$('#mesh-count').textContent=`${state.meshes} 个`;$('#timestep').textContent=`${(state.timestep*1000).toFixed(1)} ms`;
     $('#model-source').href=state.source;$('#model-source').textContent='官方模型来源 ↗';$('#scene-name').textContent=state.name;
   document.querySelectorAll('[data-model]').forEach(el=>{const selected=el.dataset.model===state.model;el.classList.toggle('selected',selected);el.setAttribute('aria-pressed',String(selected));});
@@ -106,12 +129,15 @@ function renderTask(){
 }
 function renderState(){
   if(state.generation!==generation||state.active_robot!==activeRobot){generation=state.generation;activeRobot=state.active_robot;buildJoints();}
-  $('#connection').innerHTML='<i></i>MuJoCo 已连接';$('#fps').textContent=`${state.fps.toFixed(0)} FPS`;$('#sim-time').textContent=`t = ${state.time.toFixed(3)} s`;
+  $('#connection').replaceChildren(document.createElement('i'),document.createTextNode(`${state.engine} 已连接`));$('#fps').textContent=`${state.fps.toFixed(0)} FPS`;$('#sim-time').textContent=`t = ${state.time.toFixed(3)} s`;
   const active=['running','settling'].includes(state.task.status);
   $('#scene-status').textContent=state.paused?'仿真已暂停':active?(state.task.steps[state.task.step]||'执行中'):'仿真运行中';
   $('#status-dot').classList.toggle('running',!state.paused);$('#robot-status').innerHTML=`<i></i>${state.paused?'已暂停':active?'执行中':'运行中'}`;
   $('#physics-rate').textContent=`${(1/state.timestep).toFixed(0)} Hz · ${state.steps} 步`;
   $('#position').textContent=state.tcp.map(v=>v.toFixed(3)).join(' / ');$('#contact-count').textContent=state.contacts;
+  const contactLabel=$('#contact-label'),contactScope=$('#contact-scope');
+  if(contactLabel)contactLabel.textContent=state.contact_scope==='active_robot'?'机械臂接触':'接触数量';
+  if(contactScope)contactScope.textContent=state.contact_scope==='active_robot'?'当前机械臂的接触点':'全场接触点 · 由物理引擎计算';
   $('#gripper-status').textContent=actualText(state.actuators.at(-1));$('#gripper-detail').textContent=state.model.includes('panda')?'两指间距（实际）':'夹爪关节（实际）';
   $('#frame-info').textContent=`渲染与物理帧 ${state.render_ms.toFixed(0)} ms`;
   $('#pause').innerHTML=icon(state.paused?'play':'pause')+(state.paused?'继续':'暂停');
@@ -121,7 +147,8 @@ function renderState(){
   document.querySelectorAll('[data-view]').forEach(el=>{const selected=el.dataset.view===state.view;el.classList.toggle('selected',selected);el.setAttribute('aria-pressed',String(selected));});
   state.actuators.forEach(a=>{const input=$(`#joint-${a.index}`);if(input.dataset.editing!=='true'){input.value=String(toDisplay(a,a.target));$(`#target-${a.index}`).textContent=targetText(a,a.target);}$(`#actual-${a.index}`).textContent=`实际 ${actualText(a)}`;});
   if(state.events.length&&state.events.at(-1).id!==lastEvent){lastEvent=state.events.at(-1).id;const log=$('#event-log');log.replaceChildren();state.events.slice(-6).reverse().forEach(e=>{const row=document.createElement('p');row.className=e.kind;row.textContent=e.message;log.append(row);});}
-  renderTask();renderAgent();enableControls();renderResearch(state);renderRsi(state);renderRepair(state);renderMultiarm(state,{disabled:!connected||busy});
+  renderTask();renderAgent();enableControls();renderResearch(state);renderRsi(state);renderRepair(state);renderMultiarm(state,{disabled:!connected||busy});renderSimulator(state);
+  if(state.session_id&&state.session_id!==catalogSession&&!catalogLoading)reloadWorkspaceCatalog();
 }
 function renderAgent(){
   const agent=state.agent;if(!agent)return;
@@ -150,21 +177,29 @@ function renderAgent(){
   }
 }
 function disconnected(message){
-  connected=false;$('#connection').textContent='MuJoCo 未连接';$('#scene-error').hidden=false;$('#scene-error').replaceChildren();
-  const title=document.createElement('strong');title.textContent='MuJoCo 服务未连接';const detail=document.createElement('p');detail.textContent=message;
-  const help=document.createElement('p');help.textContent='请启动项目中的 MuJoCo 服务，再点击下方按钮重新连接。';const retry=document.createElement('button');retry.textContent='重新连接';retry.className='secondary';retry.addEventListener('click',()=>{frameStarted=false;poll();});$('#scene-error').append(title,detail,help,retry);
+  connected=false;$('#connection').textContent='仿真服务未连接';$('#scene-error').hidden=false;$('#scene-error').replaceChildren();
+  const title=document.createElement('strong');title.textContent='仿真服务未连接';const detail=document.createElement('p');detail.textContent=message;
+  const help=document.createElement('p');help.textContent='请启动项目中的仿真服务，再点击下方按钮重新连接。';const retry=document.createElement('button');retry.textContent='重新连接';retry.className='secondary';retry.addEventListener('click',()=>{frameStarted=false;poll();});$('#scene-error').append(title,detail,help,retry);
   frame.removeAttribute('src');frameStarted=false;$('#robot-status').textContent='离线';$('#scene-status').textContent='引擎离线';$('#status-dot').classList.remove('running');enableControls();
 }
-let polling=false;
-async function poll(){
-  if(polling)return;polling=true;
+let pollPromise=null,lastPollAt=0;
+function poll(){
+  if(pollPromise)return pollPromise;
+  pollPromise=pollState().finally(()=>{pollPromise=null;});return pollPromise;
+}
+async function pollState(){
+  lastPollAt=Date.now();
   try{
     const response=await fetch('/api/state',{signal:AbortSignal.timeout(4000)});if(!response.ok)throw new Error(`本地服务返回 ${response.status}`);
-    const next=await response.json();if(!next.ready)throw new Error(next.error||'引擎尚未准备好');
+    const next=await response.json();
+    if(!next.ready){
+      state=next;renderSimulator(next);
+      if(next.model&&next.task&&next.actuators){renderAgent();renderResearch(next);renderRsi(next);renderRepair(next);}
+      throw new Error(next.error||'引擎尚未准备好');
+    }
     state=next;connected=true;if(!frameStarted){frame.src=`/api/stream?session=${Date.now()}`;frameStarted=true;}
     $('#scene-error').hidden=true;renderState();
   }catch(error){disconnected(error.message);}
-  finally{polling=false;}
 }
 document.querySelectorAll('[data-model]').forEach(el=>el.addEventListener('click',()=>{if(state?.model!==el.dataset.model)operate({action:'load',model:el.dataset.model});}));
 document.querySelectorAll('.sim-action').forEach(el=>el.addEventListener('click',()=>operate({action:el.dataset.action})));
@@ -254,7 +289,13 @@ initRsi({operate,toast,selectTab});
 initRepair({toast});
 initMultiarm({operate});
 initLayout({toast});
-// Camera gestures modify MuJoCo's camera. There is no client-side 3D simulation.
+initSimulators({onChanged:async result=>{
+  generation=-1;lastObservation=-1;await poll();
+  if(state?.session_id!==result.session_id)await poll();
+  if(!connected||state?.session_id!==result.session_id)throw new Error('新环境的状态尚未同步，请重新连接');
+  if(!await reloadWorkspaceCatalog())throw new Error('机器人与场景目录读取失败');
+}});
+// Camera gestures modify the active engine's camera. There is no client-side 3D simulation.
 let pointer=null,cameraPending={dx:0,dy:0,zoom:0,pan_dx:0,pan_dy:0},cameraSending=false;
 frame.title='左键拖动旋转；右键、中键或 Shift + 左键拖动平移；滚轮缩放。点击预设视角可复位。';
 async function flushCamera(){
@@ -279,4 +320,4 @@ frame.addEventListener('pointermove',e=>{
 for(const type of ['pointerup','pointercancel','lostpointercapture'])frame.addEventListener(type,e=>{if(pointer?.id===e.pointerId)pointer=null;});
 frame.addEventListener('wheel',e=>{e.preventDefault();cameraPending.zoom+=e.deltaY*.001;flushCamera();},{passive:false});
 frame.addEventListener('error',()=>{frameStarted=false;if(connected){$('#scene-error').hidden=false;$('#scene-error').textContent='原生画面连接中断，正在重新连接。';}});
-poll();setInterval(()=>{if(connected&&!busy)poll();},250);
+poll();setInterval(()=>{if(!busy&&(connected||Date.now()-lastPollAt>2000))poll();},250);

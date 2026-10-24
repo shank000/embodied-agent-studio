@@ -2,6 +2,8 @@
 
 [返回首页](../README.md) · [安装指南](INSTALL.md)
 
+以下复杂模型、场景及引擎实现细节以 MuJoCo 主后端为准；Genesis 的支持范围、独立安装与差异见[多后端指南](simulators.md)。
+
 ## 已接入
 
 - **Franka Panda**：7 个机械臂关节、双指平行夹爪，8 个执行器。

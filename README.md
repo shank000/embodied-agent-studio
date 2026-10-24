@@ -5,7 +5,7 @@
   </picture>
 </p>
 <p align="center"><strong>具身工坊 · 从观察到动作，从策略到实验。</strong></p>
-<p align="center">An open MuJoCo workbench for embodied agents, policies, and reproducible experiments.</p>
+<p align="center">An open simulation workbench for embodied agents, policies, and reproducible experiments.</p>
 <p align="center">
   <a href="docs/INSTALL.md">安装运行</a> ·
   <a href="docs/USAGE.md">使用指南</a> ·
@@ -16,7 +16,7 @@
 ![EmbodiWorks 机械臂仿真工作台](docs/images/workbench.jpg)
 
 **在同一个物理世界里，连接模型、执行动作、比较策略。**
-EmbodiWorks 将 MuJoCo 原生仿真、多路视觉观察和实验记录放进浏览器，面向具身智能研究与原型验证。模型负责提出动作，本地 IK 与执行器负责运动。
+EmbodiWorks 将 MuJoCo、Genesis 原生仿真、多路视觉观察和实验记录放进浏览器，面向具身智能研究与原型验证。模型负责提出动作，本地 IK 与执行器负责运动。
 
 ## 可以做什么
 
@@ -43,6 +43,8 @@ npm start
 
 浏览器打开 **http://127.0.0.1:8000**。在启动终端按 **Ctrl+C** 关闭服务。开发前端另运行 `npm run dev`。
 
+以下平台表记录 **MuJoCo 主后端** 的验证范围；Genesis 的独立环境与验证边界见[多后端指南](docs/simulators.md)。
+
 | 系统 | 当前验证范围 |
 | --- | --- |
 | Windows | 已验证工作台、真实模型、原生渲染与实验流程。 |
@@ -50,6 +52,8 @@ npm start
 | macOS | 安装、构建、启动器与真实模型运动通过 CI；CGL 图形界面仍待 Mac 真机验收，策略暂用 CPU。 |
 
 三种系统共用源码与 `npm start`。CI 检查三平台的安装、构建与模型运动，另在 Linux 验证原生离屏渲染；完整验证范围见[安装说明](docs/INSTALL.md)。
+
+工作台左侧的“仿真环境”可选择已安装、已适配的后端，再加载对应机器人与任务。MuJoCo 保留完整功能；Genesis 支持 Panda 桌面任务，独立环境已通过 Windows CPU 物理与工作台集成验证，Linux / macOS 尚待验收。其他仿真栈的接入状态与平台条件见[多后端指南](docs/simulators.md)，目录中的“尚未适配”不代表已集成。
 
 ## 看见实验过程
 

@@ -142,7 +142,7 @@ class SimulationVideo:
         if self.metadata['status'] in ('disabled', 'saved', 'failed'): return self.metadata
         try:
             if not self.metadata['frame_count']:
-                raise ValueError('本次录制没有收到 MuJoCo 渲染帧，未生成视频。')
+                raise ValueError('本次录制没有收到 原生仿真渲染帧，未生成视频。')
             code = self._close_process()
             if code != 0: raise RuntimeError(f'FFmpeg 编码失败，退出码 {code}。')
             if not self.partial.is_file() or not self.partial.stat().st_size:

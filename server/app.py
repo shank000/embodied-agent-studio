@@ -7,6 +7,7 @@ from collections import deque
 import csv
 import io
 import json
+import math
 import tempfile
 import zipfile
 from itertools import islice
@@ -18,6 +19,7 @@ from threading import Event, Lock, Thread
 import time
 import traceback
 from typing import Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -26,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
 
 from .simulation import Simulation, MODELS, VENDOR, ROOT
+from .simulators import catalog as simulator_catalog, supported_catalog, EVALUATORS
 from .agent import AgentController, AgentConfig, AgentStart
 from .policy import PolicyController, PolicyConfig, PolicyStart, release_local_service
 from .comparison import ComparisonController, ComparisonStart
@@ -46,7 +49,7 @@ from .research import (ResearchProtocol, ResearchExperiment, ResearchController,
 class Command(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
     action: Literal['load', 'scene', 'reset', 'pause', 'step', 'control', 'home', 'demo', 'stop', 'instruction', 'view', 'camera', 'speed', 'flags', 'gravity', 'drop', 'select_robot']
-    model: Literal['panda', 'so101', 'rm65_gaia', 'dual_panda', 'triple_panda'] | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=64)
     robot_id: str | None = Field(default=None, min_length=1, max_length=40)
     scene_id: str | None = None
     task_id: str | None = None
@@ -64,6 +67,9 @@ class Command(BaseModel):
 
     @model_validator(mode='after')
     def required_fields(self):
+        if (self.action == 'load' and self.model is not None
+                and not any(self.model in supported_catalog(engine)[0] for engine in EVALUATORS)):
+            raise ValueError('未知机器人型号。')
         required = {'select_robot':['robot_id'], 'load': ['model'], 'scene': ['scene_id'], 'pause': ['value'], 'control': ['index', 'value'], 'instruction': ['text'],
                     'view': ['view'], 'speed': ['value'], 'flags': ['flags'], 'gravity': ['value']}
         for name in required.get(self.action, []):
@@ -85,13 +91,36 @@ class Worker:
         self.failure = None
         self.recorder = None
         self.record_frames = 0
-        self.thread = Thread(target=self.run, name='MuJoCo', daemon=True)
+        self.engine_id = 'mujoco'
+        self.initial_engine_id = 'mujoco'
+        self.session_id = uuid4().hex
+        self.switching = False
+        self.generation_base = 0
+        self.thread = Thread(target=self.run, name='simulation', daemon=True)
 
     def run(self):
         simulation = None
         processed = []
         try:
-            simulation = Simulation()
+            if self.initial_engine_id == 'mujoco':
+                simulation = Simulation()
+                simulation.generation += self.generation_base
+            elif self.initial_engine_id == 'genesis':
+                from .backends.process_backend import ProcessBackend
+                simulation = ProcessBackend(engine_id='genesis', generation_base=self.generation_base)
+            else:
+                raise ValueError('该仿真后端尚未完成适配。')
+            self.engine_id = self.initial_engine_id
+            initial_state = simulation.state()
+            if (initial_state.get('ready') is not True or not initial_state.get('actuators')
+                    or initial_state.get('backend', {}).get('engine_id') != self.engine_id
+                    or not math.isfinite(simulation.timestep) or simulation.timestep <= 0):
+                raise ValueError('仿真后端未能提供有效模型状态。')
+            self.jpeg = simulation.render()
+            if not self.jpeg:
+                raise ValueError('仿真后端未能提供有效画面。')
+            self.frame += 1
+            initializing = True
             accumulator = 0.
             previous = time.perf_counter()
             fps_start, frame_count, fps = previous, 0, 0.
@@ -108,7 +137,46 @@ class Worker:
                     if not future.set_running_or_notify_cancel():
                         continue
                     try:
-                        if payload['action'] == 'record_start':
+                        if payload['action'] == 'backend_select':
+                            candidate = None
+                            try:
+                                if self.recorder is not None: raise ValueError('请先结束正在录制的实验。')
+                                engine_id = payload['engine_id']
+                                if engine_id == self.engine_id:
+                                    result = {'backend': simulation.state()['backend'], 'session_id': self.session_id}
+                                else:
+                                    next_base = max(self.generation_base + 1000000, simulation.generation + 1)
+                                    if engine_id == 'mujoco':
+                                        candidate = Simulation()
+                                        candidate.generation += next_base
+                                    elif engine_id == 'genesis':
+                                        from .backends.process_backend import ProcessBackend
+                                        candidate = ProcessBackend(engine_id=engine_id, generation_base=next_base)
+                                    else: raise ValueError('该仿真后端尚未完成适配。')
+                                    first_state, first_jpeg = candidate.state(), candidate.render()
+                                    if (first_state.get('ready') is not True or not first_jpeg or not first_state.get('actuators')
+                                            or first_state.get('backend', {}).get('engine_id') != engine_id
+                                            or first_state.get('generation', -1) <= simulation.generation
+                                            or not math.isfinite(candidate.timestep) or candidate.timestep <= 0):
+                                        raise ValueError('新后端未能提供有效模型与画面。')
+                                    old, simulation = simulation, candidate
+                                    candidate = None
+                                    self.engine_id, self.generation_base = engine_id, next_base
+                                    self.session_id = uuid4().hex
+                                    self.jpeg = first_jpeg
+                                    try: old.close()
+                                    except Exception: traceback.print_exc()
+                                    result = {'backend': first_state['backend'], 'session_id': self.session_id}
+                                    accumulator = elapsed = 0.
+                            except Exception as exc:
+                                cleanup = ''
+                                if candidate is not None:
+                                    try: candidate.close()
+                                    except Exception as cleanup_exc: cleanup = f'；候选资源清理失败：{cleanup_exc}'
+                                raise ValueError(f'切换失败，当前仿真保持不变：{exc}{cleanup}') from exc
+                            finally:
+                                self.switching = False
+                        elif payload['action'] == 'record_start':
                             if self.recorder is not None:
                                 raise ValueError('已有任务正在记录轨迹。')
                             self.recorder = payload['log']
@@ -116,7 +184,8 @@ class Worker:
                             existing = self.recorder.artifacts.get('checkpoints', {}).get('initial')
                             reference = existing['path'] if existing else self.recorder.save_checkpoint(simulation.checkpoint())
                             self.recorder.write('recording_started', {'initial_checkpoint': reference,
-                                'timestep': float(simulation.model.opt.timestep), 'model': simulation.model_id})
+                                'timestep': float(simulation.timestep), 'model': simulation.model_id,
+                                'backend': simulation.state().get('backend'), 'session_id': self.session_id})
                             self.record_frame(simulation)
                             result = {'initial_checkpoint': reference}
                         elif payload['action'] == 'record_stop':
@@ -131,8 +200,9 @@ class Worker:
                             result = {'trajectory_frames': self.record_frames,
                                       'video': recorder.artifacts.get('video') if recorder else None}
                         elif payload['action'] == 'verify_task':
+                            extra = {'recording': self.recorder.video_sampling() if self.recorder else None} if hasattr(simulation, 'advance') else {}
                             result = simulation.verify_task(payload['generation'],
-                                on_step=lambda: self.record_frame(simulation))
+                                on_step=lambda: self.record_frame(simulation), **extra)
                         else:
                             result = simulation.command(payload)
                         processed.append((future, result))
@@ -149,11 +219,19 @@ class Worker:
                     accumulator = 0.
                 else:
                     accumulator += elapsed * simulation.speed
-                    while accumulator >= simulation.model.opt.timestep and not simulation.paused:
-                        simulation.step()
-                        self.record_frame(simulation)
-                        physics_advanced = True
-                        accumulator -= simulation.model.opt.timestep
+                    if hasattr(simulation, 'advance'):
+                        steps = int(accumulator / simulation.timestep)
+                        if steps:
+                            advanced = simulation.advance(steps, on_step=lambda: self.record_frame(simulation),
+                                recording=self.recorder.video_sampling() if self.recorder else None)
+                            physics_advanced = advanced > 0
+                            accumulator = max(0., accumulator - advanced * simulation.timestep)
+                    else:
+                        while accumulator >= simulation.timestep and not simulation.paused:
+                            simulation.step()
+                            self.record_frame(simulation)
+                            physics_advanced = True
+                            accumulator -= simulation.timestep
                 # A paused, unchanged scene already has a valid frame. Avoid
                 # repeatedly allocating/flipping full-size RGB images while idle.
                 redraw = not self.jpeg or (not simulation.render_suspended and (processed or physics_advanced))
@@ -163,10 +241,14 @@ class Worker:
                     fps = frame_count / (start - fps_start)
                     frame_count, fps_start = 0, start
                 state = simulation.state()
-                state.update({'fps': round(fps, 1), 'render_ms': round((time.perf_counter()-start)*1000, 1), 'ready': True})
+                state.update({'fps': round(fps, 1), 'render_ms': round((time.perf_counter()-start)*1000, 1),
+                              'ready': True, 'session_id': self.session_id})
                 with self.lock:
                     self.snapshot, self.jpeg = state, jpeg
                     if redraw: self.frame += 1
+                if initializing:
+                    self.switching = False
+                    initializing = False
                 self.ready.set()
                 for future, result in processed:
                     if not future.done(): future.set_result(result)
@@ -176,6 +258,7 @@ class Worker:
             traceback.print_exc()
             with self.lock:
                 self.snapshot = {**self.snapshot, 'ready': False, 'error': self.failure}
+            self.switching = False
             self.ready.set()
             for future, _ in processed:
                 if not future.done(): future.set_exception(RuntimeError(self.failure))
@@ -191,6 +274,58 @@ class Worker:
                 self.recorder = None
                 if simulation: simulation.close()
 
+    async def restart(self, engine_id):
+        """Explicitly reload a failed worker; the caller holds the idle-controller lock."""
+        from .simulators import backend_identity
+        if engine_id not in ('mujoco', 'genesis'):
+            raise HTTPException(400, '该仿真后端尚未完成适配。')
+        if self.thread.is_alive() and not self.failure:
+            raise HTTPException(409, '仿真服务仍在运行，请使用正常环境切换。')
+        if self.thread.ident is not None:
+            await asyncio.to_thread(self.thread.join, 5)
+        if self.thread.is_alive():
+            self.switching = False
+            raise HTTPException(409, '故障后端仍在清理资源，请稍后再重新加载。')
+        if self.recorder is not None:
+            raise HTTPException(409, '故障实验的轨迹和视频尚未完成归档，请等待清理结束。')
+        with self.lock:
+            self.generation_base = max(self.generation_base, self.snapshot.get('generation', 0)) + 1000000
+            self.session_id = uuid4().hex
+            self.snapshot = {**self.snapshot, 'ready': False, 'error': None,
+                             'generation': self.generation_base, 'session_id': self.session_id,
+                             'backend': backend_identity(engine_id)}
+            self.jpeg = b''
+        # Resolve any commands abandoned by a normal shutdown before replacing
+        # the queue. A failed run already resolves its pending commands.
+        while True:
+            try:
+                _, pending = self.queue.get_nowait()
+            except Empty:
+                break
+            if not pending.done(): pending.set_exception(RuntimeError('旧仿真会话已结束，命令未执行。'))
+        self.queue = Queue()
+        self.ready, self.shutdown = Event(), Event()
+        self.failure = None
+        self.record_frames = 0
+        self.initial_engine_id = self.engine_id = engine_id
+        self.switching = True
+        self.thread = Thread(target=self.run, name='simulation', daemon=True)
+        try:
+            self.thread.start()
+        except RuntimeError as exc:
+            self.failure = str(exc)
+            self.switching = False
+            with self.lock: self.snapshot.update(ready=False, error=self.failure)
+            raise HTTPException(503, self.failure) from exc
+        ready = await asyncio.to_thread(self.ready.wait, 660)
+        if not ready:
+            raise HTTPException(504, '重新加载超过 660 秒；原生初始化仍在处理中，请等待状态更新后再操作。')
+        if self.failure:
+            raise HTTPException(503, f'重新加载失败：{self.failure}')
+        with self.lock:
+            return {'backend': self.snapshot['backend'], 'session_id': self.session_id,
+                    'restarted': True}
+
     def record_frame(self, simulation):
         if self.recorder is not None:
             frame = simulation.trajectory_frame()
@@ -205,11 +340,15 @@ class Worker:
 
     async def execute(self, command):
         if self.failure or not self.thread.is_alive():
-            raise HTTPException(503, self.failure or 'MuJoCo 服务未运行。')
+            raise HTTPException(503, self.failure or '仿真服务未运行。')
         future = Future()
         self.queue.put((command, future))
         try:
-            return await asyncio.wait_for(asyncio.wrap_future(future), timeout=60)
+            timeout = 660 if command['action'] == 'backend_select' else 60
+            # A backend load owns native resources. Let it finish its transactional
+            # commit or rollback even if the requesting browser disconnects.
+            wrapped = asyncio.wrap_future(future)
+            return await asyncio.wait_for(asyncio.shield(wrapped) if command['action'] == 'backend_select' else wrapped, timeout=timeout)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except TimeoutError as exc:
@@ -273,7 +412,7 @@ async def lifespan(app):
     ready = await asyncio.to_thread(worker.ready.wait, 60)
     if not ready or worker.failure:
         worker.shutdown.set()
-        raise RuntimeError(worker.failure or 'MuJoCo 初始化超时。')
+        raise RuntimeError(worker.failure or '仿真初始化超时。')
     await price_catalog.start()
     try: yield
     finally:
@@ -288,12 +427,15 @@ async def lifespan(app):
     await asyncio.to_thread(worker.thread.join, 5)
 
 
-app = FastAPI(title='具身工坊 · MuJoCo', lifespan=lifespan)
+app = FastAPI(title='EmbodiWorks · 具身工坊', lifespan=lifespan)
 
 
 def local_request(request):
     origin = request.headers.get('origin')
-    if origin and origin not in ('http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8000', 'http://localhost:8000'):
+    allowed = {'http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8000', 'http://localhost:8000'}
+    if request.url.hostname in ('127.0.0.1', 'localhost'):
+        allowed.add(f'{request.url.scheme}://{request.url.netloc}')
+    if origin and origin not in allowed:
         raise HTTPException(403, '控制接口仅允许来自本地工作台页面。')
 
 
@@ -308,19 +450,60 @@ async def state():
     snapshot['experiment'] = research.snapshot()
     snapshot['repair'] = repair.snapshot()
     snapshot['registry'] = read_registry()
+    snapshot['backend_switching'] = worker.switching
     return snapshot
+
+
+class SimulatorSelection(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    engine_id: Literal['mujoco', 'genesis']
+
+
+@app.get('/api/simulators')
+async def simulators():
+    return simulator_catalog(worker.engine_id, worker.session_id)
+
+
+@app.post('/api/simulators/select')
+async def select_simulator(body: SimulatorSelection, request: Request):
+    local_request(request)
+    async with agent.lock:
+        ensure_research_idle()
+        if worker.switching or repair.snapshot().get('active'):
+            raise HTTPException(409, '请等待当前切换或故障修复结束。')
+        recovering = bool(getattr(worker, 'failure', None) or not worker.thread.is_alive())
+        with worker.lock:
+            if not recovering and worker.snapshot.get('task', {}).get('status') in ('running', 'settling'):
+                raise HTTPException(409, '请先停止当前机械臂动作。')
+        worker.switching = True
+        try:
+            if recovering:
+                result = await asyncio.shield(worker.restart(body.engine_id))
+            else:
+                result = await worker.execute({'action': 'backend_select', 'engine_id': body.engine_id})
+            agent.reset_observation()
+            policy.reset_observation()
+            return result
+        finally:
+            # A timeout may leave the native load running; the worker clears the
+            # flag after its final commit/rollback.
+            if not worker.thread.is_alive(): worker.switching = False
 
 
 @app.get('/api/models')
 async def models():
+    model_catalog, _, _ = supported_catalog(worker.engine_id)
     return [{'id': key, 'name': item['name'], 'arm_dof': item['arm_dof'],
+             'robot_count': item.get('robot_count', 1),
              'hand_dof': item.get('hand_dof',1), 'note': item.get('model_note',''),
-             'image': f'/api/models/{key}/image', 'source': f"{item['folder']}/{item['file']}"} for key, item in MODELS.items()]
+             'image': f'/api/models/{key}/image', 'source': f"{item['folder']}/{item['file']}"} for key, item in model_catalog.items()]
 
 
 @app.get('/api/scenes')
 async def scenes():
-    return {'scenes':[{'id':key,**value} for key,value in SCENES.items()], 'tasks':TASKS}
+    _, scene_catalog, task_catalog = supported_catalog(worker.engine_id)
+    return {'scenes':[{'id':key,**value} for key,value in scene_catalog.items()], 'tasks':task_catalog,
+            'engine_id': worker.engine_id}
 
 
 @app.get('/api/models/{model_id}/image')
@@ -335,6 +518,7 @@ async def model_image(model_id: str):
 async def command(body: Command, request: Request):
     local_request(request)
     async with agent.lock:
+        if worker.switching: raise HTTPException(409, '正在切换仿真后端，请等待加载完成。')
         if body.action in ('stop', 'reset', 'load', 'scene', 'pause'):
             await stop_research()
             await comparison.stop()
@@ -419,11 +603,13 @@ async def stop_repair(request: Request):
 
 
 def ensure_idle_for_repair():
+    if worker.switching: raise HTTPException(409, '正在切换仿真后端，请等待加载完成。')
     if agent.state['active'] or policy.state['active'] or comparison.state['active'] or research_active():
         raise HTTPException(409, '请先停止正在运行的机械臂实验，再验证或应用代码修复。')
 
 
 def ensure_no_repair_validation():
+    if worker.switching: raise HTTPException(409, '正在切换仿真后端，请等待加载完成。')
     if repair.state.get('status') == 'validating' and repair.state.get('active'):
         raise HTTPException(409, '正在验证模型接入代码，请等待验证完成或停止验证后再运行实验。')
 
@@ -494,8 +680,20 @@ async def stop_agent(request: Request):
         await stop_research()
         if comparison.state['active']: await comparison.stop()
         await agent.stop()
+        physics = await stop_physics_if_available()
+        return {**agent.snapshot(), **physics}
+
+
+async def stop_physics_if_available():
+    """Cancelling inference remains possible after a native process has failed."""
+    if worker.failure or not worker.thread.is_alive():
+        return {'engine_stopped': False, 'engine_error': worker.failure or '仿真服务未运行。'}
+    try:
         await worker.execute({'action': 'stop'})
-        return agent.snapshot()
+        return {'engine_stopped': True}
+    except HTTPException as exc:
+        if not worker.failure and worker.thread.is_alive(): raise
+        return {'engine_stopped': False, 'engine_error': worker.failure or str(exc.detail)}
 
 
 @app.post('/api/agent/observe')
@@ -543,8 +741,9 @@ async def stop_policy(request: Request):
     async with agent.lock:
         await stop_research()
         if comparison.state['active']: await comparison.stop()
-        await policy.stop(); await worker.execute({'action':'stop'})
-        return policy.snapshot()
+        await policy.stop()
+        physics = await stop_physics_if_available()
+        return {**policy.snapshot(), **physics}
 
 
 @app.get('/api/policy/camera/{name}')
@@ -699,6 +898,7 @@ def research_error(exc):
 
 
 def ensure_research_idle():
+    if worker.switching: raise HTTPException(409, '正在切换仿真后端，请等待加载完成。')
     if agent.state['active'] or policy.state['active'] or comparison.state['active'] or research_active():
         raise HTTPException(409, '请先停止正在运行的控制或实验任务。')
 

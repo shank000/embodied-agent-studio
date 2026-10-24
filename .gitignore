@@ -3,6 +3,7 @@ dist/
 *.log
 .venv/
 .venv-policy/
+.venv-genesis/
 runs/
 __pycache__/
 vendor/

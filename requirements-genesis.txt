@@ -1,0 +1,7 @@
+# Isolated simulator environment; install the platform's official CPU PyTorch wheel first.
+# Genesis itself depends on mujoco to parse MJCF assets; the engine remains Genesis.
+genesis-world==1.4.5
+torch==2.10.0
+pillow>=11.1,<12
+pydantic>=2.13.0
+scipy>=1.11.4

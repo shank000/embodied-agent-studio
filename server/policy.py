@@ -229,6 +229,7 @@ class PolicyController:
         started = time.monotonic(); latencies = []; frames = 0; limited = 0
         with self.worker.lock: initial = self.worker.snapshot.copy()
         log = RunLog('policy', {'model': config.model, 'provider': config.kind, 'robot': initial['model'],
+            'backend': initial.get('backend'), 'session_id': initial.get('session_id'),
             'scene_id': initial.get('scene_id'), 'seed': initial.get('seed'), 'task': request.task,
             'settings': {**config.model_dump(exclude={'api_key'}), 'max_sim_time_s':request.max_sim_time_s,
                          'one_chunk':request.one_chunk, 'record_video':request.record_video}},
@@ -249,7 +250,7 @@ class PolicyController:
                 for number in range(1, self.state['max_rounds']+1):
                     with self.worker.lock: current = self.worker.snapshot.copy()
                     remaining = request.max_sim_time_s - (current['time']-initial['time'])
-                    if current.get('evaluation', {}).get('success'):
+                    if environment_success(current):
                         self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
                     if remaining < config.dt_s:
                         self.state.update(status='limit', message='已达到仿真时间上限。'); return
@@ -298,9 +299,9 @@ class PolicyController:
                     while time.monotonic() < deadline:
                         await asyncio.sleep(.04)
                         with self.worker.lock: current = self.worker.snapshot.copy()
-                        if not current.get('ready'): raise RuntimeError(current.get('error','MuJoCo 未就绪。'))
+                        if not current.get('ready'): raise RuntimeError(current.get('error','仿真服务未就绪。'))
                         if current['generation'] != obs['generation']: raise RuntimeError('场景已切换，策略运行结束。')
-                        if current['time']-initial['time'] >= request.max_sim_time_s or current.get('evaluation',{}).get('success'):
+                        if current['time']-initial['time'] >= request.max_sim_time_s or environment_success(current):
                             await self.worker.execute({'action':'stop'}); break
                         if current['task']['status'] not in ('running','settling'): break
                     else: raise TimeoutError('策略动作执行超过 60 秒。')
@@ -309,7 +310,7 @@ class PolicyController:
                     log.write('execution', record)
                     self.state['history'].append({'round':number, 'frames': result.get('frames',1), 'limited_targets':result.get('limited_targets',0), 'latency_s':round(latencies[-1],3)})
                     self.state['history'] = self.state['history'][-30:]
-                    if current.get('evaluation',{}).get('success'):
+                    if environment_success(current):
                         self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
                 self.state.update(status='round_complete' if request.one_chunk else 'limit', message='本次策略运行结束；任务结果以场景评价器为准。')
         except asyncio.CancelledError:

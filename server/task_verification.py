@@ -1,12 +1,19 @@
 """Environment verification of completion proposals, separate from policy inputs."""
 import asyncio
 from copy import deepcopy
+from .simulators import EVALUATORS
+
+
+def trusted_evaluation(evaluation, snapshot):
+    engine_id = (snapshot.get('backend') or {}).get('engine_id', 'mujoco')
+    expected = EVALUATORS.get(engine_id)
+    return bool(expected and evaluation.get('source') == expected[0])
 
 
 def environment_success(snapshot):
     evaluation = snapshot.get('evaluation') or {}
     return (snapshot.get('ready') is True
-            and evaluation.get('source') == 'mujoco_privileged_state'
+            and trusted_evaluation(evaluation, snapshot)
             and evaluation.get('success') is True)
 
 
@@ -21,11 +28,12 @@ def public_feedback(value):
 
 
 async def verify_completion(controller, worker, log, step, explanation, generation):
-    controller.state.update(status='verifying', message='正在依据 MuJoCo 实际状态验收任务。')
+    controller.state.update(status='verifying', message='正在依据仿真环境实际状态验收任务。')
     evaluation = await worker.execute({'action': 'verify_task', 'generation': generation})
     if not controller._accepting or asyncio.current_task().cancelling():
         raise asyncio.CancelledError
-    accepted = (evaluation.get('source') == 'mujoco_privileged_state'
+    with worker.lock: snapshot = worker.snapshot.copy()
+    accepted = (trusted_evaluation(evaluation, snapshot)
                 and evaluation.get('success') is True)
     message = ('环境评价器已确认任务成功。' if accepted else
                '环境未确认任务完成，请根据最新三路图像继续操作；模型声明不作为成功依据。')

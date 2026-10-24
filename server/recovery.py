@@ -34,7 +34,7 @@ class RecoveryCoordinator:
         if not owner.state.get('active') or owner.state.get('run_id') != run_id:
             raise asyncio.CancelledError('恢复所属实验已停止或被替换。')
         if not state.get('ready'):
-            raise RuntimeError(state.get('error', 'MuJoCo 未就绪，无法恢复当前轮次。'))
+            raise RuntimeError(state.get('error', '仿真服务未就绪，无法恢复当前轮次。'))
         if (state.get('generation') != observation.get('generation') or
                 abs(state.get('time', -1)-observation.get('time', -2)) > 1e-7 or
                 state.get('active_robot', 'arm1') != observation.get('active_robot', 'arm1')):

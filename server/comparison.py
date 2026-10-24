@@ -10,11 +10,13 @@ from .runlog import RunLog, run_folder
 from .telemetry import batch_timing
 from .scenes import SCENES, TASKS
 from .simulation import MODELS
+from .simulators import validate_selection
 
 
 class ComparisonStart(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
     robot: str = 'so101'
+    engine_id: str = 'mujoco'
     scene_id: str = 'tabletop'
     task_id: str = 'lift_red'
     seeds: list[int] = Field(default_factory=lambda:[42], min_length=1, max_length=10)
@@ -24,8 +26,7 @@ class ComparisonStart(BaseModel):
 
     @model_validator(mode='after')
     def valid_trial(self):
-        if self.robot not in MODELS or self.scene_id not in SCENES: raise ValueError('未知机器人或场景。')
-        if self.task_id not in SCENES[self.scene_id]['tasks']: raise ValueError('当前场景不支持该任务。')
+        validate_selection(self.engine_id, self.robot, self.scene_id, self.task_id)
         if len(set(self.methods)) != len(self.methods): raise ValueError('对比方法不能重复。')
         if len(set(self.seeds)) != len(self.seeds) or any(seed < 0 or seed > 2**32-1 for seed in self.seeds): raise ValueError('种子应为不重复的 0–4294967295 整数。')
         return self
@@ -50,6 +51,8 @@ class ComparisonController:
 
     async def start(self, request):
         if self.state['active']: raise ValueError('对比实验正在运行。')
+        with self.worker.lock: engine = (self.worker.snapshot.get('backend') or {}).get('engine_id', 'mujoco')
+        if engine != request.engine_id: raise ValueError('请先切换到本次对比指定的仿真后端。')
         for method in request.methods:
             if method != 'agent': self.policy.validate_start(method, request.robot)
             else: validate_agent_access(self.agent.config)
@@ -68,7 +71,9 @@ class ComparisonController:
         self.task = None
 
     async def run(self, request):
+        with self.worker.lock: backend = self.worker.snapshot.get('backend')
         log = RunLog('comparison', {'task':TASKS[request.task_id]['instruction'], 'settings':request.model_dump(),
+                                   'backend': backend,
                                    'rows': self.state['rows'], 'primary_models': [
                                        self.agent.config.model if method == 'agent' else self.policy.configs[method].model
                                        for method in request.methods]})

@@ -139,8 +139,8 @@ def _identity(recipe, footprint):
 
 def version_materials():
     """Read project source/requirements, never login files or runtime credentials."""
-    paths = sorted((ROOT / 'server').glob('*.py'))
-    paths += [ROOT / name for name in ('requirements.txt', 'requirements-policy.txt', 'package.json', 'package-lock.json')]
+    paths = sorted((ROOT / 'server').rglob('*.py'))
+    paths += [ROOT / name for name in ('requirements.txt', 'requirements-policy.txt', 'requirements-genesis.txt', 'package.json', 'package-lock.json')]
     blobs = {}
     for path in paths:
         if not path.is_file(): continue

@@ -13,6 +13,8 @@ from .telemetry import reasoning_text, response_text, usage_tokens, effective_re
 
 TOKEN_FIELDS = ('input_tokens', 'output_tokens', 'reasoning_tokens', 'total_tokens')
 BATCH_KINDS = {'comparison', 'research_experiment'}
+ENVIRONMENT_FIELDS = ('engine_id', 'engine_version', 'evaluator_source', 'evaluator_version',
+                      'robot', 'scene_id', 'task_id')
 
 
 def _number(value):
@@ -54,6 +56,50 @@ def _identity(metadata, calls):
     model = ' + '.join(models) if models else metadata.get('model') or config.get('model')
     effort = ' + '.join(efforts) if efforts else effective_reasoning(config)
     return model, effort or 'unspecified'
+
+
+def _environment_identity(result, events, folder, issues):
+    """Use recorded evidence; an installed engine is not evidence about an old run."""
+    def value(item):
+        return str(item).strip() if isinstance(item, (str, int, float)) and not isinstance(item, bool) and str(item).strip() else 'unknown'
+
+    protocol = result.get('protocol') if isinstance(result.get('protocol'), dict) else {}
+    spec = protocol.get('spec') if isinstance(protocol.get('spec'), dict) else {}
+    contract = protocol.get('contract') if isinstance(protocol.get('contract'), dict) else {}
+    backend = result.get('backend') if isinstance(result.get('backend'), dict) else {}
+    checkpoint = next((event.get('data') for event in events if event.get('event') == 'initial_state'
+                       and isinstance(event.get('data'), dict)), {})
+    if not backend and not result.get('engine_id'):
+        path = folder / 'checkpoints' / 'initial.json'
+        if path.is_file():
+            try:
+                saved = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(saved, dict): checkpoint = saved
+            except (OSError, ValueError) as exc:
+                issues.append(f'初态快照未能提供环境身份：{exc}')
+    if not backend:
+        backend = checkpoint.get('backend') or contract.get('backend') or {}
+        if not isinstance(backend, dict): backend = {}
+    metrics = result.get('metrics') if isinstance(result.get('metrics'), dict) else {}
+    evaluation = metrics.get('evaluation') or result.get('evaluation')
+    if not isinstance(evaluation, dict):
+        evaluation = next((event['data'].get('evaluation') for event in reversed(events)
+                           if event.get('event') == 'task_evaluation' and isinstance(event.get('data'), dict)
+                           and isinstance(event['data'].get('evaluation'), dict)), {})
+    source = value(backend.get('evaluator_source') or result.get('evaluator_source') or evaluation.get('source'))
+    engine = value(backend.get('engine_id') or result.get('engine_id') or spec.get('engine_id'))
+    if engine == 'unknown' and source == 'mujoco_privileged_state': engine = 'mujoco'
+    if engine == 'unknown' and (result.get('mujoco_version') or contract.get('mujoco')): engine = 'mujoco'
+    legacy_version = (result.get('mujoco_version') or contract.get('mujoco')) if engine == 'mujoco' else None
+    version = value(backend.get('engine_version') or result.get('engine_version') or legacy_version)
+    evaluator = value(backend.get('evaluator_version') or result.get('evaluator_version') or evaluation.get('version'))
+    identity = {**backend, 'engine_id': engine, 'engine_version': version,
+                'evaluator_source': source, 'evaluator_version': evaluator}
+    return {'backend': identity, 'engine_id': engine, 'engine_version': version,
+            'evaluator_source': source, 'evaluator_version': evaluator,
+            'robot': value(result.get('robot') or checkpoint.get('model') or spec.get('robot')),
+            'scene_id': value(result.get('scene_id') or checkpoint.get('scene_id') or spec.get('scene_id')),
+            'task_id': value(result.get('task_id') or evaluation.get('task_id') or checkpoint.get('task_id') or spec.get('task_id'))}
 
 
 def analyze_run(run_id, *, _ancestors=()):
@@ -180,7 +226,9 @@ def analyze_run(run_id, *, _ancestors=()):
             cost = aggregate_costs(costs)
     else:
         cost = aggregate_costs(costs)
+    environment = _environment_identity(result, events, folder, issues)
     return {'run_id': run_id, **record_labels({**result, 'run_id': run_id, 'started_at': started_at}),
+        **environment,
         'kind': result.get('kind'), 'status': result.get('status', 'interrupted'),
         'message': result.get('message'), 'task': result.get('task'), 'model': model, 'reasoning': effort,
         'started_at': started_at, 'ended_at': ended_at, 'elapsed_s': elapsed,
@@ -207,10 +255,15 @@ def analyze_experiments(*, task=None, model=None, reasoning=None, kind=None, lim
     groups = defaultdict(list); excluded_active = 0
     for run in runs:
         if run['status'] == 'running': excluded_active += 1; continue
-        if run['kind'] not in BATCH_KINDS: groups[(run['model'], run['reasoning'], run['kind'], run['task'])].append(run)
+        if run['kind'] not in BATCH_KINDS:
+            context = tuple(run[field] for field in ENVIRONMENT_FIELDS)
+            groups[(*context, run['model'], run['reasoning'], run['kind'], run['task'])].append(run)
     grouped = []
-    for (model_name, effort, run_kind, run_task), members in groups.items():
-        group = {'model': model_name, 'reasoning': effort, 'kind': run_kind, 'task': run_task, 'runs': len(members),
+    for identity, members in groups.items():
+        model_name, effort, run_kind, run_task = identity[-4:]
+        group = {**dict(zip(ENVIRONMENT_FIELDS, identity[:-4])),
+                 'backend': {field: members[0][field] for field in ENVIRONMENT_FIELDS[:4]},
+                 'model': model_name, 'reasoning': effort, 'kind': run_kind, 'task': run_task, 'runs': len(members),
                  'succeeded': sum(bool((run.get('metrics') or {}).get('success')) and run['status'] not in ('error', 'stopped', 'cancelled', 'interrupted', 'running') for run in members),
                  'cancelled': sum(run['status'] in ('stopped', 'cancelled') for run in members),
                  'failed': sum(run['status'] not in ('running', 'stopped', 'cancelled') and (run['status'] in ('error', 'interrupted') or not bool((run.get('metrics') or {}).get('success'))) for run in members)}
@@ -222,4 +275,5 @@ def analyze_experiments(*, task=None, model=None, reasoning=None, kind=None, lim
         grouped.append(group)
     return {'runs': runs[:limit], 'groups': grouped, 'matched_runs': len(runs), 'returned_runs': min(limit, len(runs)),
             'aggregation_scope': 'leaf_runs_only', 'excluded_active_runs': excluded_active, 'issues': issues,
-            'message': '聚合扫描所有历史记录，列表按 limit 截取；父批次不重复计费。缺失值不按零计算，累计值仅包含已知样本。'}
+            'grouping_fields': [*ENVIRONMENT_FIELDS, 'model', 'reasoning', 'kind', 'task'],
+            'message': '仅在相同后端及版本、评价来源及版本、机器人、场景、评价任务内按模型与推理强度聚合；不同种子作为重复样本。历史环境缺失保留 unknown。聚合扫描所有历史记录，列表按 limit 截取；父批次不重复计费，缺失值不按零计算。'}

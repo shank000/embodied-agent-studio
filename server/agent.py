@@ -115,7 +115,7 @@ Input each round: synchronized front, side, wrist RGB images and robot proprioce
 Look at all three images. Infer the next small action directly; do not output object 6D poses,
 keypoints, 3D value maps, code, arm joint angles or a long action sequence.
 Output exactly one JSON object matching the provided schema. Do not use tools, shell or files.
-position_m is the next ABSOLUTE TCP position in MuJoCo WORLD frame (metres), NOT a delta.
+position_m is the next ABSOLUTE TCP position in the simulator WORLD frame (metres), NOT a delta.
 quaternion_wxyz is absolute TCP orientation, a normalized quaternion in w,x,y,z order.
 The world coordinate frame is fixed at the workbench, Z up; selecting a robot does not move its origin.
 For multi-arm scenes, observation.robots lists every robot's current TCP, joints and controls.
@@ -133,7 +133,7 @@ rejected, inspect the new images and continue acting. blocked means you cannot p
 For done/blocked repeat current pose.
 explanation is a short Chinese description of the action or visible result, not private reasoning.
 Respect the per-round translation and rotation bounds in the observation, joint limits and table.
-Local IK and MuJoCo actuators handle movement; you never set joint state directly.
+The selected simulator's native IK and actuators handle movement; you never set joint state directly.
 SO-101 has only 5 arm DOF; not every 6D pose is reachable. If IK rejects a target,
 use the feedback to choose a reachable pose; never claim a rejected action happened.
 Only claim done after observing the achieved state; motion completion alone does not prove grasping.
@@ -448,6 +448,7 @@ class AgentController:
         started = time.monotonic()
         with self.worker.lock: initial_state = self.worker.snapshot.copy()
         log = RunLog('agent', {'model': config.model, 'provider': config.provider, 'task': self.state['task'],
+            'backend': initial_state.get('backend'), 'session_id': initial_state.get('session_id'),
             'robot': initial_state.get('model'), 'scene_id': initial_state.get('scene_id'), 'seed': initial_state.get('seed'),
             'settings': {**config.model_dump(exclude={'api_key'}), 'max_sim_time_s':self.state['max_sim_time_s'],
                          'one_round':one_round, 'evaluator_stop':self.state['evaluator_stop'],
@@ -469,7 +470,7 @@ class AgentController:
                 remaining = self.state['max_sim_time_s'] - (current['time'] - initial_state['time'])
                 if remaining <= 1e-8 or remaining + 1e-8 < current.get('timestep', 0):
                     self.state.update(status='limit', message='已达到本次任务的仿真时间上限。'); return
-                if self.state['evaluator_stop'] and current.get('evaluation', {}).get('success'):
+                if self.state['evaluator_stop'] and environment_success(current):
                     self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
                 self.state.update(status='observing', round=number, message='采集同一时刻的三路相机画面。')
                 await self.worker.execute({'action': 'pause', 'value': True})
@@ -522,9 +523,9 @@ class AgentController:
                 while time.monotonic() < deadline:
                     await asyncio.sleep(.08)
                     with self.worker.lock: snapshot = self.worker.snapshot
-                    if not snapshot.get('ready'): raise RuntimeError(snapshot.get('error', 'MuJoCo 服务异常。'))
+                    if not snapshot.get('ready'): raise RuntimeError(snapshot.get('error', '仿真服务异常。'))
                     if snapshot['generation'] != obs['generation']: raise RuntimeError('机械臂已切换，当前任务停止。')
-                    if self.state['evaluator_stop'] and snapshot.get('evaluation', {}).get('success'):
+                    if self.state['evaluator_stop'] and environment_success(snapshot):
                         record['result'] = {'status': 'verified', 'actual_tcp': snapshot['tcp_pose']}
                         log.write('execution', record)
                         self.state.update(status='verified', message='场景评价器已确认任务成功。'); return

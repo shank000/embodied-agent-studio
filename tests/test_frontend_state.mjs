@@ -128,9 +128,13 @@ test('inactive configuration controls are disabled and regain their entered valu
   assert.equal(element('rsi-agent-url').disabled,true);
 });
 
-test('multiarm models are available in both comparison entry points',()=>{
-  const {element,run}=moduleContext('multiarm.js');run('initMultiarm({operate(){}});');
-  for(const id of ['compare-robot','rsi-protocol-robot'])assert.deepEqual(element(id).children.map(option=>option.value),['dual_panda','triple_panda']);
+test('model cards and comparison entries follow the active engine catalog',()=>{
+  const {scope,element,run}=moduleContext('multiarm.js');run('initMultiarm({operate(){}});');
+  scope.models=['panda','dual_panda','triple_panda'].map(id=>({id,name:id,arm_dof:7,hand_dof:1}));run("updateModelCatalog(models,'dual_panda');");
+  for(const id of ['compare-robot','rsi-protocol-robot'])assert.deepEqual(element(id).children.map(option=>option.value),['panda','dual_panda','triple_panda']);
+  scope.models=[scope.models[0]];run("updateModelCatalog(models,'panda');");
+  for(const id of ['compare-robot','rsi-protocol-robot'])assert.deepEqual(element(id).children.map(option=>option.value),['panda']);
+  assert.deepEqual(element('model-cards').children.map(card=>card.dataset.model),['panda']);
 });
 
 for(const [stateKey,path,button] of [['research','research/stop','rsi-run-stop'],['experiment','research/experiments/stop','rsi-experiment-stop']]){

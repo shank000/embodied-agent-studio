@@ -84,8 +84,33 @@ function tasksFor(sceneId,select,taskId){const scene=catalog.scenes.find(s=>s.id
 function updateSceneInfo(){if(!catalog)return;const scene=catalog.scenes.find(s=>s.id===$('#scene-select').value);$('#scene-description').textContent=scene.description;}
 function updateCompareCriterion(){if(catalog)$('#comparison-criterion').textContent=catalog.tasks[$('#compare-task').value]?.criterion||'';}
 function fillTask(){if(!catalog)return;const instruction=catalog.tasks[$('#task-select').value].instruction;$('#command').value=instruction;$('#policy-task').value=instruction;}
-function updatePolicySummary(){const kind=$('#policy-kind').value;const config=configs[kind];$('#policy-model-name').textContent=config?.model||names[kind];$('#policy-model-note').textContent=kind==='smolvla'?'官方 SmolVLA 直接预测动作块。默认映射为 SO-101，基础权重未在当前场景微调。':`${names[kind]} 通过你配置的推理服务预测动作。${config?.endpoint?'接口已配置。':'尚未配置接口。'}`;}
+let policyRobot=null,researchControlsLocked=true;
+function updatePolicySummary(){const kind=$('#policy-kind').value;const config=configs[kind];$('#policy-model-name').textContent=config?.model||names[kind];$('#policy-model-note').textContent=kind==='smolvla'?'官方 SmolVLA 直接预测动作块。默认映射为 SO-101，基础权重未在当前场景微调。':`${names[kind]} 通过你配置的推理服务预测动作。${config?.endpoint?'接口已配置。':'尚未配置接口。'}`;updatePolicyAvailability();}
+function updatePolicyAvailability(robot=policyRobot,locked=researchControlsLocked){
+  const supported=robot==='so101',select=$('#policy-kind'),option=[...(select.options||[])].find(item=>item.value==='smolvla');
+  if(option)option.disabled=!supported;
+  const incompatible=select.value==='smolvla'&&!supported;
+  $('#policy-start').disabled=locked||incompatible;$('#policy-one-chunk').disabled=locked||incompatible;
+  if(select.value==='smolvla')$('#policy-model-note').textContent=supported?'默认 SmolVLA 映射 SO-101，基础权重未在当前场景微调。':`默认 SmolVLA 仅适配 SO-101，当前机器人${robot?'为 '+robot:'尚未连接'}，不能执行。可切换机器人，或自行配置匹配本体的 VLA / WAM。`;
+}
+function availableComparisonMethods(){return [...document.querySelectorAll('input[name="method"]:checked')].filter(input=>!input.disabled).map(input=>input.value);}
+function updateComparisonAvailability(locked=researchControlsLocked){
+  const robot=$('#compare-robot').value,smolvla=document.querySelector('input[name="method"][value="smolvla"]'),supported=robot==='so101';
+  if(smolvla)smolvla.disabled=locked||!supported;
+  const methods=availableComparisonMethods();$('#compare-start').disabled=locked||methods.length<2;
+  let note=$('#comparison-method-note');
+  if(!note){note=document.createElement('p');note.id='comparison-method-note';note.className='research-note';note.setAttribute('role','status');document.querySelector('.comparison-methods').after(note);}
+  const message=[supported?'':`默认 SmolVLA 仅适配 SO-101；当前待跑机器人为 ${robot||'未选择'}，此方法不参与比较。`,methods.length<2?'请至少选择两种当前机器人可执行的方法；自定义 VLA / WAM 需先配置匹配接口。':`已选择 ${methods.length} 种可用方法；自定义策略使用你已配置的接口，不会自动切换策略。`].filter(Boolean).join(' ');
+  if(note.textContent!==message)note.textContent=message;
+}
 function changePage(page){currentPage=page;for(const name of ['workspace','rsi','comparison','logs'])$(`#${name}-view`).hidden=name!==page;document.querySelectorAll('[data-page]').forEach(button=>button.classList.toggle('selected',button.dataset.page===page));if(page==='logs'){refreshLogs();refreshPricingStatus();}}
+
+export async function reloadResearchCatalog(){
+  catalog=await request('scenes');lastGeneration=-1;
+  for(const selector of ['#scene-select','#compare-scene'])options($(selector),catalog.scenes,catalog.scenes[0]?.id);
+  const scene=catalog.scenes[0]?.id;if(!scene)return;
+  tasksFor(scene,$('#task-select'));tasksFor(scene,$('#compare-task'));updateSceneInfo();updateCompareCriterion();
+}
 
 export async function initResearch(callbacks){
   context=callbacks;
@@ -94,6 +119,8 @@ export async function initResearch(callbacks){
   $('#scene-select').addEventListener('change',()=>{tasksFor($('#scene-select').value,$('#task-select'));updateSceneInfo();});
   $('#compare-scene').addEventListener('change',()=>{tasksFor($('#compare-scene').value,$('#compare-task'));updateCompareCriterion();});
   $('#compare-task').addEventListener('change',updateCompareCriterion);
+  $('#compare-robot').addEventListener('change',()=>updateComparisonAvailability());
+  document.querySelectorAll('input[name="method"]').forEach(input=>input.addEventListener('change',()=>updateComparisonAvailability()));
   $('#use-task').addEventListener('click',fillTask);
   $('#apply-scene').addEventListener('click',async()=>{await context.operate({action:'scene',scene_id:$('#scene-select').value,task_id:$('#task-select').value,seed:Number($('#scene-seed').value)});fillTask();});
   $('#policy-kind').addEventListener('change',updatePolicySummary);
@@ -108,8 +135,9 @@ export async function initResearch(callbacks){
     try{
       const seedText=$('#compare-seeds').value.trim();
       if(!/^\d+(\s*[,，]\s*\d+)*$/.test(seedText))throw new Error('请填写整数种子，用逗号分隔。');
-      await request('comparison/start',{robot:$('#compare-robot').value,scene_id:$('#compare-scene').value,task_id:$('#compare-task').value,
-        seeds:seedText.split(/[,，]/).map(Number),methods:[...document.querySelectorAll('input[name="method"]:checked')].map(x=>x.value),max_sim_time_s:Number($('#compare-limit').value),record_video:$('#compare-record-video').checked});
+      const methods=availableComparisonMethods();if(methods.length<2)throw new Error('请至少选择两种当前机器人可执行的方法；默认 SmolVLA 仅适配 SO-101。');
+      await request('comparison/start',{engine_id:catalog?.engine_id||'mujoco',robot:$('#compare-robot').value,scene_id:$('#compare-scene').value,task_id:$('#compare-task').value,
+        seeds:seedText.split(/[,，]/).map(Number),methods,max_sim_time_s:Number($('#compare-limit').value),record_video:$('#compare-record-video').checked});
     }catch(error){context.toast(error.message);$('#comparison-message').textContent=error.message;}
   });
   $('#compare-stop').addEventListener('click',async()=>{try{await request('comparison/stop',{});}catch(error){context.toast(error.message);}});
@@ -141,7 +169,7 @@ export async function initResearch(callbacks){
 }
 
 async function startPolicy(oneChunk){
-  try{await request('policy/start',{kind:$('#policy-kind').value,task:$('#policy-task').value.trim(),one_chunk:oneChunk,max_sim_time_s:Number($('#policy-time-limit').value),record_video:$('#policy-record-video').checked});}catch(error){context.toast(error.message);$('#policy-message').textContent=error.message;}
+  try{if($('#policy-kind').value==='smolvla'&&policyRobot!=='so101')throw new Error('默认 SmolVLA 仅适配 SO-101；请切换机器人或配置匹配本体的 VLA / WAM。');await request('policy/start',{kind:$('#policy-kind').value,task:$('#policy-task').value.trim(),one_chunk:oneChunk,max_sim_time_s:Number($('#policy-time-limit').value),record_video:$('#policy-record-video').checked});}catch(error){context.toast(error.message);$('#policy-message').textContent=error.message;}
 }
 
 async function openPolicySettings(){
@@ -174,7 +202,8 @@ export function renderResearch(state){
   }
   renderSceneEvaluation(state.evaluation);
   if(state.model==='rm65_gaia'){$('#gripper-label').textContent='灵巧手';$('#gripper-status').textContent='15 关节';$('#gripper-detail').textContent='可在关节控制中逐指调节';}
-  const policy=state.policy||{},comparison=state.comparison||{},locked=!!(state.agent?.active||policy.active||comparison.active||state.research?.active||state.experiment?.active);
+  const policy=state.policy||{},comparison=state.comparison||{},locked=!!(state.ready===false||state.backend_switching||state.agent?.active||policy.active||comparison.active||state.research?.active||state.experiment?.active);
+  policyRobot=state.model;researchControlsLocked=locked;
   $('#policy-status').textContent=statuses[policy.status]||policy.status||'等待任务';$('#policy-message').textContent=policy.message||'';
   $('#policy-round').textContent=`${policy.round||0} / ${policy.max_rounds||configs[$('#policy-kind').value]?.max_chunks||60} 次`;
   renderRunTimer($('#policy-run-time'),policy);renderRunTimer($('#comparison-run-time'),comparison);
@@ -184,6 +213,7 @@ export function renderResearch(state){
   for(const selector of ['#apply-scene','#scene-select','#task-select','#scene-seed'])$(selector).disabled=locked||$('#reset').disabled;
   $('#compare-start').disabled=locked;$('#compare-stop').disabled=!comparison.active;
   document.querySelectorAll('#comparison-form input,#comparison-form select').forEach(input=>input.disabled=comparison.active);
+  updatePolicyAvailability(state.model,locked);updateComparisonAvailability(locked);
   $('#policy-log-link').hidden=!policy.run_id;if(policy.run_id)$('#policy-log-link').href=`/api/runs/${policy.run_id}/download`;
   const key=JSON.stringify(policy.history||[]);
   if(key!==lastPolicy){lastPolicy=key;$('#policy-history').innerHTML=(policy.history||[]).slice(-5).reverse().map(row=>{
@@ -401,24 +431,58 @@ function renderResultAnalysis(analysis,run,events=[]){
     detail.querySelectorAll('pre').forEach((pre,index)=>{if(positions[index]){pre.scrollTop=positions[index].top;pre.scrollLeft=positions[index].left;}});
   }
   for(const detail of previous.values())detail.remove();
+  $('#result-description').textContent+=` · ${analysisContextLabel(analysis)}`;
   $('#result-children').replaceChildren();if(analysis.children?.length){const label=document.createElement('p');label.className='research-note';label.textContent='本实验的子试验结果（包括未生成独立运行编号的失败或取消）：';$('#result-children').append(label);for(const child of analysis.children){const row=typeof child==='string'?{run_id:child}:child||{},entry=document.createElement('article');entry.className='result-child';const title=document.createElement('strong');title.textContent=[row.display_name||row.method_name||names[row.method]||row.method||row.task||'子试验',row.seed==null?'':`种子 ${row.seed}`,statuses[row.status||row.analysis_status]||row.status||row.analysis_status||'',row.deleted_at?'已移入回收站':''].filter(Boolean).join(' · ');entry.append(title);const messages=[row.message,row.error,row.analysis_error].filter(Boolean);if(messages.length){const reason=document.createElement('p');reason.textContent=messages.map(value=>typeof value==='string'?value:JSON.stringify(value)).join('；');entry.append(reason);}if(row.run_id){const button=document.createElement('button');button.type='button';button.className='text-button';button.dataset.resultRun=row.run_id;button.textContent=`查看 ${row.run_id}`;entry.append(button);}else{const note=document.createElement('small');note.textContent='未生成独立运行编号，状态和错误由本批实验保留。';entry.append(note);}$('#result-children').append(entry);}}
+}
+const analysisEnvironmentFields=['engine_id','engine_version','evaluator_source','evaluator_version','robot','scene_id','task_id'];
+function analysisContextKey(row){return JSON.stringify(analysisEnvironmentFields.map(field=>row[field]||row.backend?.[field]||'unknown'));}
+function analysisContextLabel(row){
+  const values=JSON.parse(analysisContextKey(row)),[engine,version,source,evaluator,robot,scene,task]=values;
+  const engineName={mujoco:'MuJoCo',genesis:'Genesis',unknown:'环境未记录'}[engine]||engine;
+  const label=value=>value==='unknown'?'未记录':value;
+  return `${engineName} ${label(version)} / ${label(robot)} · ${label(scene)} · ${label(task)} / 评价 ${label(source)} ${label(evaluator)}`;
+}
+function ensureAnalysisContext(){
+  let select=$('#analysis-context');
+  if(!select){
+    const label=document.createElement('label');label.textContent='物理环境 / 评价契约';label.style.gridColumn='1 / -1';
+    select=document.createElement('select');select.id='analysis-context';select.setAttribute('aria-label','选择相同后端、版本、机器人、场景与评价任务');
+    label.append(select);$('#analysis-model').parentElement.before(label);
+    select.addEventListener('change',()=>{updateAnalysisSelections();clearAnalysis('物理环境已切换，请选择模型与任务后重新分析。');});
+    $('#analysis-model').addEventListener('change',()=>updateAnalysisSelections());
+    const note=$('#results-analysis-form .research-note');if(note)note.textContent='先选择相同物理环境与评价契约，再选择模型、任务及方法类型。不同后端、引擎版本、评价版本、机器人或场景分别统计；种子保留为重复样本。每个点为单次实验均值，缺失值不按零计算。';
+  }
+  return select;
+}
+function updateAnalysisSelections(){
+  const selected=ensureAnalysisContext().value,rows=analysisCatalog.filter(row=>analysisContextKey(row)===selected);
+  fillSelect($('#analysis-model'),rows.map(row=>row.model),'请选择同一模型');
+  fillSelect($('#analysis-task'),rows.filter(row=>!$('#analysis-model').value||row.model===$('#analysis-model').value).map(row=>row.task),'请选择同一任务');
 }
 async function refreshAnalysisCatalog(){
   const generation=++analysisCatalogGeneration;
-  try{const response=await request('experiments/analysis?limit=1000');if(generation!==analysisCatalogGeneration)return;analysisCatalog=response.groups?.length?response.groups:response.runs||[];fillSelect($('#analysis-model'),analysisCatalog.map(run=>run.model),'请选择同一模型');fillSelect($('#analysis-task'),analysisCatalog.filter(run=>!$('#analysis-model').value||run.model===$('#analysis-model').value).map(run=>run.task),'请选择同一任务');}catch(error){if(generation===analysisCatalogGeneration)resultError(error);}
+  try{
+    const response=await request('experiments/analysis?limit=1000');if(generation!==analysisCatalogGeneration)return;
+    analysisCatalog=response.groups?.length?response.groups:response.runs||[];
+    const select=ensureAnalysisContext(),previous=select.value,contexts=new Map(analysisCatalog.map(row=>[analysisContextKey(row),row]));
+    const first=document.createElement('option');first.value='';first.textContent='请选择同一物理环境与评价契约';select.replaceChildren(first);select.value='';
+    for(const [key,row] of contexts){const option=document.createElement('option');option.value=key;option.textContent=analysisContextLabel(row);select.append(option);}
+    if(contexts.has(previous))select.value=previous;else if(contexts.size===1)select.value=contexts.keys().next().value;
+    updateAnalysisSelections();
+  }catch(error){if(generation===analysisCatalogGeneration)resultError(error);}
 }
 function clearAnalysis(message){
   analysisGeneration++;hasAnalysisResults=false;$('#refresh-analysis').disabled=false;$('#analysis-message').textContent=message;$('#analysis-issues').hidden=true;$('#analysis-issues-text').textContent='';$('#analysis-token-chart').replaceChildren();$('#analysis-time-chart').replaceChildren();$('#analysis-rows').innerHTML='<tr><td colspan="6" class="empty-state">分析结果将在这里展示。</td></tr>';
 }
 async function runAnalysis(){
-  const model=$('#analysis-model').value,task=$('#analysis-task').value,kind=$('#analysis-kind').value;if(!model||!task){resultError(new Error('请先选择相同模型与相同任务，再比较推理强度。'));return;}
+  const selectedContext=ensureAnalysisContext().value,model=$('#analysis-model').value,task=$('#analysis-task').value,kind=$('#analysis-kind').value;if(!selectedContext||!model||!task){resultError(new Error('请先选择相同物理环境、模型与任务，再比较推理强度。'));return;}
   const generation=++analysisGeneration;hasAnalysisResults=true;$('#results-error').hidden=true;$('#refresh-analysis').disabled=true;$('#analysis-message').textContent='正在读取真实调用记录与缺失情况…';
   try{const query=new URLSearchParams({model,task,kind,limit:$('#analysis-limit').value});const response=await request(`experiments/analysis?${query}`);if(generation!==analysisGeneration)return;const order={disabled:0,none:0,off:0,minimal:1,low:2,medium:3,high:4,xhigh:5,ultra:6};
-    const groups=(response.groups||[]).filter(group=>group.model===model&&group.task===task&&group.kind===kind).sort((a,b)=>(order[a.reasoning]??99)-(order[b.reasoning]??99)||String(a.reasoning).localeCompare(String(b.reasoning)));
+    const groups=(response.groups||[]).filter(group=>analysisContextKey(group)===selectedContext&&group.model===model&&group.task===task&&group.kind===kind).sort((a,b)=>(order[a.reasoning]??99)-(order[b.reasoning]??99)||String(a.reasoning).localeCompare(String(b.reasoning)));
     const points=groups.map(group=>({label:group.reasoning||'未记录',shortLabel:group.reasoning||'未记录',value:group.mean_output_tokens}));
     $('#analysis-token-chart').innerHTML=metricChartMarkup(points,'按推理强度比较单次实验累计输出 tokens 均值','推理强度');$('#analysis-time-chart').innerHTML=metricChartMarkup(points.map((point,index)=>({...point,value:groups[index].mean_inference_s})),'按推理强度比较单次实验调用总耗时均值','推理强度');
-    $('#analysis-rows').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${escape(group.reasoning||'未记录')}</strong><small>${escape(group.model)}</small></td><td>${numberText(group.runs)}<small>输出样本 ${numberText(group.output_samples)} / 时间样本 ${numberText(group.inference_samples)}</small></td><td>${numberText(group.output_tokens)}<small>均值 ${numberText(group.mean_output_tokens)}</small></td><td>${secondsText(group.inference_s)}<small>均值 ${secondsText(group.mean_inference_s)}</small></td><td>${numberText(group.total_tokens)}<small>完整样本 ${numberText(group.token_samples)}</small></td><td>输出 ${numberText(group.missing_output_runs)}<small>调用耗时 ${numberText(group.missing_inference_runs)}</small></td></tr>`).join(''):'<tr><td colspan="6" class="empty-state">筛选范围内没有可比较的运行。</td></tr>';
-    $('#analysis-message').textContent=`${groups.length} 个推理强度组 · 匹配 ${response.matched_runs??response.runs?.length??0} 条运行，列表读取 ${response.returned_runs??response.runs?.length??0} 条。${response.aggregation_scope==='leaf_runs_only'?'统计仅累计实际执行的子试验，排除父实验重复汇总。':''}${response.excluded_active_runs?`进行中的 ${response.excluded_active_runs} 条未纳入终态成本统计。`:''}缺失用量不作为 0，均值仅使用对应字段完整的实验。`;
+    $('#analysis-rows').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${escape(group.reasoning||'未记录')}</strong><small>${escape(group.model)}</small><small>${escape(analysisContextLabel(group))}</small></td><td>${numberText(group.runs)}<small>输出样本 ${numberText(group.output_samples)} / 时间样本 ${numberText(group.inference_samples)}</small></td><td>${numberText(group.output_tokens)}<small>均值 ${numberText(group.mean_output_tokens)}</small></td><td>${secondsText(group.inference_s)}<small>均值 ${secondsText(group.mean_inference_s)}</small></td><td>${numberText(group.total_tokens)}<small>完整样本 ${numberText(group.token_samples)}</small></td><td>输出 ${numberText(group.missing_output_runs)}<small>调用耗时 ${numberText(group.missing_inference_runs)}</small></td></tr>`).join(''):'<tr><td colspan="6" class="empty-state">筛选范围内没有可比较的运行。</td></tr>';
+    $('#analysis-message').textContent=`当前物理环境内 ${groups.reduce((sum,group)=>sum+group.runs,0)} 条已结束实验，${groups.length} 个推理强度组。${groups.length?analysisContextLabel(groups[0])+'。':''}不同后端与评价契约分别统计；未知历史字段显示“未记录”。${response.aggregation_scope==='leaf_runs_only'?'统计仅累计实际执行的子试验，排除父实验重复汇总。':''}缺失用量不作为 0，均值仅使用对应字段完整的实验。`;
     $('#analysis-issues').hidden=!response.issues?.length;$('#analysis-issues-text').textContent=(response.issues||[]).map(issue=>typeof issue==='string'?issue:JSON.stringify(issue)).join('\n');
   }catch(error){if(generation===analysisGeneration){resultError(error);$('#analysis-message').textContent=error.message;}}finally{if(generation===analysisGeneration)$('#refresh-analysis').disabled=false;}
 }

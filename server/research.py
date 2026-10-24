@@ -17,6 +17,7 @@ from .run_management import primary_models
 from .telemetry import batch_timing
 from .scenes import SCENES, TASKS
 from .simulation import MODELS
+from .simulators import validate_selection, backend_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOLS = ROOT / 'protocols'
@@ -24,20 +25,29 @@ REGISTRY = ROOT / 'methods' / 'registry.json'
 PROTOCOL_ID = re.compile(r'^protocol-[0-9a-f]{24}$')
 
 
-def evaluation_contract():
+def evaluation_contract(engine_id='mujoco'):
     """Evaluator and physical environment are outside the candidate search space."""
     import mujoco
     paths = ['server/scenes.py', 'server/simulation.py', 'server/task_verification.py',
-             'server/robot_assets.py', 'server/multiarm.py']
-    return {'mujoco': mujoco.__version__, 'files': {
+             'server/robot_assets.py', 'server/multiarm.py', 'server/control.py', 'server/actions.py']
+    contract = {'mujoco': mujoco.__version__, 'files': {
         name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths},
         'input_condition': 'three_rgb_proprioception',
         'inference_timing': 'physics_paused', 'success_denominator': 'all_assigned_episodes'}
+    if engine_id == 'genesis':
+        from .simulators import catalog
+        engine = next(item for item in catalog()['backends'] if item['id'] == engine_id)
+        paths = ['server/backends/genesis_backend.py', 'server/backends/runtime.py', 'server/simulators.py', 'server/task_verification.py', 'server/actions.py']
+        contract.pop('mujoco')
+        contract['backend'] = backend_identity(engine_id, engine['version'])
+        contract['files'] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths}
+    return contract
 
 
 class ResearchProtocol(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False, validate_default=True)
     name: str = Field(min_length=1, max_length=120)
+    engine_id: str = 'mujoco'
     robot: str = 'so101'
     scene_id: str = 'tabletop'
     task_id: str = 'lift_red'
@@ -54,10 +64,7 @@ class ResearchProtocol(BaseModel):
 
     @model_validator(mode='after')
     def validate_protocol(self):
-        if self.robot not in MODELS or self.scene_id not in SCENES:
-            raise ValueError('未知机器人或场景。')
-        if self.task_id not in SCENES[self.scene_id]['tasks']:
-            raise ValueError('任务不属于所选场景。')
+        validate_selection(self.engine_id, self.robot, self.scene_id, self.task_id)
         seen = set()
         for name in ('development_seeds', 'validation_seeds', 'test_seeds'):
             seeds = getattr(self, name)
@@ -71,8 +78,8 @@ class ResearchProtocol(BaseModel):
 
 def register_protocol(spec):
     spec = spec if isinstance(spec, ResearchProtocol) else ResearchProtocol.model_validate(spec)
-    content = {'spec': spec.model_dump(), 'contract': evaluation_contract(),
-               'task': TASKS[spec.task_id], 'schema_version': 'embodied-protocol-v1'}
+    content = {'spec': spec.model_dump(), 'contract': evaluation_contract(spec.engine_id),
+               'task': TASKS[spec.task_id], 'schema_version': 'embodied-protocol-v2'}
     encoded = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
     protocol_id = 'protocol-' + hashlib.sha256(encoded).hexdigest()[:24]
     PROTOCOLS.mkdir(parents=True, exist_ok=True)
@@ -93,6 +100,8 @@ def get_protocol(protocol_id):
         raise ValueError('评测协议不存在。')
     manifest = json.loads(path.read_text(encoding='utf-8'))
     spec = ResearchProtocol.model_validate(manifest['spec']).model_dump()
+    if manifest['schema_version'] == 'embodied-protocol-v1': spec.pop('engine_id')
+    elif manifest['schema_version'] != 'embodied-protocol-v2': raise ValueError('不支持的评测协议版本。')
     content = {'spec': spec, 'contract': manifest['contract'], 'task': manifest['task'],
                'schema_version': manifest['schema_version']}
     encoded = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
@@ -162,8 +171,11 @@ class ResearchController:
             raise ValueError('请先停止正在运行的研究任务。')
         request = request if isinstance(request, ResearchExperiment) else ResearchExperiment.model_validate(request)
         protocol = get_protocol(request.protocol_id)
-        if protocol['contract'] != evaluation_contract():
+        engine_id = protocol['spec'].get('engine_id', 'mujoco')
+        if protocol['contract'] != evaluation_contract(engine_id):
             raise ValueError('物理环境或评价器已变化，请登记新的评测协议。')
+        with self.worker.lock: current_engine = (self.worker.snapshot.get('backend') or {}).get('engine_id', 'mujoco')
+        if current_engine != engine_id: raise ValueError('请先切换到此协议指定的仿真后端。')
         methods = {key: verify_method(key) for key in request.method_ids}
         spec = protocol['spec']
         seeds = spec[request.split + '_seeds']
@@ -186,7 +198,9 @@ class ResearchController:
         self.task = None
 
     async def run(self, request, protocol):
+        with self.worker.lock: backend = self.worker.snapshot.get('backend')
         log = RunLog('research_experiment', {'task': TASKS[protocol['spec']['task_id']]['instruction'],
+                     'backend': backend,
                      'protocol': protocol, 'settings': request.model_dump(), 'rows': self.state['rows'],
                      'primary_models': [model for method_id in request.method_ids
                                         for model in primary_models(get_method(method_id))]})
@@ -285,7 +299,7 @@ def promote(experiment_id, candidate_id, parent_id):
     if result.get('kind') != 'research_experiment' or result.get('status') != 'complete' or result.get('split') != 'validation':
         raise ValueError('只有完整结束的验证集配对实验可用于晋升；测试集结果不得用于选版本。')
     protocol = get_protocol(result['protocol_id'])
-    if protocol['contract'] != evaluation_contract():
+    if protocol['contract'] != evaluation_contract(protocol['spec'].get('engine_id', 'mujoco')):
         raise ValueError('评价环境已变化，旧实验不能用于当前晋升。')
     rows = result['rows']
     groups = {key: [row for row in rows if row['method_id'] == key] for key in (parent_id, candidate_id)}

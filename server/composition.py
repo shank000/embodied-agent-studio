@@ -363,7 +363,7 @@ class CompositionController:
         while True:
             await asyncio.sleep(.04)
             current = self._snapshot()
-            if not current.get('ready'): raise RuntimeError(current.get('error', 'MuJoCo 服务未就绪。'))
+            if not current.get('ready'): raise RuntimeError(current.get('error', '仿真服务未就绪。'))
             if not self._accepting: raise asyncio.CancelledError
             if current['generation'] != observation['generation']: raise ValueError('执行期间场景已变化。')
             task = current['task']
@@ -385,6 +385,7 @@ class CompositionController:
         started = time.monotonic()
         self.initial_state = self._snapshot()
         self.log = RunLog('composition', {'method_id': request.method_id, 'recipe': recipe,
+            'backend': self.initial_state.get('backend'), 'session_id': self.initial_state.get('session_id'),
             'episode_id': self.state['episode_id'], 'robot': self.initial_state.get('model'),
             'scene_id': self.initial_state.get('scene_id'), 'seed': self.initial_state.get('seed'),
             'task': request.task, 'settings': request.model_dump()}, self._secrets(credentials),
@@ -409,7 +410,7 @@ class CompositionController:
                 for number in range(1, self.state['max_steps']+1):
                     self.state['step'] = number
                     current = self._snapshot()
-                    if current.get('evaluation', {}).get('success'):
+                    if environment_success(current):
                         self.state.update(status='verified', message='场景评价器确认任务成功。'); return
                     remaining = request.max_sim_time_s - (current['time'] - self.initial_state['time'])
                     if remaining <= 1e-8 or remaining + 1e-8 < current.get('timestep', 0):
@@ -504,7 +505,7 @@ class CompositionController:
                         'candidate_id': selected['id'], 'action': selected, 'result': result, 'step_wall_s': time.monotonic()-step_start}
                     self.log.write('transition', record)
                     self.state['history'].append(record); self.state['history'] = self.state['history'][-30:]
-                    if result.get('evaluation', {}).get('success') or result['status'] == 'verified':
+                    if environment_success(self._snapshot()) or result['status'] == 'verified':
                         self.state.update(status='verified', message='场景评价器确认任务成功。'); return
                     if result['status'] == 'limit':
                         self.state.update(status='limit', message='已达到仿真时间上限。'); return

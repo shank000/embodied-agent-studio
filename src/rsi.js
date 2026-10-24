@@ -108,11 +108,11 @@ function renderMethods(){
 }
 function inheritMethod(id){const recipe=methods.find(method=>methodId(method)===id)?.recipe;if(!recipe)return;$('#rsi-parent').value=id;$('#rsi-mode').value=recipe.mode;$('#rsi-name').value=`${recipe.name} · 子代`;$('#rsi-change').value='';if(recipe.policy?.kind)$('#rsi-policy-kind').value=recipe.policy.kind;fillConfigs(recipe);$('#rsi-method-message').textContent=`已载入父代 ${id} 的完整配方；修改并保存会生成新版本。`;$('#rsi-name').focus();}
 function renderProtocols(){
-  selectOptions($('#rsi-protocol-select'),protocols.map(protocol=>({id:protocolId(protocol),name:`${protocol.spec.name} · ${protocolId(protocol).slice(-8)}`})));describeProtocol();
+  selectOptions($('#rsi-protocol-select'),protocols.map(protocol=>({id:protocolId(protocol),name:`${protocol.spec.name} · ${protocol.spec.engine_id||'mujoco'} · ${protocolId(protocol).slice(-8)}`})));describeProtocol();
 }
 function describeProtocol(){
   const protocol=protocols.find(item=>protocolId(item)===$('#rsi-protocol-select').value);if(!protocol){$('#rsi-protocol-description').textContent='先保存一份协议。';return;}
-  const spec=protocol.spec;$('#rsi-protocol-description').textContent=`${spec.robot} / ${spec.scene_id} / ${spec.task_id}；开发 [${spec.development_seeds.join(', ')}]，验证 [${spec.validation_seeds.join(', ')}]，测试 [${spec.test_seeds.join(', ')}]。每次仿真 ${spec.max_sim_time_s}s / 墙钟 ${spec.max_wall_time_s}s / ${spec.max_steps} 步；晋升要求成功率差 > ${spec.min_success_delta}、错误增加 ≤ ${spec.max_error_increase}，至少 ${spec.min_pairs??3} 对。`;
+  const spec=protocol.spec;$('#rsi-protocol-description').textContent=`${spec.engine_id||'mujoco'} / ${spec.robot} / ${spec.scene_id} / ${spec.task_id}；开发 [${spec.development_seeds.join(', ')}]，验证 [${spec.validation_seeds.join(', ')}]，测试 [${spec.test_seeds.join(', ')}]。每次仿真 ${spec.max_sim_time_s}s / 墙钟 ${spec.max_wall_time_s}s / ${spec.max_steps} 步；晋升要求成功率差 > ${spec.min_success_delta}、错误增加 ≤ ${spec.max_error_increase}，至少 ${spec.min_pairs??3} 对。`;
 }
 function renderExperiments(){
   const validation=experiments.filter(experiment=>(experiment.split||experiment.request?.split)==='validation'&&!experiment.active&&['complete','completed'].includes(experiment.status));
@@ -126,6 +126,9 @@ async function refresh(){
   if(!$('#rsi-agent-json').value)fillConfigs({});
   selectOptions($('#rsi-protocol-scene'),catalog.scenes);fillTasks();renderMethods();renderProtocols();renderExperiments();
 }
+export async function reloadRsiCatalog(){
+  catalog=await request('scenes');selectOptions($('#rsi-protocol-scene'),catalog.scenes);fillTasks();
+}
 function updatePromotionParent(){const recipe=methods.find(method=>methodId(method)===$('#rsi-promotion-candidate').value)?.recipe;if(recipe?.parent_id)$('#rsi-promotion-parent').value=recipe.parent_id;}
 function renderRegistry(){
   const id=registry.active_method_id;$('#rsi-champion').textContent=id?methodName(id):'尚未晋升方法';
@@ -134,7 +137,7 @@ function renderRegistry(){
 }
 function renderLocks(){
   if(!context)return;
-  const state=currentState,locked=!!(state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active);
+  const state=currentState,locked=!!(state.ready===false||state.backend_switching||state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active);
   $('#rsi-run-start').disabled=busy||locked||!methods.length;$('#rsi-run-once').disabled=busy||locked||!methods.length;$('#rsi-run-stop').disabled=stopping||!state.research?.active;
   $('#rsi-experiment-start').disabled=busy||locked||methods.length<2||!protocols.length;$('#rsi-experiment-stop').disabled=stopping||!state.experiment?.active;
   $('#rsi-save').disabled=busy||locked;$('#rsi-save-protocol').disabled=busy||locked;$('#rsi-save-runtime').disabled=busy||locked||!methods.length;$('#rsi-refresh').disabled=busy;$('#rsi-promote').disabled=busy||locked||!$('#rsi-promotion-experiment').value;$('#rsi-rollback').disabled=busy||locked||!registry.active_method_id;
@@ -174,6 +177,7 @@ export async function initRsi(callbacks){
   $('#rsi-protocol-scene').addEventListener('change',fillTasks);$('#rsi-protocol-task').addEventListener('change',updateCriterion);$('#rsi-protocol-select').addEventListener('change',describeProtocol);
   $('#rsi-protocol-form').addEventListener('submit',event=>{event.preventDefault();action(async()=>{
     const payload={name:$('#rsi-protocol-name').value.trim(),robot:$('#rsi-protocol-robot').value,scene_id:$('#rsi-protocol-scene').value,task_id:$('#rsi-protocol-task').value,development_seeds:seedList('#rsi-seeds-development'),validation_seeds:seedList('#rsi-seeds-validation'),test_seeds:seedList('#rsi-seeds-test'),max_sim_time_s:Number($('#rsi-protocol-sim').value),max_wall_time_s:Number($('#rsi-protocol-wall').value),max_steps:Number($('#rsi-protocol-steps').value),schedule_seed:Number($('#rsi-schedule-seed').value),min_success_delta:Number($('#rsi-min-delta').value),max_error_increase:Number($('#rsi-error-increase').value),min_pairs:Number($('#rsi-min-pairs').value)};
+    payload.engine_id=catalog?.engine_id||'mujoco';
     const all=[...payload.development_seeds,...payload.validation_seeds,...payload.test_seeds];if(new Set(all).size!==all.length)throw new Error('开发、验证与测试的种子集合必须互不重叠。');
     const saved=await request('research/protocols',payload);protocols=await request('research/protocols');renderProtocols();$('#rsi-protocol-select').value=protocolId(saved);describeProtocol();$('#rsi-experiment-message').textContent=`协议 ${protocolId(saved)} 已冻结。`;
   });});

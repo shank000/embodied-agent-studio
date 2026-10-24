@@ -172,6 +172,12 @@ class RunLog:
                 self.fail_video(exc)
                 return False
 
+    def video_sampling(self):
+        """Read-only sampling schedule for an isolated physics process."""
+        with self._lock:
+            return {'video_enabled': self._video.metadata['status'] in ('pending', 'recording'),
+                    'video_fps': self._video.metadata['fps'], 'next_video_time': self._video._next_time}
+
     def capture_video_frame(self, rgb, sim_time):
         with self._lock:
             if self._finished: return False

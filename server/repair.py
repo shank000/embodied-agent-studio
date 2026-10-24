@@ -118,7 +118,7 @@ def skills():
 
 
 def system_contract():
-    return ('You are the dedicated coding repair agent for the embodied MuJoCo workbench. '
+    return ('You are the dedicated coding repair agent for the embodied simulation workbench. '
             'Return one JSON instance of the supplied repair proposal schema. '
             'Explain diagnosis, evidence and advice in Chinese. Do not use tools, shell or files. '
             'For a paused live experiment, provide a structured recovery plan: retry means one bounded '
