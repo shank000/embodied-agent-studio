@@ -36,7 +36,7 @@ async def verify_completion(controller, worker, log, step, explanation, generati
     accepted = (trusted_evaluation(evaluation, snapshot)
                 and evaluation.get('success') is True)
     message = ('环境评价器已确认任务成功。' if accepted else
-               '环境未确认任务完成，请根据最新三路图像继续操作；模型声明不作为成功依据。')
+               '环境未确认任务完成，请根据最新观察继续操作；模型声明不作为成功依据。')
     verification = {'step': step, 'model_claim': explanation, 'accepted': accepted,
                     'message': message, 'evaluation': deepcopy(evaluation)}
     log.write('completion_verification', verification)

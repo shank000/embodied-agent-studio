@@ -10,7 +10,7 @@ from .runlog import RunLog, run_folder
 from .telemetry import batch_timing
 from .scenes import SCENES, TASKS
 from .simulation import MODELS
-from .simulators import validate_selection
+from .simulators import validate_selection, supported_catalog
 
 
 class ComparisonStart(BaseModel):
@@ -52,6 +52,8 @@ class ComparisonController:
     async def start(self, request):
         if self.state['active']: raise ValueError('对比实验正在运行。')
         with self.worker.lock: engine = (self.worker.snapshot.get('backend') or {}).get('engine_id', 'mujoco')
+        if engine in ('alfworld','ai2thor'):
+            raise ValueError('当前方法对比使用连续机械臂动作协议；文字和离散环境请先使用 Agent 单次实验。')
         if engine != request.engine_id: raise ValueError('请先切换到本次对比指定的仿真后端。')
         for method in request.methods:
             if method != 'agent': self.policy.validate_start(method, request.robot)
@@ -72,7 +74,8 @@ class ComparisonController:
 
     async def run(self, request):
         with self.worker.lock: backend = self.worker.snapshot.get('backend')
-        log = RunLog('comparison', {'task':TASKS[request.task_id]['instruction'], 'settings':request.model_dump(),
+        instruction = supported_catalog(request.engine_id)[2][request.task_id]['instruction']
+        log = RunLog('comparison', {'task':instruction, 'settings':request.model_dump(),
                                    'backend': backend,
                                    'rows': self.state['rows'], 'primary_models': [
                                        self.agent.config.model if method == 'agent' else self.policy.configs[method].model
@@ -103,12 +106,12 @@ class ComparisonController:
                                     'previous_run_id': child.snapshot().get('run_id')}
                     self._active_trial = active_trial
                     if method == 'agent':
-                        await self.agent.start(AgentStart(task=TASKS[request.task_id]['instruction'],
+                        await self.agent.start(AgentStart(task=instruction,
                             max_sim_time_s=request.max_sim_time_s,evaluator_stop=True,record_video=request.record_video))
                         await self.agent.task
                         result = self.agent.snapshot()
                     else:
-                        await self.policy.start(PolicyStart(kind=method,task=TASKS[request.task_id]['instruction'],
+                        await self.policy.start(PolicyStart(kind=method,task=instruction,
                             max_sim_time_s=request.max_sim_time_s,record_video=request.record_video))
                         await self.policy.task
                         result = self.policy.snapshot()

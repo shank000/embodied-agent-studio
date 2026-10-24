@@ -280,6 +280,32 @@ test('live policy rejection history renders without action-block fields or fabri
   assert.match(element('policy-history').innerHTML,/推理 1.25 s · 执行目标限幅 0 项/);
 });
 
+test('a newly loaded native environment remains connected while its old scene catalog is replaced',()=>{
+  const {scope,element,run}=resultsContext();
+  run("catalog={scenes:[{id:'tabletop',tasks:['lift_red']}],tasks:{lift_red:{name:'Lift'}}};lastGeneration=1;");
+  scope.fixtureState={generation:2,scene_id:'alfworld_unseen',model:'alfworld_agent',backend:{action_mode:'text'},policy:{},comparison:{}};
+  assert.doesNotThrow(()=>run('renderResearch(fixtureState)'));
+  assert.equal(run('lastGeneration'),1,'Do not consume the new generation before its scene catalog arrives.');
+  assert.equal(element('policy-start').disabled,true);
+  assert.equal(element('compare-start').disabled,true);
+  assert.match(element('comparison-method-note').textContent,/离散环境/);
+  scope.fixtureState.backend.action_mode='tcp_pose';
+  run('renderResearch(fixtureState)');
+  assert.doesNotMatch(element('comparison-method-note').textContent,/此文字或离散环境/);
+});
+
+test('opening a workbench already in a native environment initializes its own tasks without tabletop defaults',async()=>{
+  const {scope,element,run}=resultsContext();
+  scope.nativeCatalog={scenes:[{id:'alfworld_unseen',name:'Household',description:'Official text environment',tasks:['put']}],tasks:{put:{name:'Put',instruction:'Put the vase in the safe',criterion:'Native won'}}};
+  scope.bootstrapErrors=[];
+  run("request=async path=>path==='scenes'?nativeCatalog:{};");
+  await run('initResearch({toast:message=>bootstrapErrors.push(message),operate(){},selectTab(){}})');
+  assert.deepEqual(scope.bootstrapErrors,[]);
+  assert.equal(element('scene-select').value,'alfworld_unseen');
+  assert.equal(element('compare-scene').value,'alfworld_unseen');
+  assert.equal(element('policy-task').value,'Put the vase in the safe');
+});
+
 test('composition rejection history renders without an action or selected candidate',()=>{
   const {scope,element,run}=moduleContext('rsi.js');
   scope.fixtureRun={run_id:'composition',step:4,history:[{step:4,result:{status:'completion_rejected',message:'环境尚未验收，请重新规划。'}}]};

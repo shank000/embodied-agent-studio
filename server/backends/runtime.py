@@ -112,7 +112,7 @@ def dispatch(simulation, operation, payload):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine', choices=['genesis'], required=True)
+    parser.add_argument('--engine', choices=['genesis','maniskill','libero','alfworld','ai2thor','isaac','isaacsim'], required=True)
     parser.add_argument('--generation-base', type=int, default=0)
     arguments = parser.parse_args()
     # Native libraries may print directly to fd 1, bypassing redirect_stdout.
@@ -130,8 +130,11 @@ def main():
         if arguments.generation_base < 0:
             raise ValueError('generation-base 必须为非负整数。')
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from server.backends.genesis_backend import GenesisSimulation
-        simulation = GenesisSimulation()
+        import importlib
+        from server.simulators import RUNTIMES
+        _, _, module_name, class_name, _ = RUNTIMES[arguments.engine]
+        module = importlib.import_module('server.backends.'+module_name)
+        simulation = getattr(module, class_name)()
         simulation.generation += arguments.generation_base
         send({'id': 0, 'ok': True, 'state': native_state(simulation)})
     except Exception as exc:

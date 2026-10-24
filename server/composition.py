@@ -224,6 +224,8 @@ class CompositionController:
                     config.validate_credentials(keys.get(str(index), ''))
                 if recipe.get('skills', {}).get('candidate_source') == 'policy' and policy_config is None:
                     raise ValueError('策略候选需要配置 policy。')
+            if self._snapshot().get('backend', {}).get('action_mode') in ('text','discrete'):
+                raise ValueError('当前组合决策的动作候选为连续机械臂位姿；此环境请使用原生环境动作或 Agent 接管。')
             await self.worker.execute({'action': 'stop'})
             episode = uuid4().hex
             self._accepting = True

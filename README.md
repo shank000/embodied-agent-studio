@@ -15,14 +15,15 @@
 
 ![EmbodiWorks 机械臂仿真工作台](docs/images/workbench.jpg)
 
-**在同一个物理世界里，连接模型、执行动作、比较策略。**
-EmbodiWorks 将 MuJoCo、Genesis 原生仿真、多路视觉观察和实验记录放进浏览器，面向具身智能研究与原型验证。模型负责提出动作，本地 IK 与执行器负责运动。
+**在同一个工作台里，连接模型、执行动作、比较策略。**
+EmbodiWorks 将机器人操作、家庭文字/视觉任务与实验记录放进浏览器。模型提出环境支持的动作，控制链路负责执行，独立环境评价器确认任务结果。
 
 ## 可以做什么
 
 | 能力 | 工作方式 |
 | --- | --- |
-| 真实物理仿真 | Panda、SO-101、RM65 + GaiaHand，以及双／三 Panda 共享场景；七类操作场景。 |
+| 多后端任务 | MuJoCo、Genesis、ManiSkill、LIBERO、ALFWorld、AI2-THOR；Isaac 运行栈与验收状态见[多后端指南](docs/simulators.md)。 |
+| 机器人操作 | MuJoCo 支持 Panda、SO-101、RM65 + GaiaHand、双／三 Panda 和七类场景；其他后端提供各自官方机器人与任务。 |
 | 灵活接入策略 | Codex 本机登录、OpenAI、DeepSeek／兼容 API、Claude、自定义 Agent，以及 SmolVLA 与自定义 VLA/WAM。 |
 | 组合决策 | 主 Agent、决策器和动作策略分别配置；支持单决策、级联复核与加权投票。 |
 | 对照实验 | 冻结方法版本与协议，在同一初态、配对种子下比较，保留验证晋升与回滚记录。 |
@@ -43,7 +44,7 @@ npm start
 
 浏览器打开 **http://127.0.0.1:8000**。在启动终端按 **Ctrl+C** 关闭服务。开发前端另运行 `npm run dev`。
 
-以下平台表记录 **MuJoCo 主后端** 的验证范围；Genesis 的独立环境与验证边界见[多后端指南](docs/simulators.md)。
+以下平台表记录 **MuJoCo 主后端** 的验证范围；各可选 SDK 的独立环境与验证边界见[多后端指南](docs/simulators.md)。
 
 | 系统 | 当前验证范围 |
 | --- | --- |
@@ -53,7 +54,7 @@ npm start
 
 三种系统共用源码与 `npm start`。CI 检查三平台的安装、构建与模型运动，另在 Linux 验证原生离屏渲染；完整验证范围见[安装说明](docs/INSTALL.md)。
 
-工作台左侧的“仿真环境”可选择已安装、已适配的后端，再加载对应机器人与任务。MuJoCo 保留完整功能；Genesis 支持 Panda 桌面任务，独立环境已通过 Windows CPU 物理与工作台集成验证，Linux / macOS 尚待验收。其他仿真栈的接入状态与平台条件见[多后端指南](docs/simulators.md)，目录中的“尚未适配”不代表已集成。
+左侧“仿真环境”选择后端，再加载对应任务。MuJoCo 保留完整功能；ALFWorld / AI2-THOR 使用原生文字或离散交互，支持在本机 Windows 的 WSL/WSLg 运行。SDK 独立安装，任务和机器人不会跨引擎自动转换；[安装条件与实际验收范围](docs/simulators.md)分别说明。
 
 ## 看见实验过程
 
@@ -66,6 +67,7 @@ npm start
 ## 文档与参与
 
 - [安装与平台说明](docs/INSTALL.md) · [完整使用指南](docs/USAGE.md)
+- [多后端指南](docs/simulators.md) · [家庭环境](docs/household-environments.md) · [LIBERO](docs/libero.md) · [ManiSkill](docs/maniskill.md) · [Isaac](docs/isaac.md)
 - [组合方法、评测与自定义 Agent](RSI_WORKBENCH.md) · [VLA / WAM 策略协议](POLICY_PROTOCOL.md)
 - [机器人模型来源](MODEL_SOURCES.md) · [贡献指南](CONTRIBUTING.md)
 

@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
 
 from .simulation import Simulation, MODELS, VENDOR, ROOT
-from .simulators import catalog as simulator_catalog, supported_catalog, EVALUATORS
+from .simulators import catalog as simulator_catalog, supported_catalog, EVALUATORS, RUNTIMES
 from .agent import AgentController, AgentConfig, AgentStart
 from .policy import PolicyController, PolicyConfig, PolicyStart, release_local_service
 from .comparison import ComparisonController, ComparisonStart
@@ -48,7 +48,7 @@ from .research import (ResearchProtocol, ResearchExperiment, ResearchController,
 
 class Command(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
-    action: Literal['load', 'scene', 'reset', 'pause', 'step', 'control', 'home', 'demo', 'stop', 'instruction', 'view', 'camera', 'speed', 'flags', 'gravity', 'drop', 'select_robot']
+    action: Literal['load', 'scene', 'reset', 'pause', 'step', 'control', 'home', 'demo', 'stop', 'instruction', 'environment_action', 'view', 'camera', 'speed', 'flags', 'gravity', 'drop', 'select_robot']
     model: str | None = Field(default=None, min_length=1, max_length=64)
     robot_id: str | None = Field(default=None, min_length=1, max_length=40)
     scene_id: str | None = None
@@ -57,6 +57,8 @@ class Command(BaseModel):
     value: float | bool | None = None
     index: int | None = Field(default=None, ge=0, le=63)
     text: str | None = Field(default=None, max_length=160)
+    environment_action: str | None = Field(default=None, min_length=1, max_length=1000)
+    generation: int | None = Field(default=None, ge=0)
     view: Literal['perspective', 'top', 'front', 'wrist'] | None = None
     dx: float = Field(default=0, ge=-180, le=180)
     dy: float = Field(default=0, ge=-180, le=180)
@@ -70,7 +72,7 @@ class Command(BaseModel):
         if (self.action == 'load' and self.model is not None
                 and not any(self.model in supported_catalog(engine)[0] for engine in EVALUATORS)):
             raise ValueError('未知机器人型号。')
-        required = {'select_robot':['robot_id'], 'load': ['model'], 'scene': ['scene_id'], 'pause': ['value'], 'control': ['index', 'value'], 'instruction': ['text'],
+        required = {'select_robot':['robot_id'], 'load': ['model'], 'scene': ['scene_id'], 'pause': ['value'], 'control': ['index', 'value'], 'instruction': ['text'], 'environment_action': ['environment_action','generation'],
                     'view': ['view'], 'speed': ['value'], 'flags': ['flags'], 'gravity': ['value']}
         for name in required.get(self.action, []):
             if getattr(self, name) is None:
@@ -98,23 +100,33 @@ class Worker:
         self.generation_base = 0
         self.thread = Thread(target=self.run, name='simulation', daemon=True)
 
+    @staticmethod
+    def create_backend(engine_id, generation_base):
+        if engine_id == 'mujoco':
+            simulation = Simulation()
+            simulation.generation += generation_base
+            return simulation
+        if engine_id in RUNTIMES:
+            from .backends.process_backend import ProcessBackend
+            return ProcessBackend(engine_id=engine_id, generation_base=generation_base)
+        raise ValueError('该仿真后端尚未完成适配。')
+
+    @staticmethod
+    def validate_backend(simulation, state, engine_id):
+        discrete = engine_id in ('alfworld', 'ai2thor')
+        return (state.get('ready') is True
+                and (isinstance(state.get('environment'), dict) if discrete else bool(state.get('actuators')))
+                and state.get('backend', {}).get('engine_id') == engine_id
+                and math.isfinite(simulation.timestep) and simulation.timestep > 0)
+
     def run(self):
         simulation = None
         processed = []
         try:
-            if self.initial_engine_id == 'mujoco':
-                simulation = Simulation()
-                simulation.generation += self.generation_base
-            elif self.initial_engine_id == 'genesis':
-                from .backends.process_backend import ProcessBackend
-                simulation = ProcessBackend(engine_id='genesis', generation_base=self.generation_base)
-            else:
-                raise ValueError('该仿真后端尚未完成适配。')
+            simulation = self.create_backend(self.initial_engine_id, self.generation_base)
             self.engine_id = self.initial_engine_id
             initial_state = simulation.state()
-            if (initial_state.get('ready') is not True or not initial_state.get('actuators')
-                    or initial_state.get('backend', {}).get('engine_id') != self.engine_id
-                    or not math.isfinite(simulation.timestep) or simulation.timestep <= 0):
+            if not self.validate_backend(simulation, initial_state, self.engine_id):
                 raise ValueError('仿真后端未能提供有效模型状态。')
             self.jpeg = simulation.render()
             if not self.jpeg:
@@ -146,18 +158,10 @@ class Worker:
                                     result = {'backend': simulation.state()['backend'], 'session_id': self.session_id}
                                 else:
                                     next_base = max(self.generation_base + 1000000, simulation.generation + 1)
-                                    if engine_id == 'mujoco':
-                                        candidate = Simulation()
-                                        candidate.generation += next_base
-                                    elif engine_id == 'genesis':
-                                        from .backends.process_backend import ProcessBackend
-                                        candidate = ProcessBackend(engine_id=engine_id, generation_base=next_base)
-                                    else: raise ValueError('该仿真后端尚未完成适配。')
+                                    candidate = self.create_backend(engine_id, next_base)
                                     first_state, first_jpeg = candidate.state(), candidate.render()
-                                    if (first_state.get('ready') is not True or not first_jpeg or not first_state.get('actuators')
-                                            or first_state.get('backend', {}).get('engine_id') != engine_id
-                                            or first_state.get('generation', -1) <= simulation.generation
-                                            or not math.isfinite(candidate.timestep) or candidate.timestep <= 0):
+                                    if (not first_jpeg or not self.validate_backend(candidate, first_state, engine_id)
+                                            or first_state.get('generation', -1) <= simulation.generation):
                                         raise ValueError('新后端未能提供有效模型与画面。')
                                     old, simulation = simulation, candidate
                                     candidate = None
@@ -205,6 +209,9 @@ class Worker:
                                 on_step=lambda: self.record_frame(simulation), **extra)
                         else:
                             result = simulation.command(payload)
+                            if (payload['action'] in ('environment_action','instruction')
+                                    and simulation.state().get('backend', {}).get('action_mode') in ('text','discrete')):
+                                self.record_frame(simulation)
                         processed.append((future, result))
                         if payload['action'] in ('reset', 'load', 'scene', 'restore', 'settle', 'pause', 'step', 'verify_task'):
                             accumulator = 0.
@@ -277,7 +284,7 @@ class Worker:
     async def restart(self, engine_id):
         """Explicitly reload a failed worker; the caller holds the idle-controller lock."""
         from .simulators import backend_identity
-        if engine_id not in ('mujoco', 'genesis'):
+        if engine_id not in EVALUATORS:
             raise HTTPException(400, '该仿真后端尚未完成适配。')
         if self.thread.is_alive() and not self.failure:
             raise HTTPException(409, '仿真服务仍在运行，请使用正常环境切换。')
@@ -456,7 +463,7 @@ async def state():
 
 class SimulatorSelection(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    engine_id: Literal['mujoco', 'genesis']
+    engine_id: Literal['mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'ai2thor', 'isaac', 'isaacsim']
 
 
 @app.get('/api/simulators')
@@ -496,7 +503,8 @@ async def models():
     return [{'id': key, 'name': item['name'], 'arm_dof': item['arm_dof'],
              'robot_count': item.get('robot_count', 1),
              'hand_dof': item.get('hand_dof',1), 'note': item.get('model_note',''),
-             'image': f'/api/models/{key}/image', 'source': f"{item['folder']}/{item['file']}"} for key, item in model_catalog.items()]
+             'image': f'/api/models/{key}/image' if key in MODELS else '/brand/embodiworks-mark.svg',
+             'source': item.get('source') or f"{item.get('folder','')}/{item.get('file','')}"} for key, item in model_catalog.items()]
 
 
 @app.get('/api/scenes')
@@ -706,8 +714,9 @@ async def observe_agent(request: Request):
 
 @app.get('/api/agent/camera/{name}')
 async def agent_camera(name: Literal['front', 'side', 'wrist']):
-    if not agent.observation: raise HTTPException(404, '请先采集一次三路观察。')
-    camera = next(c for c in agent.observation['cameras'] if c['name'] == name)
+    if not agent.observation: raise HTTPException(404, '请先采集一次当前环境观察。')
+    camera = next((c for c in agent.observation['cameras'] if c['name'] == name), None)
+    if camera is None: raise HTTPException(404, '当前环境观察没有提供该相机。')
     return Response(base64.b64decode(camera['image_base64']), media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
 
 
@@ -749,7 +758,8 @@ async def stop_policy(request: Request):
 @app.get('/api/policy/camera/{name}')
 async def policy_camera(name: Literal['front','side','wrist']):
     if not policy.observation: raise HTTPException(404,'尚未采集策略观察。')
-    camera = next(c for c in policy.observation['cameras'] if c['name']==name)
+    camera = next((c for c in policy.observation['cameras'] if c['name']==name), None)
+    if camera is None: raise HTTPException(404, '当前环境观察没有提供该相机。')
     return Response(base64.b64decode(camera['image_base64']),media_type='image/jpeg',headers={'Cache-Control':'no-store'})
 
 

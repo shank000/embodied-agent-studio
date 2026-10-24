@@ -17,7 +17,7 @@ from .run_management import primary_models
 from .telemetry import batch_timing
 from .scenes import SCENES, TASKS
 from .simulation import MODELS
-from .simulators import validate_selection, backend_identity
+from .simulators import validate_selection, backend_identity, supported_catalog, RUNTIMES
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOLS = ROOT / 'protocols'
@@ -34,13 +34,18 @@ def evaluation_contract(engine_id='mujoco'):
         name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths},
         'input_condition': 'three_rgb_proprioception',
         'inference_timing': 'physics_paused', 'success_denominator': 'all_assigned_episodes'}
-    if engine_id == 'genesis':
+    if engine_id in RUNTIMES:
         from .simulators import catalog
         engine = next(item for item in catalog()['backends'] if item['id'] == engine_id)
-        paths = ['server/backends/genesis_backend.py', 'server/backends/runtime.py', 'server/simulators.py', 'server/task_verification.py', 'server/actions.py']
+        paths = [f'server/backends/{RUNTIMES[engine_id][2]}.py', 'server/backends/runtime.py', 'server/simulators.py', 'server/task_verification.py', 'server/actions.py']
+        if engine_id == 'libero': paths.append('server/backends/libero_catalog.py')
+        if engine_id == 'ai2thor': paths.append('server/backends/alfworld_backend.py')
         contract.pop('mujoco')
         contract['backend'] = backend_identity(engine_id, engine['version'])
         contract['files'] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths}
+        if engine_id in ('alfworld','ai2thor'):
+            contract.update(input_condition='native_text' if engine_id=='alfworld' else 'native_rgb_visible_metadata',
+                            inference_timing='turn_based', time_unit='environment_step')
     return contract
 
 
@@ -79,7 +84,7 @@ class ResearchProtocol(BaseModel):
 def register_protocol(spec):
     spec = spec if isinstance(spec, ResearchProtocol) else ResearchProtocol.model_validate(spec)
     content = {'spec': spec.model_dump(), 'contract': evaluation_contract(spec.engine_id),
-               'task': TASKS[spec.task_id], 'schema_version': 'embodied-protocol-v2'}
+               'task': supported_catalog(spec.engine_id)[2][spec.task_id], 'schema_version': 'embodied-protocol-v2'}
     encoded = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
     protocol_id = 'protocol-' + hashlib.sha256(encoded).hexdigest()[:24]
     PROTOCOLS.mkdir(parents=True, exist_ok=True)
@@ -199,7 +204,7 @@ class ResearchController:
 
     async def run(self, request, protocol):
         with self.worker.lock: backend = self.worker.snapshot.get('backend')
-        log = RunLog('research_experiment', {'task': TASKS[protocol['spec']['task_id']]['instruction'],
+        log = RunLog('research_experiment', {'task': protocol['task']['instruction'],
                      'backend': backend,
                      'protocol': protocol, 'settings': request.model_dump(), 'rows': self.state['rows'],
                      'primary_models': [model for method_id in request.method_ids
@@ -230,7 +235,7 @@ class ResearchController:
                                           'previous_run_id': previous_run_id}
                     try:
                         await self.worker.execute({'action': 'restore', 'checkpoint': checkpoint})
-                        await self.runner.start({'method_id': method_id, 'task': TASKS[spec['task_id']]['instruction'],
+                        await self.runner.start({'method_id': method_id, 'task': protocol['task']['instruction'],
                             'max_sim_time_s': spec['max_sim_time_s'], 'max_wall_time_s': spec['max_wall_time_s'],
                             'max_steps': spec['max_steps'], 'one_step': False, 'record_video': request.record_video})
                         await self.runner.task

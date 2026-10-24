@@ -96,12 +96,15 @@ class RunLog:
                                'active_calls': len(self._active_inference)}}
 
     def save_observation(self, observation, step):
-        """Persist the actual three JPEGs; return observation metadata and relative references."""
+        """Persist actual native cameras and text; return metadata and relative references."""
         if isinstance(step, bool) or not isinstance(step, int) or not 0 <= step <= 999999999:
             raise ValueError('观察步骤必须为非负整数。')
         cameras = observation.get('cameras', [])
-        if len(cameras) != 3 or {camera.get('name') for camera in cameras} != {'front', 'side', 'wrist'}:
-            raise ValueError('观察必须包含 front、side、wrist 各一张图像。')
+        mode = observation.get('backend', {}).get('action_mode')
+        names = [camera.get('name') for camera in cameras]
+        expected = set() if mode == 'text' else {'front'} if mode == 'discrete' else {'front', 'side', 'wrist'}
+        if len(names) != len(expected) or set(names) != expected:
+            raise ValueError(f'当前观察必须包含以下原生相机且无重复：{sorted(expected)}。')
         blobs = {}
         for camera in cameras:
             try:
@@ -132,6 +135,8 @@ class RunLog:
                     shutil.rmtree(staging)
             record = {'step': step, 'time': saved.get('time'), 'robot': saved.get('robot'),
                       'generation': saved.get('generation'), 'cameras': saved['cameras']}
+            for key in ('backend', 'environment'):
+                if saved.get(key) is not None: record[key] = saved[key]
             with (root / 'manifest.jsonl').open('a', encoding='utf-8') as file:
                 file.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
             self.artifacts['observation_manifest'] = 'observations/manifest.jsonl'

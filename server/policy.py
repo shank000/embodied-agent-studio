@@ -206,6 +206,9 @@ class PolicyController:
 
     async def start(self, request):
         if self.state['active']: raise ValueError('已有策略任务在运行。')
+        with self.worker.lock: mode = self.worker.snapshot.get('backend', {}).get('action_mode')
+        if mode in ('text','discrete'):
+            raise ValueError('当前环境使用原生离散命令，请使用 Agent 接管或环境动作；连续机械臂 VLA/WAM 动作块不适用于此环境。')
         with self.worker.lock: robot = self.worker.snapshot['model']
         self.validate_start(request.kind, robot)
         await self.worker.execute({'action': 'stop'})

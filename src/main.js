@@ -3,6 +3,7 @@ import './research.css';
 import {initResearch,renderResearch,renderRunVideo,renderRunTimer,reloadResearchCatalog} from './research.js';
 import {initRsi,renderRsi,reloadRsiCatalog} from './rsi.js';
 import {initSimulators,renderSimulator} from './simulators.js';
+import {initEnvironment,renderEnvironment} from './environment.js';
 import {initLayout} from './layout.js';
 import {initRepair,renderRepair} from './repair.js';
 import {initMultiarm,renderMultiarm,updateModelCatalog} from './multiarm.js';
@@ -38,6 +39,9 @@ function reloadWorkspaceCatalog(){
   return catalogPromise;
 }
 const frame=$('#sim-frame');
+const environmentBudget=document.createElement('label');environmentBudget.className='environment-budget';environmentBudget.hidden=true;
+environmentBudget.innerHTML='环境动作预算 <input id="agent-environment-steps" type="number" min="1" max="10000" step="1" value="120" required> 步';
+$('#agent-record-video').closest('label').after(environmentBudget);
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),3500);}
 async function api(payload){
   const response=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -60,6 +64,7 @@ function enableControls(){
   document.querySelectorAll('[data-action="home"],[data-action="demo"]').forEach(el=>el.disabled=!enabled||active);
   const takeover=!!(state?.agent?.active||state?.policy?.active||state?.comparison?.active||state?.research?.active||state?.experiment?.active);
   $('#agent-record-video').disabled=!enabled||takeover;
+  $('#agent-environment-steps').disabled=!enabled||takeover;
   $('#agent-stop').disabled=!state?.agent?.active;
   $('#agent-one-round').disabled=!enabled||takeover;
   $('#capture-observation').disabled=!enabled||takeover;
@@ -69,7 +74,13 @@ function enableControls(){
   const capabilities=state?.backend?.capabilities;
   if(capabilities){for(const el of document.querySelectorAll('[data-action]'))if(!capabilities.includes(el.dataset.action))el.disabled=true;
     for(const name of ['contacts','joints','collision'])if(!capabilities.includes('flags'))$(`#show-${name}`).disabled=true;
-    if(!capabilities.includes('gravity'))$('#gravity').disabled=true;}
+    if(!capabilities.includes('gravity'))$('#gravity').disabled=true;
+    for(const [id,action] of [['#pause','pause'],['#speed','speed'],['#step','step'],['#view-reset','view']])if(!capabilities.includes(action))$(id).disabled=true;
+    document.querySelectorAll('[data-view]').forEach(el=>{if(!capabilities.includes('view'))el.disabled=true;});}
+  const discrete=['text','discrete'].includes(state?.backend?.action_mode);
+  $('#agent-environment-steps').disabled=!enabled||takeover||!discrete;
+  $('#policy-tab').disabled=discrete;$('#joints-tab').disabled=discrete;
+  if(discrete)$('#pause').disabled=true;
 }
 async function operate(payload,{message=false}={}){
   if(!connected||busy)return;
@@ -106,7 +117,7 @@ function buildJoints(){
   $('#viewer-engine').textContent=`${state.engine.toUpperCase()} VIEWER`;
   frame.alt=`${state.engine} 原生仿真实时画面`;
   const watermark=$('#watermark-engine');if(watermark)watermark.textContent=state.engine;
-  $('#actuator-count').textContent=`${state.nu} 个`;$('#mesh-count').textContent=`${state.meshes} 个`;$('#timestep').textContent=`${(state.timestep*1000).toFixed(1)} ms`;
+  $('#actuator-count').textContent=`${state.nu} 个`;$('#mesh-count').textContent=state.meshes==null?'—':`${state.meshes} 个`;$('#timestep').textContent=['text','discrete'].includes(state.backend?.action_mode)?'按环境动作推进':`${(state.timestep*1000).toFixed(1)} ms`;
     $('#model-source').href=state.source;$('#model-source').textContent='官方模型来源 ↗';$('#scene-name').textContent=state.name;
   document.querySelectorAll('[data-model]').forEach(el=>{const selected=el.dataset.model===state.model;el.classList.toggle('selected',selected);el.setAttribute('aria-pressed',String(selected));});
   $('[data-view="wrist"]').hidden=!state.has_wrist_camera;$('#gripper-label').textContent=state.model.includes('panda')?'夹爪开度':'夹爪角度';lastTaskKey='';
@@ -129,16 +140,24 @@ function renderTask(){
 }
 function renderState(){
   if(state.generation!==generation||state.active_robot!==activeRobot){generation=state.generation;activeRobot=state.active_robot;buildJoints();}
-  $('#connection').replaceChildren(document.createElement('i'),document.createTextNode(`${state.engine} 已连接`));$('#fps').textContent=`${state.fps.toFixed(0)} FPS`;$('#sim-time').textContent=`t = ${state.time.toFixed(3)} s`;
+  const discrete=['text','discrete'].includes(state.backend?.action_mode);
+  environmentBudget.hidden=!discrete;
+  $('#connection').replaceChildren(document.createElement('i'),document.createTextNode(`${state.engine} 已连接`));$('#fps').textContent=`${state.fps.toFixed(0)} FPS`;$('#sim-time').textContent=discrete?`第 ${state.steps} 步`:`t = ${state.time.toFixed(3)} s`;
   const active=['running','settling'].includes(state.task.status);
   $('#scene-status').textContent=state.paused?'仿真已暂停':active?(state.task.steps[state.task.step]||'执行中'):'仿真运行中';
   $('#status-dot').classList.toggle('running',!state.paused);$('#robot-status').innerHTML=`<i></i>${state.paused?'已暂停':active?'执行中':'运行中'}`;
-  $('#physics-rate').textContent=`${(1/state.timestep).toFixed(0)} Hz · ${state.steps} 步`;
-  $('#position').textContent=state.tcp.map(v=>v.toFixed(3)).join(' / ');$('#contact-count').textContent=state.contacts;
+  $('#physics-rate').textContent=discrete?`按原生命令推进 · ${state.steps} 步`:`${(1/state.timestep).toFixed(0)} Hz · ${state.steps} 步`;
+  $('#position').textContent=state.tcp.map(v=>v.toFixed(3)).join(' / ');$('#contact-count').textContent=state.contacts??'—';
   const contactLabel=$('#contact-label'),contactScope=$('#contact-scope');
   if(contactLabel)contactLabel.textContent=state.contact_scope==='active_robot'?'机械臂接触':'接触数量';
-  if(contactScope)contactScope.textContent=state.contact_scope==='active_robot'?'当前机械臂的接触点':'全场接触点 · 由物理引擎计算';
-  $('#gripper-status').textContent=actualText(state.actuators.at(-1));$('#gripper-detail').textContent=state.model.includes('panda')?'两指间距（实际）':'夹爪关节（实际）';
+  if(contactScope)contactScope.textContent=state.contact_scope==='not_reported'?'当前 SDK 未提供接触总数':state.contact_scope==='active_robot'?'当前机械臂的接触点':'全场接触点 · 由物理引擎计算';
+  $('#gripper-status').textContent=state.actuators.length?actualText(state.actuators.at(-1)):'—';$('#gripper-detail').textContent=state.model.includes('panda')?'两指间距（实际）':'夹爪关节（实际）';
+  for(const id of ['#position','#gripper-status','#contact-count'])$(id).closest('.telemetry-cell').hidden=discrete;
+  $('.viewer-options').hidden=discrete;$('.playback-controls').hidden=discrete;$('.viewport-bottom').hidden=discrete;
+  $('#joints-tab').hidden=discrete;$('#policy-tab').hidden=discrete;
+  if(discrete&&$('#agent-tab').getAttribute('aria-selected')!=='true')selectTab('agent');
+  $('.agent-contract p').textContent=discrete?'环境观察 → 模型选择原生命令 → 环境反馈与独立验收':'图像 + 机械臂状态 → 绝对末端位姿；本地 IK → 执行器 → 新一轮观察';
+  $('[data-stage="observing"]').textContent=discrete?'环境观察':'三路观察';$('[data-stage="executing"]').textContent=discrete?'原生命令':'IK 执行';
   $('#frame-info').textContent=`渲染与物理帧 ${state.render_ms.toFixed(0)} ms`;
   $('#pause').innerHTML=icon(state.paused?'play':'pause')+(state.paused?'继续':'暂停');
   $('#speed').value=String(state.speed);$('#gravity').checked=state.gravity;
@@ -147,7 +166,7 @@ function renderState(){
   document.querySelectorAll('[data-view]').forEach(el=>{const selected=el.dataset.view===state.view;el.classList.toggle('selected',selected);el.setAttribute('aria-pressed',String(selected));});
   state.actuators.forEach(a=>{const input=$(`#joint-${a.index}`);if(input.dataset.editing!=='true'){input.value=String(toDisplay(a,a.target));$(`#target-${a.index}`).textContent=targetText(a,a.target);}$(`#actual-${a.index}`).textContent=`实际 ${actualText(a)}`;});
   if(state.events.length&&state.events.at(-1).id!==lastEvent){lastEvent=state.events.at(-1).id;const log=$('#event-log');log.replaceChildren();state.events.slice(-6).reverse().forEach(e=>{const row=document.createElement('p');row.className=e.kind;row.textContent=e.message;log.append(row);});}
-  renderTask();renderAgent();enableControls();renderResearch(state);renderRsi(state);renderRepair(state);renderMultiarm(state,{disabled:!connected||busy});renderSimulator(state);
+  renderTask();renderAgent();enableControls();renderResearch(state);renderRsi(state);renderRepair(state);renderMultiarm(state,{disabled:!connected||busy});renderSimulator(state);renderEnvironment(state);
   if(state.session_id&&state.session_id!==catalogSession&&!catalogLoading)reloadWorkspaceCatalog();
 }
 function renderAgent(){
@@ -161,19 +180,27 @@ function renderAgent(){
   renderRunVideo($('#agent-video'),agent.run_id,agent.video);
   document.querySelectorAll('[data-stage]').forEach(el=>el.classList.toggle('active',el.dataset.stage===agent.status));
   const action=agent.action;$('#agent-action').hidden=!action;
-  if(action){$('#action-position').textContent=action.position_m.map(x=>x.toFixed(4)).join(' / ');$('#action-quaternion').textContent=action.quaternion_wxyz.map(x=>x.toFixed(3)).join(' / ');$('#action-gripper').textContent=`张开 ${(action.gripper_open*100).toFixed(0)}% · ${action.duration_s.toFixed(1)} s`;$('#action-explanation').textContent=action.explanation;}
+  if(action){const native=typeof action.action==='string';$('#agent-action dl').hidden=native;
+    $('#agent-action .section-caption').textContent=native?'下一步原生环境动作':'下一步绝对末端位姿 · WORLD';
+    if(!native){$('#action-position').textContent=action.position_m.map(x=>x.toFixed(4)).join(' / ');$('#action-quaternion').textContent=action.quaternion_wxyz.map(x=>x.toFixed(3)).join(' / ');$('#action-gripper').textContent=`张开 ${(action.gripper_open*100).toFixed(0)}% · ${action.duration_s.toFixed(1)} s`;}
+    $('#action-explanation').textContent=native?`${action.action}\n${action.explanation}`:action.explanation;}
   const historyKey=JSON.stringify(agent.history);
   if(historyKey!==lastHistory){lastHistory=historyKey;const root=$('#agent-history');root.replaceChildren();
-    (agent.history||[]).slice(-5).reverse().forEach(record=>{const row=document.createElement('div');row.className='round-record';const title=document.createElement('strong');title.textContent=`第 ${record.round} 轮 · ${record.action.status==='move'?'末端动作':record.action.status==='done'?record.verification?.accepted===true?'完成声明（环境接受）':record.verification?.accepted===false?'完成声明（环境拒绝）':'模型完成声明（未记录验收）':'无法继续'}`;const text=document.createElement('p');
+    (agent.history||[]).slice(-5).reverse().forEach(record=>{const row=document.createElement('div');row.className='round-record';const title=document.createElement('strong');title.textContent=`第 ${record.round} 轮 · ${record.action.status==='move'?(typeof record.action.action==='string'?'环境动作':'末端动作'):record.action.status==='done'?record.verification?.accepted===true?'完成声明（环境接受）':record.verification?.accepted===false?'完成声明（环境拒绝）':'模型完成声明（未记录验收）':'无法继续'}`;const text=document.createElement('p');
       const result=record.result;
-      text.textContent=typeof result==='string'?result:result?.message|| (result?`${result.status==='complete'?'实际末端到位':'动作未达到容差'}${result.position_error_m==null?'':` · 位置误差 ${(result.position_error_m*1000).toFixed(2)} mm`}`:'等待执行反馈');row.append(title,text);root.append(row);});
+      text.textContent=typeof result==='string'?result:result?.message||(typeof record.action.action==='string'&&result?`${record.action.action} · ${result.last_action_success===false?'环境拒绝动作':'环境已返回反馈'}`:(result?`${result.status==='complete'?'实际末端到位':'动作未达到容差'}${result.position_error_m==null?'':` · 位置误差 ${(result.position_error_m*1000).toFixed(2)} mm`}`:'等待执行反馈'));row.append(title,text);root.append(row);});
   }
   const sourceName=state.policy?.active||($('#policy-tab').getAttribute('aria-selected')==='true'&&state.policy?.observation_time!=null)?'policy':'agent';
   const source=state[sourceName],observationKey=`${sourceName}:${source?.observation_id}:${source?.observation_robot}`;
   if(observationKey!==lastObservation||source?.observation_robot!==state.model){
     lastObservation=observationKey;const valid=source?.observation_time!=null&&source.observation_robot===state.model;
-    $('#observation-time').textContent=valid?`t = ${source.observation_time.toFixed(3)} s · 第 ${source.observation_id} 次采集`:'尚未采集当前机械臂';
-    for(const name of ['front','side','wrist']){const img=$(`#camera-${name}`);img.hidden=!valid;img.nextElementSibling.hidden=valid;if(valid)img.src=`/api/${sourceName}/camera/${name}?observation=${source.observation_id}`;else img.removeAttribute('src');}
+    $('#observation-time').textContent=valid?`${['text','discrete'].includes(state.backend?.action_mode)?`第 ${source.observation_time} 步`:`t = ${source.observation_time.toFixed(3)} s`} · 第 ${source.observation_id} 次采集`:'尚未采集当前环境';
+    const mode=state.backend?.action_mode;
+    const names=source?.observation_cameras?.length?source.observation_cameras:(mode==='text'?[]:mode==='discrete'?['front']:['front','side','wrist']);
+    $('#camera-title').textContent=mode==='discrete'?'Agent 的原生相机观察':'Agent 的三路观察';
+    $('#camera-description').textContent=mode==='discrete'?'发送当前 Unity 原生相机图像与公开环境观察。':'每轮发送同一物理时刻的三张图像与机械臂状态。画面在下一轮观察时更新。';
+    $('#camera-panel').hidden=mode==='text';$('.camera-grid').classList.toggle('single-camera',mode==='discrete');
+    for(const name of ['front','side','wrist']){const img=$(`#camera-${name}`),visible=names.includes(name);img.closest('figure').hidden=!visible;img.hidden=!valid||!visible;img.nextElementSibling.hidden=valid&&visible;if(valid&&visible)img.src=`/api/${sourceName}/camera/${name}?observation=${source.observation_id}`;else img.removeAttribute('src');}
   }
 }
 function disconnected(message){
@@ -182,7 +209,7 @@ function disconnected(message){
   const help=document.createElement('p');help.textContent='请启动项目中的仿真服务，再点击下方按钮重新连接。';const retry=document.createElement('button');retry.textContent='重新连接';retry.className='secondary';retry.addEventListener('click',()=>{frameStarted=false;poll();});$('#scene-error').append(title,detail,help,retry);
   frame.removeAttribute('src');frameStarted=false;$('#robot-status').textContent='离线';$('#scene-status').textContent='引擎离线';$('#status-dot').classList.remove('running');enableControls();
 }
-let pollPromise=null,lastPollAt=0;
+let pollPromise=null,lastPollAt=0,lastPollError='';
 function poll(){
   if(pollPromise)return pollPromise;
   pollPromise=pollState().finally(()=>{pollPromise=null;});return pollPromise;
@@ -198,8 +225,8 @@ async function pollState(){
       throw new Error(next.error||'引擎尚未准备好');
     }
     state=next;connected=true;if(!frameStarted){frame.src=`/api/stream?session=${Date.now()}`;frameStarted=true;}
-    $('#scene-error').hidden=true;renderState();
-  }catch(error){disconnected(error.message);}
+    $('#scene-error').hidden=true;renderState();lastPollError='';
+  }catch(error){lastPollError=error.message;disconnected(error.message);}
 }
 document.querySelectorAll('[data-model]').forEach(el=>el.addEventListener('click',()=>{if(state?.model!==el.dataset.model)operate({action:'load',model:el.dataset.model});}));
 document.querySelectorAll('.sim-action').forEach(el=>el.addEventListener('click',()=>operate({action:el.dataset.action})));
@@ -213,9 +240,11 @@ function selectTab(name){for(const item of ['joints','agent','policy']){$(`#${it
 $('#joints-tab').addEventListener('click',()=>selectTab('joints'));$('#agent-tab').addEventListener('click',()=>selectTab('agent'));
 async function submit(event,oneRound=false){
   event?.preventDefault();if(!connected||busy)return;
-  const text=$('#command').value.trim();if(!text){toast('请输入一个机械臂任务。');return;}
+  const text=$('#command').value.trim();if(!text){toast('请输入一个任务。');return;}
+  const maxEnvironmentSteps=Number($('#agent-environment-steps').value);
+  if(['text','discrete'].includes(state?.backend?.action_mode)&&(!Number.isInteger(maxEnvironmentSteps)||maxEnvironmentSteps<1||maxEnvironmentSteps>10000)){toast('环境动作预算须为 1–10000 的整数。');return;}
   busy=true;enableControls();
-  try{await agentApi('start',{task:text,one_round:oneRound,record_video:$('#agent-record-video').checked});await poll();}
+  try{await agentApi('start',{task:text,one_round:oneRound,record_video:$('#agent-record-video').checked,...(['text','discrete'].includes(state?.backend?.action_mode)?{max_environment_steps:maxEnvironmentSteps}:{})});await poll();}
   catch(error){toast(error.message);}
   finally{busy=false;enableControls();}
 }
@@ -288,17 +317,19 @@ initResearch({operate,toast,selectTab});
 initRsi({operate,toast,selectTab});
 initRepair({toast});
 initMultiarm({operate});
+initEnvironment({execute:async payload=>{if(!connected||busy)throw new Error('工作台正在处理其他操作，请稍后重试。');busy=true;enableControls();try{const result=await api(payload);await poll();return result;}finally{busy=false;enableControls();}}});
 initLayout({toast});
 initSimulators({onChanged:async result=>{
   generation=-1;lastObservation=-1;await poll();
   if(state?.session_id!==result.session_id)await poll();
-  if(!connected||state?.session_id!==result.session_id)throw new Error('新环境的状态尚未同步，请重新连接');
+  if(!connected||state?.session_id!==result.session_id)throw new Error(lastPollError||'新环境的状态尚未同步，请重新连接');
   if(!await reloadWorkspaceCatalog())throw new Error('机器人与场景目录读取失败');
 }});
 // Camera gestures modify the active engine's camera. There is no client-side 3D simulation.
 let pointer=null,cameraPending={dx:0,dy:0,zoom:0,pan_dx:0,pan_dy:0},cameraSending=false;
 frame.title='左键拖动旋转；右键、中键或 Shift + 左键拖动平移；滚轮缩放。点击预设视角可复位。';
 async function flushCamera(){
+  if(state?.backend?.capabilities&&!state.backend.capabilities.includes('camera')){cameraPending={dx:0,dy:0,zoom:0,pan_dx:0,pan_dy:0};return;}
   if(cameraSending||!connected||busy||!Object.values(cameraPending).some(Boolean))return;
   cameraSending=true;const payload=cameraPending;cameraPending={dx:0,dy:0,zoom:0,pan_dx:0,pan_dy:0};
   try{await api({action:'camera',dx:Math.max(-180,Math.min(180,payload.dx)),dy:Math.max(-180,Math.min(180,payload.dy)),zoom:Math.max(-1,Math.min(1,payload.zoom)),pan_dx:Math.max(-2,Math.min(2,payload.pan_dx)),pan_dy:Math.max(-2,Math.min(2,payload.pan_dy))});}

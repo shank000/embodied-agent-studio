@@ -6,7 +6,7 @@ export function updateModelCatalog(models,currentModel){
   for(const item of models){
     const button=document.createElement('button');button.className='model-card';button.dataset.model=item.id;button.setAttribute('aria-pressed',String(item.id===currentModel));button.classList.toggle('selected',item.id===currentModel);
     const img=document.createElement('img');img.src=item.image;img.alt=item.name;
-    const label=document.createElement('span'),title=document.createElement('strong'),note=document.createElement('small');title.textContent=item.name;note.textContent=`${item.arm_dof} 轴 · ${item.hand_dof} 夹爪/手关节`;label.append(title,note);button.append(img,label);
+    const label=document.createElement('span'),title=document.createElement('strong'),note=document.createElement('small');title.textContent=item.name;note.textContent=item.arm_dof?`${item.arm_dof} 轴 · ${item.hand_dof} 夹爪/手关节`:'原生环境智能体';label.append(title,note);button.append(img,label);
     if(item.robot_count>1){const count=document.createElement('b');count.className='multiarm-count';count.textContent=`×${item.robot_count}`;button.append(count);}
     button.addEventListener('click',()=>context.operate({action:'load',model:item.id}));root.append(button);
   }

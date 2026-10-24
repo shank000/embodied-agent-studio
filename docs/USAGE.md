@@ -2,7 +2,7 @@
 
 [返回首页](../README.md) · [安装指南](INSTALL.md)
 
-以下复杂模型、场景及引擎实现细节以 MuJoCo 主后端为准；Genesis 的支持范围、独立安装与差异见[多后端指南](simulators.md)。
+以下复杂机械臂与场景说明以 MuJoCo 主后端为准；Genesis、ALFWorld、AI2-THOR、LIBERO、ManiSkill 和 Isaac 的任务、动作协议与独立安装见[多后端指南](simulators.md)。切换环境后，机器人、任务、相机和可用控制会随原生后端更新。
 
 ## 已接入
 

@@ -1,0 +1,5 @@
+# Python 3.12; Linux/macOS. On Windows use the documented WSL runtime.
+alfworld==0.4.2
+textworld[pddl]==1.7.0
+numpy>=1.26,<3
+Pillow>=11,<14

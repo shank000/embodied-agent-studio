@@ -4,6 +4,12 @@ dist/
 .venv/
 .venv-policy/
 .venv-genesis/
+.venv-maniskill/
+.venv-libero/
+.venv-alfworld/
+.venv-ai2thor/
+.venv-isaac/
+.venv-isaacsim/
 runs/
 __pycache__/
 vendor/

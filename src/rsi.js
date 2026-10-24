@@ -138,9 +138,11 @@ function renderRegistry(){
 function renderLocks(){
   if(!context)return;
   const state=currentState,locked=!!(state.ready===false||state.backend_switching||state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active);
-  $('#rsi-run-start').disabled=busy||locked||!methods.length;$('#rsi-run-once').disabled=busy||locked||!methods.length;$('#rsi-run-stop').disabled=stopping||!state.research?.active;
-  $('#rsi-experiment-start').disabled=busy||locked||methods.length<2||!protocols.length;$('#rsi-experiment-stop').disabled=stopping||!state.experiment?.active;
-  $('#rsi-save').disabled=busy||locked;$('#rsi-save-protocol').disabled=busy||locked;$('#rsi-save-runtime').disabled=busy||locked||!methods.length;$('#rsi-refresh').disabled=busy;$('#rsi-promote').disabled=busy||locked||!$('#rsi-promotion-experiment').value;$('#rsi-rollback').disabled=busy||locked||!registry.active_method_id;
+  const discrete=['text','discrete'].includes(state.backend?.action_mode);
+  let note=$('#rsi-environment-note');if(!note){note=document.createElement('p');note.id='rsi-environment-note';note.className='research-note';$('#rsi-run-message').after(note);}note.hidden=!discrete;note.textContent=discrete?'此方法组合与配对评测使用连续机械臂动作协议。当前环境请使用工作台 Agent 或原生命令；历史实验仍可查看与回放。':'';
+  $('#rsi-run-start').disabled=busy||locked||!methods.length||discrete;$('#rsi-run-once').disabled=busy||locked||!methods.length||discrete;$('#rsi-run-stop').disabled=stopping||!state.research?.active;
+  $('#rsi-experiment-start').disabled=busy||locked||methods.length<2||!protocols.length||discrete;$('#rsi-experiment-stop').disabled=stopping||!state.experiment?.active;
+  $('#rsi-save').disabled=busy||locked||discrete;$('#rsi-save-protocol').disabled=busy||locked||discrete;$('#rsi-save-runtime').disabled=busy||locked||!methods.length||discrete;$('#rsi-refresh').disabled=busy;$('#rsi-promote').disabled=busy||locked||!$('#rsi-promotion-experiment').value;$('#rsi-rollback').disabled=busy||locked||!registry.active_method_id;
   $('#rsi-restore-frame').disabled=busy||locked||!episode?.available;for(const selector of ['#rsi-run-method','#rsi-run-task','#rsi-run-sim','#rsi-run-wall','#rsi-run-steps','#rsi-run-record-video'])$(selector).disabled=busy||!!state.research?.active;
   $('#rsi-experiment-record-video').disabled=busy||locked;
 }
@@ -229,6 +231,8 @@ async function loadEpisode(runId){
 }
 function renderObservation(){
   if(!episode)return;const observation=episode.observations?.[Number($('#rsi-observation-index').value)];$('#rsi-replay-cameras').replaceChildren();if(!observation){$('#rsi-observation-label').textContent='没有图像观察记录';return;}
-  $('#rsi-observation-label').textContent=`步骤 ${observation.step??$('#rsi-observation-index').value} · t=${Number(observation.time??observation.sim_time_s??0).toFixed(3)} s`;
+  const turnBased=['text','discrete'].includes(observation.backend?.action_mode);
+  $('#rsi-observation-label').textContent=turnBased?`轮次 ${observation.step??$('#rsi-observation-index').value} · 环境第 ${observation.environment?.step_count??observation.time??0} 步`:`步骤 ${observation.step??$('#rsi-observation-index').value} · t=${Number(observation.time??observation.sim_time_s??0).toFixed(3)} s`;
+  if(observation.environment?.observation_text){const text=document.createElement('pre');text.className='environment-observation';text.style.gridColumn='1 / -1';text.textContent=observation.environment.observation_text;$('#rsi-replay-cameras').append(text);}
   for(const camera of observation.cameras||[]){if(!camera.image_ref)continue;const figure=document.createElement('figure'),img=document.createElement('img'),caption=document.createElement('figcaption');img.src=`/api/runs/${encodeURIComponent(replayRun)}/artifact/${camera.image_ref.split('/').map(encodeURIComponent).join('/')}`;img.alt=`记录相机 ${camera.name||camera.id||''}`;caption.textContent=camera.name||camera.id||'相机';figure.append(img,caption);$('#rsi-replay-cameras').append(figure);}
 }

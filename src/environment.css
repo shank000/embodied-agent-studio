@@ -1,0 +1,21 @@
+.environment-panel{margin-top:14px;padding:17px;border:1px solid #d8e6d8;border-radius:10px;background:#fbfdf9;min-width:0}
+.environment-panel[hidden]{display:none!important}
+.environment-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.environment-heading h3{font-size:15px;color:#345744;margin:0}
+.environment-mode{font-size:12px;color:#6d846e}
+.environment-task{font-size:14px;line-height:1.8;color:#335940;overflow-wrap:anywhere;margin:13px 0 6px}
+.environment-hint,.environment-empty,.environment-lock,.environment-status{font-size:12px;line-height:1.8;color:#7a8c77;overflow-wrap:anywhere;margin:8px 0}
+.environment-observation{margin:13px 0;padding:14px;background:#f0f5ed;border:1px solid #e0e9db;border-radius:7px;max-height:330px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.8 ui-monospace,SFMono-Regular,Consolas,monospace;color:#425c43;overscroll-behavior:contain}
+.environment-panel h4{font-size:12px;font-weight:600;color:#678163;margin:16px 0 9px}
+.environment-commands{display:flex;flex-wrap:wrap;gap:7px;max-height:230px;overflow:auto;overscroll-behavior:contain;padding:1px}
+.environment-action{border:1px solid #d5e3d1;border-radius:6px;background:#fff;color:#426b47;max-width:100%;padding:8px 10px;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;text-align:left;overflow-wrap:anywhere;white-space:normal}
+.environment-action:hover:not(:disabled){border-color:#7fae81;background:#edf6e7}
+.environment-action:disabled,.environment-form button:disabled{opacity:.5;cursor:not-allowed}
+.environment-form{display:flex;align-items:flex-end;gap:10px;margin-top:16px}
+.environment-form label{display:flex;flex:1;flex-direction:column;gap:7px;font-size:12px;color:#678163;min-width:0}
+.environment-input{box-sizing:border-box;min-width:0;width:100%;resize:vertical;min-height:65px;max-height:240px;padding:10px;border:1px solid #d3dfce;border-radius:7px;background:#fff;font:13px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;color:#3b593f}
+.environment-form .primary-button{flex-shrink:0;font-size:12px;padding:12px 14px}
+.environment-lock{color:#977549}
+.environment-status.error{color:#a34f3a}
+.environment-status:empty{display:none}
+@media(max-width:760px){.environment-panel{padding:13px}.environment-form{align-items:stretch;flex-direction:column}.environment-form .primary-button{align-self:flex-end}.environment-observation{max-height:260px}.environment-commands{max-height:190px}}

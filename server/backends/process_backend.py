@@ -19,7 +19,8 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_SCRIPT = Path(__file__).with_name('runtime.py')
-ENGINES = frozenset({'genesis'})
+from ..simulators import RUNTIMES, runtime_command
+ENGINES = frozenset(RUNTIMES)
 
 
 class BackendProcessError(RuntimeError):
@@ -52,10 +53,7 @@ class ProcessBackend:
             raise ValueError(f'不支持的隔离仿真引擎：{engine_id}')
         if isinstance(generation_base, bool) or not isinstance(generation_base, int) or generation_base < 0:
             raise ValueError('generation_base 必须为非负整数。')
-        python = Path(python_path) if python_path else ROOT / '.venv-genesis' / (
-            'Scripts/python.exe' if os.name == 'nt' else 'bin/python')
-        if not python.is_file():
-            raise ValueError(f'未找到 Genesis 独立 Python 环境：{python}。请按 docs/simulators.md 安装后再加载。')
+        command = runtime_command(engine_id, generation_base, python_path, RUNTIME_SCRIPT)
         self.engine_id = engine_id
         self.command_timeout_s = command_timeout_s
         self._state = {}
@@ -72,8 +70,7 @@ class ProcessBackend:
         self._rpc_lock = RLock()
         environment = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'}
         self.process = subprocess.Popen(
-            [str(python), '-u', str(RUNTIME_SCRIPT), '--engine', engine_id,
-             '--generation-base', str(generation_base)], cwd=ROOT, env=environment,
+            command, cwd=ROOT, env=environment,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         self._output_thread = Thread(target=self._read_stdout, name=f'{engine_id}-protocol', daemon=True)

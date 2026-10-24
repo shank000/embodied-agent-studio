@@ -78,8 +78,8 @@ class SelectionApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.request()).status_code, 409)
         self.worker.execute.assert_not_awaited()
 
-    async def test_planned_engine_and_arbitrary_command_are_not_executable(self):
-        for engine in ('isaac', 'maniskill', 'cmd.exe'):
+    async def test_out_of_scope_engine_and_arbitrary_command_are_not_executable(self):
+        for engine in ('omnigibson', 'habitat', 'cmd.exe'):
             self.assertEqual((await self.request(engine)).status_code, 422)
         self.worker.execute.assert_not_awaited()
 

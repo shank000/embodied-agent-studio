@@ -1,0 +1,22 @@
+# Python 3.11; isolated .venv-libero. Official task assets and initial states are
+# included in the pinned editable checkout; demonstrations are not required.
+# Install CPU torch first from https://download.pytorch.org/whl/cpu if no CUDA is used.
+# Upstream's namespace package requires setuptools' compatibility editable mode.
+-e git+https://github.com/Lifelong-Robot-Learning/LIBERO.git@8f1084e3132a39270c3a13ebe37270a43ece2a01#egg=libero --config-settings editable_mode=compat
+numpy==1.26.4
+mujoco==3.2.7
+robosuite==1.4.0
+bddl==1.0.1
+gym==0.25.2
+opencv-python==4.11.0.86
+torch==2.5.1
+cloudpickle>=2.0,<4
+PyYAML>=6,<7
+easydict>=1.9,<2
+Pillow>=10,<13
+scipy>=1.10,<2
+pydantic>=2.10,<3
+matplotlib>=3.5,<4
+termcolor>=2,<4
+h5py>=3.8,<4
+future>=0.18,<2

@@ -1,0 +1,10 @@
+# Independent Python 3.12 environment. Install the official CUDA 13.0 Torch
+# wheels first; see docs/isaac.md. Isaac Lab 3.0 includes the kitless packages.
+isaaclab==3.0.0
+torch==2.11.0
+torchvision==0.26.0
+newton==1.6.1
+warp-lang==1.17.0
+pydantic>=2.13,<3
+pillow>=12.3,<14
+scipy>=1.11,<2
