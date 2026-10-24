@@ -39,6 +39,7 @@ def evaluation_contract(engine_id='mujoco'):
         engine = next(item for item in catalog()['backends'] if item['id'] == engine_id)
         paths = [f'server/backends/{RUNTIMES[engine_id][2]}.py', 'server/backends/runtime.py', 'server/simulators.py', 'server/task_verification.py', 'server/actions.py']
         if engine_id == 'libero': paths.append('server/backends/libero_catalog.py')
+        if engine_id == 'robocasa365': paths.append('server/backends/robocasa_catalog.py')
         if engine_id == 'ai2thor': paths.append('server/backends/alfworld_backend.py')
         contract.pop('mujoco')
         contract['backend'] = backend_identity(engine_id, engine['version'])

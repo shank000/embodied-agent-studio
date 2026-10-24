@@ -66,7 +66,7 @@ test('single flight disables manual and listed actions until the request complet
 });
 
 test('all automated controllers, backend switch and offline states lock manual interactions',async()=>{
-  for(const extra of [{ready:false},{backend_switching:true},...['agent','policy','comparison','research','composition','experiment','repair'].map(key=>({[key]:{active:true}}))]){
+  for(const extra of [{ready:false},{backend_switching:true},...['agent','policy','comparison','research','composition','experiment','repair','benchmark'].map(key=>({[key]:{active:true}}))]){
     const ui=setup();ui.render(base(extra));
     assert.equal(ui.find('environment-input').disabled,true,JSON.stringify(extra));
     await ui.find('environment-commands').children[0].listeners.click();

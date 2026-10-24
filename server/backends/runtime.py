@@ -112,7 +112,7 @@ def dispatch(simulation, operation, payload):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine', choices=['genesis','maniskill','libero','alfworld','ai2thor','isaac','isaacsim'], required=True)
+    parser.add_argument('--engine', choices=['genesis','maniskill','libero','alfworld','ai2thor','isaac','isaacsim','robocasa365'], required=True)
     parser.add_argument('--generation-base', type=int, default=0)
     arguments = parser.parse_args()
     # Native libraries may print directly to fd 1, bypassing redirect_stdout.

@@ -19,7 +19,7 @@ class _WindowsWorkspace(PureWindowsPath):
 
 class EnvironmentRegistryTests(unittest.TestCase):
     def test_only_requested_and_previously_integrated_engines_are_registered(self):
-        expected = {'mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'ai2thor', 'isaac', 'isaacsim'}
+        expected = {'mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365'}
         self.assertEqual(set(simulators.EVALUATORS), expected)
         self.assertEqual(set(simulators.RUNTIMES), expected-{'mujoco'})
         for unsupported in ('omnigibson', 'habitat', 'pybullet'):

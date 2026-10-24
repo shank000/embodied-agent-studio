@@ -3,7 +3,7 @@ let context={},catalog=null,lastState=null,activeId='',loading=false,refreshing=
 
 const statusName=backend=>backend.status==='available'?'可加载':backend.status==='not_installed'?'未安装':backend.status==='planned'?'尚未适配':'状态未知';
 const canLoad=backend=>backend?.status==='available'&&backend.implemented!==false&&backend.installed!==false;
-const isRunning=state=>!!(state?.backend_switching||state?.agent?.active||state?.policy?.active||state?.comparison?.active||state?.research?.active||state?.experiment?.active||['running','settling'].includes(state?.task?.status));
+const isRunning=state=>!!(state?.backend_switching||state?.agent?.active||state?.policy?.active||state?.comparison?.active||state?.research?.active||state?.experiment?.active||state?.benchmark?.active||['running','settling'].includes(state?.task?.status));
 const asText=value=>Array.isArray(value)?value.join(' · '):value==null?'':String(value);
 const unavailable=()=>lastState?.ready===false;
 

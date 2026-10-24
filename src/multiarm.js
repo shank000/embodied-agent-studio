@@ -23,5 +23,5 @@ export function renderMultiarm(state,{disabled=false}={}){
   select.parentElement.hidden=robots.length<2;
   const signature=JSON.stringify(robots.map(robot=>[robot.id,robot.name]));if(signature!==lastRobots){lastRobots=signature;select.replaceChildren(...robots.map(robot=>new Option(`${robot.name} · ${robot.id}`,robot.id)));}
   select.value=state.active_robot||'arm1';
-  select.disabled=disabled||!!(state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active);
+  select.disabled=disabled||!!(state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active||state.benchmark?.active);
 }

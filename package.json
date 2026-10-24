@@ -9,7 +9,7 @@
     "build": "vite build",
     "start": "node tools/python.mjs -m uvicorn server.app:app --host 127.0.0.1 --port 8000",
     "test": "node tools/python.mjs -m unittest discover -s tests -p \"test_*.py\" -v",
-    "test:ui": "node --test tests/test_frontend_state.mjs tests/test_simulators_ui.mjs tests/test_environment_ui.mjs",
+    "test:ui": "node --test tests/test_frontend_state.mjs tests/test_simulators_ui.mjs tests/test_environment_ui.mjs tests/test_benchmarks_ui.mjs",
     "test:launcher": "node --test tests/test_launcher.mjs"
   },
   "devDependencies": {

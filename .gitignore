@@ -10,6 +10,8 @@ dist/
 .venv-ai2thor/
 .venv-isaac/
 .venv-isaacsim/
+.venv-robodojo/
+.venv-robocasa365/
 runs/
 __pycache__/
 vendor/

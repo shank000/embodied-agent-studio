@@ -10,7 +10,7 @@ const session=state=>`${state?.backend?.engine_id||''}:${state?.session_id||''}:
 function lockReason(state){
   if(!state||state.ready!==true)return '环境未连接，请先加载环境。';
   if(state.backend_switching)return '正在切换环境，请等待加载完成。';
-  if(['agent','policy','comparison','research','composition','experiment','repair'].some(key=>state[key]?.active)
+  if(['agent','policy','comparison','research','composition','experiment','repair','benchmark'].some(key=>state[key]?.active)
       ||['running','settling','verifying'].includes(state.task?.status))return '自动控制正在执行，请停止后再进行手动交互。';
   if(!discrete(state))return '当前环境使用机械臂控制。';
   return '';

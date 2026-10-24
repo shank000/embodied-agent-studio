@@ -14,8 +14,10 @@ EVALUATORS = {'mujoco': ('mujoco_privileged_state', 'task-evaluation-v2'),
               'alfworld': ('alfworld_native_task', 'alfworld-task-v1'),
               'ai2thor': ('ai2thor_native_task', 'ai2thor-task-v1'),
               'isaac': ('isaaclab_newton_state', 'isaaclab-task-v1'),
-              'isaacsim': ('isaacsim_privileged_state', 'isaaclab-task-v1')}
+              'isaacsim': ('isaacsim_privileged_state', 'isaaclab-task-v1'),
+              'robocasa365': ('robocasa_official_state', 'robocasa365-task-v1')}
 RUNTIMES = {
+    'robocasa365': ('robocasa', 'RoboCasa365', 'robocasa_backend', 'RoboCasaSimulation', 'https://robocasa.ai/'),
     'genesis': ('genesis_world', 'Genesis World', 'genesis_backend', 'GenesisSimulation', 'https://genesis-world.readthedocs.io/'),
     'maniskill': ('mani_skill', 'ManiSkill / SAPIEN', 'maniskill_backend', 'ManiSkillSimulation', 'https://maniskill.readthedocs.io/'),
     'libero': ('libero', 'LIBERO', 'libero_backend', 'LiberoSimulation', 'https://github.com/Lifelong-Robot-Learning/LIBERO'),
@@ -108,6 +110,9 @@ def supported_catalog(engine_id='mujoco'):
         from .backends.libero_catalog import catalog, MODELS as libero_models
         scenes, tasks = catalog()
         return libero_models, scenes, tasks
+    if engine_id == 'robocasa365':
+        from .backends.robocasa_catalog import MODELS, SCENES, TASKS
+        return MODELS, SCENES, TASKS
     if engine_id != 'genesis':
         module = importlib.import_module('.backends.'+RUNTIMES[engine_id][2], __package__)
         return module.MODELS, module.SCENES, module.TASKS
@@ -130,6 +135,7 @@ def catalog(active='mujoco', session_id=None):
          'requirements': '工作台主 Python 环境', 'docs': 'https://mujoco.readthedocs.io/'},
     ]
     descriptions = {
+        'robocasa365': ('官方 65 项原子与 300 项复合厨房任务；移动 PandaOmron、三相机和原生成功判据。', '独立 Python 3.11 .venv-robocasa365；需准备所选场景与物品资产，详见 docs/robocasa365.md。'),
         'genesis': ('原生 Genesis 物理、Panda、三相机与 IK；桌面三项任务。', '独立 .venv-genesis；首次加载编译物理内核。'),
         'maniskill': ('官方 PickCube / PushCube；SAPIEN/PhysX、原生图像和官方成功判据。', '独立 .venv-maniskill；Windows CPU 物理 + Vulkan，Linux 可用 GPU。'),
         'libero': ('官方五套任务、Panda、robosuite 控制器与 BDDL 成功谓词。', '独立 .venv-libero，准备官方任务、初态与场景资产，无需演示训练集。'),

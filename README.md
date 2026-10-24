@@ -22,7 +22,8 @@ EmbodiWorks 将机器人操作、家庭文字/视觉任务与实验记录放进�
 
 | 能力 | 工作方式 |
 | --- | --- |
-| 多后端任务 | MuJoCo、Genesis、ManiSkill、LIBERO、ALFWorld、AI2-THOR；Isaac 运行栈与验收状态见[多后端指南](docs/simulators.md)。 |
+| 多后端任务 | MuJoCo、Genesis、ManiSkill、LIBERO、ALFWorld、AI2-THOR、RoboCasa365；Isaac 运行栈与验收状态见[多后端指南](docs/simulators.md)。 |
+| 官方基准 | RoboDojo 任务目录、评测计划、独立客户端与结果导入；完整运行需要 Linux GPU / Isaac Sim 5.1，见[RoboDojo 指南](docs/robodojo.md)。 |
 | 机器人操作 | MuJoCo 支持 Panda、SO-101、RM65 + GaiaHand、双／三 Panda 和七类场景；其他后端提供各自官方机器人与任务。 |
 | 灵活接入策略 | Codex 本机登录、OpenAI、DeepSeek／兼容 API、Claude、自定义 Agent，以及 SmolVLA 与自定义 VLA/WAM。 |
 | 组合决策 | 主 Agent、决策器和动作策略分别配置；支持单决策、级联复核与加权投票。 |
@@ -68,6 +69,7 @@ npm start
 
 - [安装与平台说明](docs/INSTALL.md) · [完整使用指南](docs/USAGE.md)
 - [多后端指南](docs/simulators.md) · [家庭环境](docs/household-environments.md) · [LIBERO](docs/libero.md) · [ManiSkill](docs/maniskill.md) · [Isaac](docs/isaac.md)
+- [RoboCasa365 厨房任务](docs/robocasa365.md) · [RoboDojo 基准评测](docs/robodojo.md)
 - [组合方法、评测与自定义 Agent](RSI_WORKBENCH.md) · [VLA / WAM 策略协议](POLICY_PROTOCOL.md)
 - [机器人模型来源](MODEL_SOURCES.md) · [贡献指南](CONTRIBUTING.md)
 

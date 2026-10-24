@@ -32,7 +32,7 @@ class RobotBackendsIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_isaac_visual_episode_verifies_actual_reach(self):
         await self._episode('isaac', 'isaac_tabletop', 'isaac_reach_up', True, 'isaaclab_newton_state')
 
-    async def _episode(self, engine, scene, task, expected_success, evaluator_source):
+    async def _episode(self, engine, scene, task, expected_success, evaluator_source, initial_time_s=0.):
         worker = Worker(); worker.thread.start(); agent = None
         try:
             self.assertTrue(await asyncio.to_thread(worker.ready.wait, 30))
@@ -43,7 +43,7 @@ class RobotBackendsIntegrationTests(unittest.IsolatedAsyncioTestCase):
             # Exercise the first-load UI path before any scene/reset/settle.
             initial_observation = await worker.execute({'action': 'observe'})
             json.dumps(initial_observation, allow_nan=False)
-            self.assertEqual(initial_observation['time'], 0.)
+            self.assertAlmostEqual(initial_observation['time'], initial_time_s)
             capture = os.getenv('EMBODI_NATIVE_CAPTURE_DIR')
             if capture:
                 target = Path(capture).resolve(); target.mkdir(parents=True, exist_ok=True)

@@ -192,8 +192,9 @@ def analyze_run(run_id, *, _ancestors=()):
                 child.update({key: analysis[key] for key in ('display_name', 'deleted_at')})
             except (ValueError, FileNotFoundError, KeyError) as exc: child['analysis_error'] = str(exc)
         children.append(child)
-    known_empty = result.get('telemetry_schema_version') == 'embodied-calls-v1'
+    known_empty = result.get('telemetry_schema_version') == 'embodied-calls-v1' and not result.get('external_telemetry')
     totals = _totals(ordered, known_empty=known_empty)
+    if result.get('external_telemetry') and not ordered: totals['calls'] = None
     if result.get('kind') in BATCH_KINDS:
         child_totals = [child['total'] for child in child_analyses]
         totals = {'calls': sum(child['calls'] for child in child_totals), 'usage_complete': bool(child_totals) and all(child['usage_complete'] for child in child_totals)}
@@ -209,6 +210,9 @@ def analyze_run(run_id, *, _ancestors=()):
     ended_at = result.get('ended_at')
     if elapsed is None and ended_at: elapsed = _elapsed(started_at, ended_at)
     costs = [child['cost'] for child in child_analyses] if result.get('kind') in BATCH_KINDS else [call['cost'] for call in ordered]
+    if result.get('external_telemetry') and not ordered:
+        costs.append({'status':'unavailable','total_calls':0,'missing_calls':1,'call_count_incomplete':True,
+                      'warnings':['外部策略未上报模型用量、推理耗时与费用；缺失值不按零计算。']})
     for child in children if result.get('kind') in BATCH_KINDS else []:
         if child.get('analysis_error'):
             costs.append({'status': 'unavailable', 'total_calls': 0, 'missing_calls': 1, 'call_count_incomplete': True,
@@ -233,6 +237,8 @@ def analyze_run(run_id, *, _ancestors=()):
         'message': result.get('message'), 'task': result.get('task'), 'model': model, 'reasoning': effort,
         'started_at': started_at, 'ended_at': ended_at, 'elapsed_s': elapsed,
         'metrics': result.get('metrics'), 'video': (result.get('artifacts') or {}).get('video'),
+        'benchmark': result.get('benchmark'), 'record_origin': result.get('record_origin'),
+        'native_videos': (result.get('artifacts') or {}).get('native_videos', []),
         'completion_verifications': [{'timestamp': event.get('timestamp'), **event.get('data', {})}
             for event in events if event.get('event') == 'completion_verification'],
         'recovery_assisted':bool(result.get('recovery_assisted') or any(event.get('event')=='recoverable_error' for event in events)),
@@ -255,7 +261,7 @@ def analyze_experiments(*, task=None, model=None, reasoning=None, kind=None, lim
     groups = defaultdict(list); excluded_active = 0
     for run in runs:
         if run['status'] == 'running': excluded_active += 1; continue
-        if run['kind'] not in BATCH_KINDS:
+        if run['kind'] not in BATCH_KINDS and run['kind'] != 'benchmark':
             context = tuple(run[field] for field in ENVIRONMENT_FIELDS)
             groups[(*context, run['model'], run['reasoning'], run['kind'], run['task'])].append(run)
     grouped = []

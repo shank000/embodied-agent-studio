@@ -1,6 +1,7 @@
 import './style.css';
 import './research.css';
 import {initResearch,renderResearch,renderRunVideo,renderRunTimer,reloadResearchCatalog} from './research.js';
+import {initBenchmarks,renderBenchmarks} from './benchmarks.js';
 import {initRsi,renderRsi,reloadRsiCatalog} from './rsi.js';
 import {initSimulators,renderSimulator} from './simulators.js';
 import {initEnvironment,renderEnvironment} from './environment.js';
@@ -62,19 +63,20 @@ function enableControls(){
   $('#step').disabled=!enabled||!state?.paused;
   const active=['running','settling'].includes(state?.task.status);
   document.querySelectorAll('[data-action="home"],[data-action="demo"]').forEach(el=>el.disabled=!enabled||active);
-  const takeover=!!(state?.agent?.active||state?.policy?.active||state?.comparison?.active||state?.research?.active||state?.experiment?.active);
+  const takeover=!!(state?.agent?.active||state?.policy?.active||state?.comparison?.active||state?.research?.active||state?.experiment?.active||state?.benchmark?.active);
   $('#agent-record-video').disabled=!enabled||takeover;
   $('#agent-environment-steps').disabled=!enabled||takeover;
   $('#agent-stop').disabled=!state?.agent?.active;
   $('#agent-one-round').disabled=!enabled||takeover;
   $('#capture-observation').disabled=!enabled||takeover;
-  const agentConfigEditable=state?.agent?.status==='repair_paused'&&!state?.policy?.active&&!state?.comparison?.active&&!state?.research?.active&&!state?.experiment?.active;
+  const agentConfigEditable=state?.agent?.status==='repair_paused'&&!state?.policy?.active&&!state?.comparison?.active&&!state?.research?.active&&!state?.experiment?.active&&!state?.benchmark?.active;
   $('#agent-settings').disabled=(takeover&&!agentConfigEditable)||busy;
   if(takeover)document.querySelectorAll('[data-model],#joint-controls input,.sim-action,#gripper-open,#gripper-close,#command,#send,#speed,#gravity,#step,#apply-scene,#scene-select,#task-select,#scene-seed').forEach(el=>el.disabled=true);
   const capabilities=state?.backend?.capabilities;
   if(capabilities){for(const el of document.querySelectorAll('[data-action]'))if(!capabilities.includes(el.dataset.action))el.disabled=true;
     for(const name of ['contacts','joints','collision'])if(!capabilities.includes('flags'))$(`#show-${name}`).disabled=true;
     if(!capabilities.includes('gravity'))$('#gravity').disabled=true;
+    if(!capabilities.includes('instruction'))for(const id of ['#gripper-open','#gripper-close'])$(id).disabled=true;
     for(const [id,action] of [['#pause','pause'],['#speed','speed'],['#step','step'],['#view-reset','view']])if(!capabilities.includes(action))$(id).disabled=true;
     document.querySelectorAll('[data-view]').forEach(el=>{if(!capabilities.includes('view'))el.disabled=true;});}
   const discrete=['text','discrete'].includes(state?.backend?.action_mode);
@@ -91,10 +93,12 @@ async function operate(payload,{message=false}={}){
   }catch(error){toast(error.message);}
   finally{busy=false;enableControls();if(connected)$('#scene-error').hidden=true;}
 }
-const toDisplay=(a,value)=>a.unit==='command'?value/255*100:value*180/Math.PI;
-const fromDisplay=(a,value)=>a.unit==='command'?value/100*255:value*Math.PI/180;
-const targetText=(a,value)=>`${toDisplay(a,value).toFixed(1)}${a.unit==='command'?'%':'°'}`;
-const actualText=a=>a.unit==='command'?`${(a.actual*2*1000).toFixed(1)} mm`:`${(a.actual*180/Math.PI).toFixed(1)}°`;
+const angular=a=>!a.unit||a.unit==='rad';
+const unitText=a=>a.unit==='command'?'%':angular(a)?'°':['normalized','normalized_command'].includes(a.unit)?'':` ${a.unit}`;
+const toDisplay=(a,value)=>a.unit==='command'?value/255*100:angular(a)?value*180/Math.PI:value;
+const fromDisplay=(a,value)=>a.unit==='command'?value/100*255:angular(a)?value*Math.PI/180:value;
+const targetText=(a,value)=>`${toDisplay(a,value).toFixed(angular(a)||a.unit==='command'?1:2)}${unitText(a)}`;
+const actualText=a=>typeof a.actual!=='number'||!Number.isFinite(a.actual)?'—':a.unit==='command'?`${(a.actual*2*1000).toFixed(1)} mm`:targetText(a,a.actual);
 
 function buildJoints(){
   const root=$('#joint-controls');root.replaceChildren();
@@ -103,14 +107,15 @@ function buildJoints(){
     const header=document.createElement('div');header.className='joint-header';
     const label=document.createElement('label');label.htmlFor=`joint-${a.index}`;
     const finger=Object.entries({thumb:'拇指',index:'食指',middle:'中指',ring:'无名指',little:'小指'}).find(([key])=>a.name.includes(key));
-    const jointLabel=finger?`${finger[1]} · ${a.name.split('_').at(-1)}`:a.is_gripper?'夹爪':`关节 ${localIndex+1}`;
+    const nativeLabel={arm_dx:'末端 ΔX',arm_dy:'末端 ΔY',arm_dz:'末端 ΔZ',arm_drx:'末端旋转 X',arm_dry:'末端旋转 Y',arm_drz:'末端旋转 Z',gripper_command:'夹爪命令',base_vx_command:'底盘前后',base_vy_command:'底盘侧移',base_yaw_command:'底盘旋转',torso_command:'躯干升降',base_mode:'底盘模式'};
+    const jointLabel=a.unit==='normalized_command'?(nativeLabel[a.name]||a.name):finger?`${finger[1]} · ${a.name.split('_').at(-1)}`:a.is_gripper?'夹爪':`关节 ${localIndex+1}`;
     label.innerHTML=`<b>${a.is_gripper?'G':String(a.index+1).padStart(2,'0')}</b><span>${jointLabel}<small>${a.name}</small></span>`;
     const output=document.createElement('output');output.id=`target-${a.index}`;output.textContent=targetText(a,a.target);header.append(label,output);
-    const input=document.createElement('input');input.type='range';input.id=`joint-${a.index}`;input.min=String(Math.ceil(toDisplay(a,a.min)*10)/10);input.max=String(Math.floor(toDisplay(a,a.max)*10)/10);input.step='.1';input.value=String(toDisplay(a,a.target));input.setAttribute('aria-label',a.is_gripper?'夹爪目标':`关节 ${a.index+1} 目标角度`);
-    input.setAttribute('aria-label',`${jointLabel} 目标角度`);
+    const input=document.createElement('input');input.type='range';input.id=`joint-${a.index}`;input.min=String(Math.ceil(toDisplay(a,a.min)*100)/100);input.max=String(Math.floor(toDisplay(a,a.max)*100)/100);input.step=angular(a)||a.unit==='command'?'.1':'.01';input.value=String(toDisplay(a,a.target));input.setAttribute('aria-label',a.is_gripper?'夹爪目标':`关节 ${a.index+1} 目标`);
+    input.setAttribute('aria-label',`${jointLabel} ${angular(a)?'目标角度':'目标值'}`);
     input.addEventListener('input',()=>{output.textContent=targetText(a,fromDisplay(a,Number(input.value)));input.dataset.editing='true';});
     input.addEventListener('change',async()=>{input.dataset.editing='false';await operate({action:'control',index:a.index,value:fromDisplay(a,Number(input.value))});});
-    const meta=document.createElement('div');meta.className='joint-meta';meta.innerHTML=`<span>${toDisplay(a,a.min).toFixed(0)}${a.unit==='command'?'%':'°'}</span><span id="actual-${a.index}">实际 ${actualText(a)}</span><span>${toDisplay(a,a.max).toFixed(0)}${a.unit==='command'?'%':'°'}</span>`;
+    const meta=document.createElement('div');meta.className='joint-meta';meta.innerHTML=`<span>${toDisplay(a,a.min).toFixed(angular(a)?0:2)}${unitText(a)}</span><span id="actual-${a.index}">实际 ${actualText(a)}</span><span>${toDisplay(a,a.max).toFixed(angular(a)?0:2)}${unitText(a)}</span>`;
     row.append(header,input,meta);root.append(row);
   });
   $('#engine-version').textContent=`${state.engine} ${state.version}`;$('#watermark-version').textContent=state.version;
@@ -151,12 +156,13 @@ function renderState(){
   const contactLabel=$('#contact-label'),contactScope=$('#contact-scope');
   if(contactLabel)contactLabel.textContent=state.contact_scope==='active_robot'?'机械臂接触':'接触数量';
   if(contactScope)contactScope.textContent=state.contact_scope==='not_reported'?'当前 SDK 未提供接触总数':state.contact_scope==='active_robot'?'当前机械臂的接触点':'全场接触点 · 由物理引擎计算';
-  $('#gripper-status').textContent=state.actuators.length?actualText(state.actuators.at(-1)):'—';$('#gripper-detail').textContent=state.model.includes('panda')?'两指间距（实际）':'夹爪关节（实际）';
+  const gripper=state.actuators.find(a=>a.is_gripper);$('#gripper-status').textContent=gripper?actualText(gripper):'—';$('#gripper-detail').textContent=gripper?.unit==='normalized_command'?'夹爪测量未提供':state.model.includes('panda')?'两指间距（实际）':'夹爪关节（实际）';
   for(const id of ['#position','#gripper-status','#contact-count'])$(id).closest('.telemetry-cell').hidden=discrete;
   $('.viewer-options').hidden=discrete;$('.playback-controls').hidden=discrete;$('.viewport-bottom').hidden=discrete;
   $('#joints-tab').hidden=discrete;$('#policy-tab').hidden=discrete;
+  $('#joints-tab').textContent=state.actuators.some(a=>a.unit==='normalized_command')?'原生命令':'关节控制';
   if(discrete&&$('#agent-tab').getAttribute('aria-selected')!=='true')selectTab('agent');
-  $('.agent-contract p').textContent=discrete?'环境观察 → 模型选择原生命令 → 环境反馈与独立验收':'图像 + 机械臂状态 → 绝对末端位姿；本地 IK → 执行器 → 新一轮观察';
+  $('.agent-contract p').textContent=discrete?'环境观察 → 模型选择原生命令 → 环境反馈与独立验收':state.backend?.engine_id==='robocasa365'?'视觉 Agent 使用绝对末端位姿并保持底盘；厨房导航与完整移动操作请使用 12 维原生 VLA/WAM 策略或手动命令。':'图像 + 机械臂状态 → 绝对末端位姿；本地 IK → 执行器 → 新一轮观察';
   $('[data-stage="observing"]').textContent=discrete?'环境观察':'三路观察';$('[data-stage="executing"]').textContent=discrete?'原生命令':'IK 执行';
   $('#frame-info').textContent=`渲染与物理帧 ${state.render_ms.toFixed(0)} ms`;
   $('#pause').innerHTML=icon(state.paused?'play':'pause')+(state.paused?'继续':'暂停');
@@ -166,7 +172,7 @@ function renderState(){
   document.querySelectorAll('[data-view]').forEach(el=>{const selected=el.dataset.view===state.view;el.classList.toggle('selected',selected);el.setAttribute('aria-pressed',String(selected));});
   state.actuators.forEach(a=>{const input=$(`#joint-${a.index}`);if(input.dataset.editing!=='true'){input.value=String(toDisplay(a,a.target));$(`#target-${a.index}`).textContent=targetText(a,a.target);}$(`#actual-${a.index}`).textContent=`实际 ${actualText(a)}`;});
   if(state.events.length&&state.events.at(-1).id!==lastEvent){lastEvent=state.events.at(-1).id;const log=$('#event-log');log.replaceChildren();state.events.slice(-6).reverse().forEach(e=>{const row=document.createElement('p');row.className=e.kind;row.textContent=e.message;log.append(row);});}
-  renderTask();renderAgent();enableControls();renderResearch(state);renderRsi(state);renderRepair(state);renderMultiarm(state,{disabled:!connected||busy});renderSimulator(state);renderEnvironment(state);
+  renderTask();renderAgent();enableControls();renderResearch(state);renderRsi(state);renderRepair(state);renderMultiarm(state,{disabled:!connected||busy});renderSimulator(state);renderEnvironment(state);renderBenchmarks(state);
   if(state.session_id&&state.session_id!==catalogSession&&!catalogLoading)reloadWorkspaceCatalog();
 }
 function renderAgent(){
@@ -313,6 +319,7 @@ $('#agent-settings').addEventListener('click',async()=>{try{agentConfig=await ag
 $('#close-agent-config').addEventListener('click',()=>$('#agent-config-dialog').close());
 $('#agent-config-form').addEventListener('submit',async event=>{event.preventDefault();try{if(capabilityLoading)throw new Error('模型能力正在读取，请稍候再应用。');agentConfig=await agentApi('config',{provider:$('#config-provider').value,model:$('#config-model').value.trim(),base_url:$('#config-base-url').value.trim(),api_key:$('#config-api-key').value,reasoning:selectedReasoning(),reasoning_native:true,deepseek_thinking:$('#config-deepseek-thinking').value,max_output_tokens:$('#config-output-tokens').disabled?(agentConfig?.max_output_tokens??16384):Number($('#config-output-tokens').value),max_rounds:Number($('#config-rounds').value)||null,timeout_s:Number($('#config-timeout').value)});$('#config-api-key').value='';updateConfigSummary();$('#agent-config-dialog').close();toast('模型配置已应用。');}catch(error){$('#config-error').textContent=error.message;$('#config-error').hidden=false;}});
 agentApi('config').then(config=>{agentConfig=config;updateConfigSummary();}).catch(()=>{});
+initBenchmarks({toast});
 initResearch({operate,toast,selectTab});
 initRsi({operate,toast,selectTab});
 initRepair({toast});

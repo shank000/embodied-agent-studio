@@ -6,10 +6,11 @@ EmbodiWorks 在同一个工作台选择后端，复用模型接入、实验记�
 
 ## 当前范围
 
-本项目维护范围限定为 **MuJoCo、Genesis，以及新增的 ALFWorld、AI2-THOR、LIBERO、ManiSkill 和 Isaac**。Genesis 是已有后端；其他未适配的仿真栈不再列入接入计划。
+本项目维护范围为 **MuJoCo、Genesis、ALFWorld、AI2-THOR、LIBERO、ManiSkill、Isaac 和 RoboCasa365**，另提供 RoboDojo 官方基准入口。Genesis 是已有后端；其他未适配的仿真栈不列入接入计划。
 
 | 后端 / 任务套件 | 当前实现 | 本次验收与安装说明 |
 | --- | --- | --- |
+| RoboCasa365 | 官方 65 项原子技能与 300 项复合厨房任务目录；PandaOmron 移动机械臂、原生控制与三相机 | 本机 Windows 的导航、抽屉、柜体抓放与烹饪组合任务样本，以及真实 Worker/Agent/视频回放链路通过；独立 Python 3.11，详见[RoboCasa365 指南](robocasa365.md)。未逐一运行全部 365 任务。 |
 | MuJoCo | Panda、SO-101、RM65 + GaiaHand、双/三 Panda；七类场景、三相机、关节/末端控制及任务评价 | 现有完整主后端。Windows 本机、Linux 渲染和三平台 CI 的各自边界见[安装文档](INSTALL.md)。 |
 | Genesis World | Panda 桌面抬起、放置、末端到达；Genesis 物理、IK、PD 和三相机 | 本机原生 Windows CPU 物理及主 Worker 集成通过；其他系统待实机验收。独立 `.venv-genesis`，安装见下文。 |
 | ManiSkill / SAPIEN | 官方 `PickCube-v1` / `PushCube-v1`、Panda；SAPIEN CPU PhysX、Vulkan 三相机及官方成功条件 | 本机 Windows 六项原生回归与一项真实主 Worker / Agent 集成通过；覆盖视频解码、回放及官方判据拒绝假完成。使用独立 Python 3.11，详见[ManiSkill 指南](maniskill.md)。 |
@@ -22,6 +23,8 @@ EmbodiWorks 在同一个工作台选择后端，复用模型接入、实验记�
 现有 MuJoCo 机器人与场景不会自动转换到其他引擎。加载后以当前后端返回的模型、任务和能力为准；不适用的控制会禁用或明确拒绝。ALFWorld / AI2-THOR 使用原生离散动作，机械臂 TCP、关节动作块及连续 VLA 接口不适用于它们。
 
 LIBERO 是基于 robosuite / MuJoCo 的任务套件；ManiSkill 使用 SAPIEN 的物理与渲染；Isaac Lab 是可选择物理运行栈的框架。这些层次分别保存在实验身份中，不把任务套件都当作独立物理引擎。
+
+RoboCasa365 基于 robosuite / MuJoCo，环境身份单独记录其任务判据和版本。RoboDojo 则在“官方基准”页管理，由独立的官方 Isaac Sim 客户端运行，使用 XPolicyLab WebSocket 策略；本机未配置完整 Linux GPU 运行时也可导出计划、导入终局结果和视频。详见[RoboDojo 指南](robodojo.md)。
 
 ## Genesis 独立环境
 

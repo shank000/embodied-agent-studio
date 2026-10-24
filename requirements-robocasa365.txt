@@ -1,0 +1,17 @@
+# Independent Python 3.11 runtime. The installer clones official fixed sources:
+# robocasa 2ce1aecdd76e29b52d32fdb160436c5a3e230b07 (1.0.1)
+# robosuite 5ce6643f3092639d08f7b0f90ed1c6a84f50552c (master / 1.5.2)
+# Upstream requires master: PyPI robosuite 1.5.2 pins an incompatible mink.
+# Install the two CPU Torch wheels first from the official PyTorch CPU index;
+# tools/setup-robocasa365.py performs that step without changing global indexes.
+-e ./vendor/robosuite365
+-e ./vendor/robocasa365
+torch==2.7.1+cpu; sys_platform != 'darwin'
+torchvision==0.22.1+cpu; sys_platform != 'darwin'
+torch==2.7.1; sys_platform == 'darwin'
+torchvision==0.22.1; sys_platform == 'darwin'
+numpy==2.2.5
+numba==0.61.2
+scipy==1.15.3
+mujoco==3.3.1
+pydantic>=2.10,<3

@@ -51,7 +51,13 @@
 
 上面是协议格式示例，不是预训练策略。**关节名称必须从当前请求的 actuators 原样取出且顺序完全一致**，不得硬编码另一机器人名称。每帧维度必须为当前执行器数：Panda 8、SO-101 6、RM65 + GaiaHand 21。只接受有限数值，1–50 帧，帧间隔 0.02–0.5 秒。
 
-目标按执行器范围和 2 rad/s 的目标变化速率限幅；Panda 夹爪为 255 控制量/s。限幅项数及实际下发目标写入日志。MuJoCo 通过执行器跟踪目标，不改写实际关节状态。长动作块仍受试验的仿真时间上限约束。
+上述关节单位与限幅规则适用于 MuJoCo 主后端：目标按执行器范围和 2 rad/s 的目标变化速率限幅；Panda 夹爪为 255 控制量/s。限幅项数及实际下发目标写入日志。MuJoCo 通过执行器跟踪目标，不改写实际关节状态。长动作块仍受试验的仿真时间上限约束。
+
+### RoboCasa365 原生移动控制
+
+RoboCasa365 沿用 `actuator_targets` 响应结构，`joint_names` 必须使用观察中的 12 个原生命令名称，依次为 `arm_dx, arm_dy, arm_dz, arm_drx, arm_dry, arm_drz, gripper_command, base_vx_command, base_vy_command, base_yaw_command, torso_command, base_mode`。这是 `[-1,1]` 归一化控制量，**不是关节角**；控制器执行官方缩放，超范围请求会被拒绝。`dt_s` 为 0.05–0.5 秒，须为 0.05 秒的整数倍。
+
+观察中的 `native_action_space` 描述该合同，`actuators.unit` 为 `normalized_command`，未提供的 `actual` / `position` 保留空值。实际机械臂关节、底盘位姿与躯干状态在 `joints`、`mobile_base`、`torso` 中分别记录。工作台视觉 Agent 当前使用固定底盘的 TCP 控制；导航及完整移动操作使用原生策略或手动命令。详见[RoboCasa365 指南](docs/robocasa365.md)。
 
 ## 末端动作响应
 

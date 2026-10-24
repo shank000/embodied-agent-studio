@@ -137,7 +137,7 @@ function renderRegistry(){
 }
 function renderLocks(){
   if(!context)return;
-  const state=currentState,locked=!!(state.ready===false||state.backend_switching||state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active);
+  const state=currentState,locked=!!(state.ready===false||state.backend_switching||state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active||state.benchmark?.active);
   const discrete=['text','discrete'].includes(state.backend?.action_mode);
   let note=$('#rsi-environment-note');if(!note){note=document.createElement('p');note.id='rsi-environment-note';note.className='research-note';$('#rsi-run-message').after(note);}note.hidden=!discrete;note.textContent=discrete?'此方法组合与配对评测使用连续机械臂动作协议。当前环境请使用工作台 Agent 或原生命令；历史实验仍可查看与回放。':'';
   $('#rsi-run-start').disabled=busy||locked||!methods.length||discrete;$('#rsi-run-once').disabled=busy||locked||!methods.length||discrete;$('#rsi-run-stop').disabled=stopping||!state.research?.active;

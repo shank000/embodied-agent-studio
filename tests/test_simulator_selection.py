@@ -37,7 +37,7 @@ def image_bytes(color='green'):
 class SelectionApiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.controllers = {}
-        for name in ('agent', 'policy', 'comparison', 'composition', 'research', 'repair'):
+        for name in ('agent', 'policy', 'comparison', 'composition', 'research', 'repair', 'benchmark'):
             state = {'active': False}
             controller = SimpleNamespace(state=state, snapshot=lambda state=state: state,
                                          reset_observation=Mock())

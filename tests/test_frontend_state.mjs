@@ -32,7 +32,7 @@ class Element {
 
 function moduleContext(file,extra={}) {
   const nodes=new Map(),element=id=>{if(!nodes.has(id))nodes.set(id,new Element('div',id));return nodes.get(id);};
-  const scope=vm.createContext({console,URLSearchParams,...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
+  const scope=vm.createContext({console,URLSearchParams,window:{addEventListener(){}},...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
   const code=readFileSync(new URL('../src/'+file,import.meta.url),'utf8').replace(/^import .*;\s*$/gm,'').replace(/\bexport /g,'');
   vm.runInContext(code,scope);
   return {scope,element,run:code=>vm.runInContext(code,scope)};
@@ -314,4 +314,27 @@ test('composition rejection history renders without an action or selected candid
   assert.match(html,/第 4 轮 · 完成声明被环境拒绝/);
   assert.match(html,/环境尚未验收，请重新规划。/);
   assert.doesNotMatch(html,/undefined|NaN|completion_rejected|位置误差|姿态误差/);
+});
+
+test('normalized mobile commands retain native units and missing measurements do not become angles',()=>{
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
+  const code=source.slice(source.indexOf('const angular='),source.indexOf('function buildJoints()'));
+  const scope=vm.createContext({});vm.runInContext(code,scope);
+  assert.equal(vm.runInContext("targetText({unit:'normalized_command'},.5)",scope),'0.50');
+  assert.equal(vm.runInContext("fromDisplay({unit:'normalized_command'},.5)",scope),.5);
+  assert.equal(vm.runInContext("actualText({unit:'normalized_command',actual:null})",scope),'—');
+  assert.equal(vm.runInContext("targetText({unit:'rad'},Math.PI/2)",scope),'90.0°');
+  assert.equal(vm.runInContext("targetText({unit:'command'},255)",scope),'100.0%');
+});
+
+test('external benchmark archives label archive time and keep external inference usage missing',()=>{
+  const {scope,element,run}=resultsContext();
+  scope.analysis={run_id:'fixture',kind:'benchmark',record_origin:'external_import',status:'imported',elapsed_s:.01,
+    rounds:[],total:{calls:null,total_tokens:null,inference_s:null},benchmark:{summary:{eval_time:2,success_rate:.5,score:62.5},
+    coverage:{scope:'partial'},denominator:{native_valid_completed:2}}};
+  run('renderResultAnalysis(analysis,{},[])');
+  assert.match(element('result-summary').innerHTML,/本次归档耗时/);
+  assert.doesNotMatch(element('result-summary').innerHTML,/完整墙钟/);
+  assert.match(element('result-native-benchmark').textContent,/原实验墙钟.*未上报/);
+  run('clearResult()');assert.equal(element('result-native-benchmark').hidden,true);
 });

@@ -35,6 +35,7 @@ from .comparison import ComparisonController, ComparisonStart
 from .scenes import SCENES, TASKS
 from .runlog import list_runs, run_folder
 from .analysis import analyze_run, analyze_experiments
+from .robodojo import RoboDojoController, EvaluationPlan, ResultImport, plan as benchmark_plan, import_result
 from .run_management import rename_run, delete_run, restore_run, batch_delete_runs, RunInUseError
 from .model_capabilities import discover_model_capabilities
 from .pricing import catalog as price_catalog
@@ -392,6 +393,7 @@ def resolve_research_method(method_id):
 composition = CompositionController(worker, method_resolver=resolve_research_method)
 research = ResearchController(worker, composition)
 repair = RepairController()
+benchmark = RoboDojoController()
 
 
 def repair_secrets():
@@ -405,10 +407,11 @@ for controller in (agent, policy, composition): controller.recovery = recovery
 
 
 def research_active():
-    return composition.snapshot().get('active') or research.state.get('active')
+    return composition.snapshot().get('active') or research.state.get('active') or benchmark.state.get('active')
 
 
 async def stop_research():
+    await benchmark.stop()
     await research.stop()
     await composition.stop()
 
@@ -456,6 +459,7 @@ async def state():
     snapshot['research'] = composition.snapshot()
     snapshot['experiment'] = research.snapshot()
     snapshot['repair'] = repair.snapshot()
+    snapshot['benchmark'] = benchmark.snapshot()
     snapshot['registry'] = read_registry()
     snapshot['backend_switching'] = worker.switching
     return snapshot
@@ -463,7 +467,7 @@ async def state():
 
 class SimulatorSelection(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    engine_id: Literal['mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'ai2thor', 'isaac', 'isaacsim']
+    engine_id: Literal['mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365']
 
 
 @app.get('/api/simulators')
@@ -911,6 +915,44 @@ def ensure_research_idle():
     if worker.switching: raise HTTPException(409, '正在切换仿真后端，请等待加载完成。')
     if agent.state['active'] or policy.state['active'] or comparison.state['active'] or research_active():
         raise HTTPException(409, '请先停止正在运行的控制或实验任务。')
+
+
+@app.get('/api/benchmarks/robodojo')
+async def benchmark_info():
+    return await asyncio.to_thread(benchmark.info)
+
+
+@app.post('/api/benchmarks/robodojo/plan')
+async def prepare_benchmark(body: EvaluationPlan, request: Request):
+    local_request(request)
+    return await asyncio.to_thread(benchmark_plan, body)
+
+
+@app.post('/api/benchmarks/robodojo/start')
+async def start_benchmark(body: EvaluationPlan, request: Request):
+    local_request(request)
+    async with agent.lock:
+        ensure_research_idle()
+        if repair.snapshot().get('active'): raise HTTPException(409, '请先等待故障修复结束。')
+        with worker.lock:
+            if worker.snapshot.get('task', {}).get('status') in ('running', 'settling'):
+                raise HTTPException(409, '请先停止当前机械臂动作。')
+        try: return await benchmark.start(body.model_dump())
+        except (ValueError, OSError) as exc: raise research_error(exc)
+
+
+@app.post('/api/benchmarks/robodojo/stop')
+async def stop_benchmark(request: Request):
+    local_request(request)
+    await benchmark.stop()
+    return benchmark.snapshot()
+
+
+@app.post('/api/benchmarks/robodojo/import')
+async def import_benchmark(body: ResultImport, request: Request):
+    local_request(request)
+    try: return await asyncio.to_thread(import_result, body)
+    except (ValueError, OSError) as exc: raise research_error(exc)
 
 
 @app.get('/api/research/defaults')
