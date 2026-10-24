@@ -52,7 +52,10 @@ class RoboDojoSetupTests(unittest.TestCase):
                 result = setup.prepare_source(source)
             self.assertTrue(result['source_prepared'])
             self.assertEqual(result['commands'], [])
-            git.assert_called_once_with('-C', source, 'ls-tree', setup.REVISION, '--', 'XPolicyLab')
+            # macOS temporary paths may use /var -> /private/var aliases.
+            # The installer intentionally validates and uses the real root.
+            self.assertEqual(result['source_root'], str(source.resolve()))
+            git.assert_called_once_with('-C', source.resolve(), 'ls-tree', setup.REVISION, '--', 'XPolicyLab')
 
     def test_tracked_source_edits_stop_without_reset_or_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
