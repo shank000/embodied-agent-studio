@@ -63,8 +63,8 @@ function renderCatalog(){
 function renderReadiness(){
   const readiness=snapshot?.readiness||{},key=JSON.stringify([readiness,reachable]);if(key===lastReadiness)return;lastReadiness=key;
   const ready=reachable&&readiness.ready===true;
-  nodes.readinessTitle.textContent=ready?'官方运行条件已就绪':'运行环境待接入';
-  nodes.readinessMessage.textContent=!reachable?'无法读取工作台服务；目录与检查项可能是上次缓存，请刷新重试。':readiness.message||'可以先准备评测计划、导入已有官方结果；当前未启动仿真。';
+  nodes.readinessTitle.textContent=ready?'静态依赖检查通过':'运行环境待接入';
+  nodes.readinessMessage.textContent=!reachable?'无法读取工作台服务；目录与检查项可能是上次缓存，请刷新重试。':ready?'原生加载与任务结果以实际运行日志为准。':readiness.message||'可以先准备评测计划、导入已有官方结果；当前未启动仿真。';
   nodes.readiness.classList.toggle('ready',ready);nodes.checks.replaceChildren();
   for(const check of Array.isArray(readiness.checks)?readiness.checks:[]){
     const row=element('li','benchmark-check'),status=String(check.status??'unknown');

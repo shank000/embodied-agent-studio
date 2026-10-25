@@ -52,7 +52,7 @@ class ComparisonController:
     async def start(self, request):
         if self.state['active']: raise ValueError('对比实验正在运行。')
         with self.worker.lock: engine = (self.worker.snapshot.get('backend') or {}).get('engine_id', 'mujoco')
-        if engine in ('alfworld','ai2thor'):
+        if engine in ('alfworld','alfworld_thor','ai2thor'):
             raise ValueError('当前方法对比使用连续机械臂动作协议；文字和离散环境请先使用 Agent 单次实验。')
         if engine != request.engine_id: raise ValueError('请先切换到本次对比指定的仿真后端。')
         for method in request.methods:

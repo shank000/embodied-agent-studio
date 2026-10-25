@@ -56,16 +56,17 @@ function renderCatalog(){
 
 function updateControls(){
   const select=$('#simulator-select'),backend=catalog?.backends.find(item=>item.id===select.value);
-  const blocked=isRunning(lastState),pending=loading||refreshing;
+  const blocked=isRunning(lastState),switching=loading||!!lastState?.backend_switching,pending=switching||refreshing;
   select.disabled=pending||blocked||!catalog?.backends.length;
   $('#simulator-load').disabled=pending||blocked||!canLoad(backend)||(backend.id===activeId&&!unavailable());
   $('#simulator-refresh').disabled=pending;
   $('#simulator-card').setAttribute('aria-busy',String(pending));
-  $('#simulator-load').textContent=loading?'正在加载…':backend?.id===activeId?(unavailable()?'重新加载环境':'当前环境'):'加载环境';
+  $('#simulator-load').textContent=switching?'正在加载…':backend?.id===activeId?(unavailable()?'重新加载环境':'当前环境'):'加载环境';
   const current=catalog?.backends.find(item=>item.id===activeId);
   $('#simulator-current').textContent=current?`${current.name||current.id}${current.version?` ${current.version}`:''}`:activeId||'等待读取';
   $('#simulator-description').textContent=backend?asText(backend.description):'从服务读取已适配环境及安装状态。';
   $('#simulator-lock').hidden=!blocked;
+  $('#simulator-lock').textContent=switching?'正在切换环境，请等待加载完成。':'任务执行中，停止后可切换环境。';
 }
 
 async function refreshCatalog({announce=true}={}){
@@ -85,6 +86,7 @@ async function refreshCatalog({announce=true}={}){
 
 async function selectSimulator(){
   if(loading||refreshing)return;
+  if(lastState?.backend_switching){notice('正在切换环境，请等待加载完成。');return;}
   if(isRunning(lastState)){notice('当前任务仍在执行，请停止任务后切换仿真环境。',true);return;}
   const target=$('#simulator-select').value,backend=catalog?.backends.find(item=>item.id===target);
   if(!canLoad(backend)||(target===activeId&&!unavailable()))return;

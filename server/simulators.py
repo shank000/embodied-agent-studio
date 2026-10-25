@@ -12,6 +12,7 @@ EVALUATORS = {'mujoco': ('mujoco_privileged_state', 'task-evaluation-v2'),
               'maniskill': ('maniskill_official_evaluate', 'maniskill-task-v1'),
               'libero': ('libero_bddl_state', 'libero-bddl-v1'),
               'alfworld': ('alfworld_native_task', 'alfworld-task-v1'),
+              'alfworld_thor': ('alfworld_thor_native_task', 'alfworld-thor-task-v1'),
               'ai2thor': ('ai2thor_native_task', 'ai2thor-task-v1'),
               'isaac': ('isaaclab_newton_state', 'isaaclab-task-v1'),
               'isaacsim': ('isaacsim_privileged_state', 'isaaclab-task-v1'),
@@ -21,7 +22,8 @@ RUNTIMES = {
     'genesis': ('genesis_world', 'Genesis World', 'genesis_backend', 'GenesisSimulation', 'https://genesis-world.readthedocs.io/'),
     'maniskill': ('mani_skill', 'ManiSkill / SAPIEN', 'maniskill_backend', 'ManiSkillSimulation', 'https://maniskill.readthedocs.io/'),
     'libero': ('libero', 'LIBERO', 'libero_backend', 'LiberoSimulation', 'https://github.com/Lifelong-Robot-Learning/LIBERO'),
-    'alfworld': ('alfworld', 'ALFWorld', 'alfworld_backend', 'ALFWorldSimulation', 'https://github.com/alfworld/alfworld'),
+    'alfworld': ('alfworld', 'ALFWorld · 文字', 'alfworld_backend', 'ALFWorldSimulation', 'https://github.com/alfworld/alfworld'),
+    'alfworld_thor': ('alfworld', 'ALFWorld · 视觉', 'alfworld_thor_backend', 'ALFWorldThorSimulation', 'https://github.com/alfworld/alfworld'),
     'ai2thor': ('ai2thor', 'AI2-THOR', 'thor_backend', 'ThorSimulation', 'https://ai2thor.allenai.org/'),
     'isaac': ('isaaclab', 'Isaac Lab / Newton', 'isaac_backend', 'IsaacSimulation', 'https://isaac-sim.github.io/IsaacLab/'),
     'isaacsim': ('isaacsim', 'Isaac Sim', 'isaac_backend', 'IsaacSimSimulation', 'https://docs.isaacsim.omniverse.nvidia.com/'),
@@ -90,10 +92,10 @@ def backend_identity(engine_id='mujoco', version=None):
         import mujoco
         version = mujoco.__version__
     source, evaluator = EVALUATORS[engine_id]
-    discrete = engine_id in ('alfworld', 'ai2thor')
+    discrete = engine_id in ('alfworld', 'alfworld_thor', 'ai2thor')
     return {'engine_id': engine_id, 'engine_version': version,
             'evaluator_source': source, 'evaluator_version': evaluator,
-            'state_schema': 'ai2thor-integration-v2' if engine_id == 'ai2thor' else f'{engine_id}-integration-v1',
+            'state_schema': {'ai2thor': 'ai2thor-integration-v2', 'alfworld_thor': 'alfworld-thor-lowlevel-v1'}.get(engine_id, f'{engine_id}-integration-v1'),
             'control_frame': None if discrete else 'world_z_up_m_wxyz',
             'action_mode': ('text' if engine_id == 'alfworld' else 'discrete') if discrete else 'tcp_pose',
             'capabilities': (['load','scene','reset','pause','stop','instruction','environment_action','observe','verify_task',
@@ -140,6 +142,7 @@ def catalog(active='mujoco', session_id=None):
         'maniskill': ('官方 PickCube / PushCube；SAPIEN/PhysX、原生图像和官方成功判据。', '独立 .venv-maniskill；Windows CPU 物理 + Vulkan，Linux 可用 GPU。'),
         'libero': ('官方五套任务、Panda、robosuite 控制器与 BDDL 成功谓词。', '独立 .venv-libero，准备官方任务、初态与场景资产，无需演示训练集。'),
         'alfworld': ('官方 ALFWorld / TextWorld 家务任务；文字观察与可执行命令。', 'Linux/macOS；本机 Windows 通过已配置的 Ubuntu WSL 运行。文字画面不冒充三维相机。'),
+        'alfworld_thor': ('官方 ALFWorld 视觉任务；THOR 三维房间、第一人称画面与原生任务判据。', '独立 Python 3.11 与官方 AI2-THOR 2.1；Windows 使用 WSLg。相同种子对应文字模式的同一官方回合。'),
         'ai2thor': ('官方 Unity 房间、视觉导航与物体交互，依据 Unity 元数据验收。', '本机通过 Ubuntu WSLg 运行官方 Linux Unity；首次加载需下载官方构建。'),
         'isaac': ('Isaac Lab / Newton 机器人场景、原生控制与相机；独立运行无需完整 Isaac Sim。', '独立 Python 3.12 .venv-isaac；CUDA 与显卡驱动须匹配所选物理和相机。'),
         'isaacsim': ('Isaac Lab 的 Isaac Sim 物理与渲染路径；与 Newton 单独记录。', '独立 .venv-isaacsim；完整 Isaac Sim 需满足官方硬件条件并手动完成 EULA。'),

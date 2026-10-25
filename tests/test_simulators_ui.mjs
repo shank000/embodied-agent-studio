@@ -80,6 +80,27 @@ test('loading is single flight and changes active engine only after a successful
   assert.equal(element('simulator-load').disabled,true);
 });
 
+test('native backend loading is shown as a pending switch instead of a running experiment',async()=>{
+  const {element,calls,run}=setup([{body:catalog()}]);
+  await run('initSimulators(callbacks)');
+  element('simulator-select').value='genesis';
+  run("renderSimulator({backend:{engine_id:'mujoco'},backend_switching:true})");
+  assert.equal(element('simulator-select').disabled,true);
+  assert.equal(element('simulator-refresh').disabled,true);
+  assert.equal(element('simulator-card').attributes['aria-busy'],'true');
+  assert.equal(element('simulator-load').textContent,'正在加载…');
+  assert.equal(element('simulator-lock').hidden,false);
+  assert.equal(element('simulator-lock').textContent,'正在切换环境，请等待加载完成。');
+  await element('simulator-load').listeners.click();
+  assert.equal(calls.length,1);
+  assert.equal(element('simulator-message').textContent,'正在切换环境，请等待加载完成。');
+  run("renderSimulator({backend:{engine_id:'mujoco'},backend_switching:false})");
+  assert.equal(element('simulator-select').disabled,false);
+  assert.equal(element('simulator-refresh').disabled,false);
+  assert.equal(element('simulator-lock').hidden,true);
+  assert.equal(element('simulator-card').attributes['aria-busy'],'false');
+});
+
 test('a rejected switch preserves active engine and exposes the server reason',async()=>{
   const {element,run}=setup([{body:catalog()},{status:409,body:{detail:'An experiment started in another tab'}}]);
   await run('initSimulators(callbacks)');

@@ -266,7 +266,52 @@ class NativeThorTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): cls.sim.close()
 
-    def setUp(self): self.sim.reset()
+    def setUp(self):
+        self.sim.command({'action': 'scene', 'scene_id': 'FloorPlan1',
+                          'task_id': 'thor_open_object', 'seed': 42})
+
+    def test_all_public_rooms_and_tasks_initialize_native_rgb_and_unfinished_goal(self):
+        import base64
+        import io
+        from PIL import Image
+
+        sim = self.sim
+        attributes = {'thor_open_object': ('openable', 'isOpen'),
+                      'thor_pickup_object': ('pickupable', 'isPickedUp'),
+                      'thor_toggle_object': ('toggleable', 'isToggled')}
+        for scene_id, scene in sim.scenes.items():
+            self.assertEqual(set(scene['tasks']), set(attributes))
+            for task_id in scene['tasks']:
+                with self.subTest(scene=scene_id, task=task_id):
+                    sim.command({'action': 'scene', 'scene_id': scene_id,
+                                 'task_id': task_id, 'seed': 42})
+                    state, observation = sim.state(), sim.observe()
+                    self.assertEqual(state['scene_id'], scene_id)
+                    self.assertEqual(state['evaluation']['task_id'], task_id)
+                    self.assertEqual((state['time'], state['steps']), (0., 0))
+                    metadata = sim.native_event.metadata
+                    self.assertTrue(metadata['lastActionSuccess'], metadata.get('errorMessage'))
+                    target = next(obj for obj in metadata['objects'] if obj['objectId'] == sim.target_id)
+                    applicable, completed = attributes[task_id]
+                    self.assertTrue(target[applicable], target)
+                    self.assertFalse(target[completed], target)
+                    self.assertNotIn(sim.target_id, [obj['objectId'] for obj in metadata['inventoryObjects']])
+                    evaluation = sim.verify_task(sim.generation)
+                    self.assertEqual(evaluation['source'], 'ai2thor_native_task')
+                    self.assertFalse(evaluation['success'])
+                    self.assertFalse(evaluation['ever_success'])
+                    frame = sim.render_rgb()
+                    self.assertEqual(frame.shape, (480, 640, 3))
+                    self.assertEqual(frame.dtype.name, 'uint8')
+                    self.assertGreater(float(frame.std()), 5., 'Native Unity view must not be blank')
+                    self.assertTrue((frame == sim.controller.last_event.frame).all())
+                    self.assertEqual([camera['name'] for camera in observation['cameras']], ['front'])
+                    camera = observation['cameras'][0]
+                    self.assertEqual(camera['source'], 'ai2thor.Event.frame')
+                    self.assertEqual((camera['width'], camera['height']), (640, 480))
+                    with Image.open(io.BytesIO(base64.b64decode(camera['image_base64']))) as image:
+                        self.assertEqual((image.mode, image.size), ('RGB', (640, 480)))
+                        image.load()
 
     def test_native_camera_and_one_action_transition(self):
         before = self.sim.render_rgb()
@@ -293,24 +338,46 @@ class NativeThorTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.sim.execute('{"action":"OpenObject","objectId":"missing"}')
         self.assertEqual(self.sim.time, 0.)
 
-    def test_real_open_action_changes_native_success(self):
+    def _assert_real_interaction_changes_native_success(self, task_id, action_name, state_flag):
         # Positioning is a privileged test fixture, never exposed as an actor
-        # action. The actual task transition still uses normal OpenObject.
+        # action. The actual goal transition uses the public action interface
+        # with no teleport, forceAction, or direct mutation of object state.
         sim = self.sim
+        sim.command({'action': 'scene', 'scene_id': 'FloorPlan1', 'task_id': task_id, 'seed': 42})
         target_handle = sim._object_handle(sim.target_id)
         if target_handle not in {obj['objectId'] for obj in sim._visible_objects()}:
             event = sim.controller.step(action='GetInteractablePoses', objectId=sim.target_id,
                                         horizons=[0, 30, 60], rotations=[0, 90, 180, 270])
+            self.assertTrue(event.metadata['lastActionSuccess'], event.metadata.get('errorMessage'))
             poses = event.metadata['actionReturn']
-            self.assertTrue(poses)
+            self.assertTrue(poses, f'No native interactable pose for {sim.target_type}')
             sim.native_event = sim.controller.step(action='TeleportFull', **poses[0])
-            self.assertTrue(sim.native_event.metadata['lastActionSuccess'])
+            self.assertTrue(sim.native_event.metadata['lastActionSuccess'], sim.native_event.metadata.get('errorMessage'))
             sim._update_observation()
-        action = json.dumps({'action': 'OpenObject', 'objectId': target_handle})
+        action = json.dumps({'action': action_name, 'objectId': target_handle})
+        self.assertIn(action, sim.admissible_commands())
         self.assertFalse(sim.verify_task(sim.generation)['success'])
-        result = sim.execute(action)
+        self.assertEqual((sim.time, sim.physics_steps, sim.actions), (0., 0, []))
+        result = sim.command({'action': 'environment_action', 'generation': sim.generation,
+                              'environment_action': action})
         self.assertTrue(result['last_action_success'], result.get('error'))
+        self.assertEqual(result['step_count'], 1)
+        target = next(obj for obj in sim.native_event.metadata['objects'] if obj['objectId'] == sim.target_id)
+        self.assertTrue(target[state_flag], target)
+        if task_id == 'thor_pickup_object':
+            self.assertIn(sim.target_id, [obj['objectId'] for obj in sim.native_event.metadata['inventoryObjects']])
         self.assertTrue(sim.verify_task(sim.generation)['success'])
+        self.assertEqual(sim.task['status'], 'completed')
+        self.assertEqual(sim.actions, [action])
+
+    def test_real_open_action_changes_native_success(self):
+        self._assert_real_interaction_changes_native_success('thor_open_object', 'OpenObject', 'isOpen')
+
+    def test_real_pickup_action_changes_native_success(self):
+        self._assert_real_interaction_changes_native_success('thor_pickup_object', 'PickupObject', 'isPickedUp')
+
+    def test_real_toggle_action_changes_native_success(self):
+        self._assert_real_interaction_changes_native_success('thor_toggle_object', 'ToggleObjectOn', 'isToggled')
 
     def test_native_navigation_checkpoint_reexecutes_and_validates(self):
         self.sim.execute('RotateRight')

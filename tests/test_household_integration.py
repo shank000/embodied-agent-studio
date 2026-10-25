@@ -208,4 +208,58 @@ class ThorIntegrationTests(HouseholdWorkerCase):
         self.assertIsNone(worker.failure)
 
 
+@unittest.skipUnless(os.getenv('EMBODI_TEST_ALFWORLD_THOR_WORKBENCH') == '1', 'Opt-in official ALFWorld visual Worker/Agent acceptance')
+class ALFWorldVisualIntegrationTests(HouseholdWorkerCase):
+    async def test_visual_agent_records_native_action_rejects_false_done_and_replays(self):
+        worker = await self.open_worker('alfworld_thor')
+        agent = AgentController(worker)
+        self.addAsyncCleanup(agent.stop)
+        agent.config = AgentConfig(provider='compatible', model='local-visual-fixture',
+            base_url='http://127.0.0.1:9/v1', api_key='fixture-only', max_rounds=2)
+        images = []
+
+        async def inference(config, prompt, cameras, **options):
+            observation = json.loads(prompt)['observation']
+            self.assertIs(options.get('response_type'), EnvironmentAction)
+            self.assertEqual(observation['backend']['engine_id'], 'alfworld_thor')
+            self.assertEqual([camera['name'] for camera in cameras], ['front'])
+            self.assertIsNone(observation['tcp'])
+            public = json.dumps(observation)
+            for hidden in ('pddl_params', 'object_poses', 'low_actions', 'high_pddl', 'evaluation', 'goal_conditions_met'):
+                self.assertNotIn(hidden, public)
+            images.append(cameras[0]['image_base64'])
+            return EnvironmentAction(status='move' if len(images) == 1 else 'done',
+                action='RotateRight', explanation='Fixed local test, not model performance.'), None
+
+        with tempfile.TemporaryDirectory(prefix='alfworld-visual-agent-') as temporary:
+            with patch('server.runlog.RUNS', Path(temporary)), patch('server.agent.api_action', inference):
+                await agent.start(AgentStart(task='完成当前官方 ALFWorld 视觉任务。', max_environment_steps=4,
+                                            evaluator_stop=False, record_video=bool(find_ffmpeg())))
+                await asyncio.wait_for(agent.task, 120)
+            self.assertEqual(agent.state['status'], 'limit', agent.state)
+            self.assertEqual(len(images), 2)
+            self.assertNotEqual(images[0], images[1])
+            folder = Path(temporary)/agent.state['run_id']
+            summary = json.loads((folder/'summary.json').read_text(encoding='utf-8'))
+            self.assertEqual(summary['backend']['engine_id'], 'alfworld_thor')
+            self.assertFalse(summary['metrics']['success'])
+            self.assertEqual(summary['metrics']['environment_steps'], 1)
+            self.assertIsNone(summary['metrics']['sim_time_s'])
+            self.assertEqual(summary['artifacts']['observation_count'], 2)
+            self.assert_saved_video(summary, folder)
+            events = [json.loads(line) for line in (folder/'events.jsonl').read_text(encoding='utf-8').splitlines()]
+            verification = [item['data'] for item in events if item['event'] == 'completion_verification']
+            self.assertEqual(len(verification), 1)
+            self.assertFalse(verification[0]['accepted'])
+            self.assertEqual(verification[0]['evaluation']['source'], 'alfworld_thor_native_task')
+            frame = json.loads((folder/'trajectory.jsonl').read_text(encoding='utf-8').splitlines()[-1])
+            self.assertEqual(frame['actions'], ['RotateRight'])
+            await worker.execute({'action':'environment_action','generation':frame['generation'], 'environment_action':'RotateLeft'})
+            replay = await worker.execute({'action':'replay_frame','frame':frame})
+            self.assertEqual(replay['restore_mode'], 'native_action_replay')
+            self.assertEqual((await worker.execute({'action':'observe'}))['environment'], frame['environment'])
+        await worker.execute({'action':'backend_select','engine_id':'mujoco'})
+        self.assertIsNone(worker.failure)
+
+
 if __name__ == '__main__': unittest.main()

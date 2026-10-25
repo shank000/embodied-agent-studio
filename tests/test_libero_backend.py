@@ -36,7 +36,37 @@ class LiberoNativeTests(unittest.TestCase):
         cls.sim.close()
 
     def setUp(self):
-        self.sim.command({'action': 'reset'})
+        self.sim.command({'action': 'scene', 'scene_id': 'libero_goal', 'task_id': 'libero_goal:0', 'seed': 42})
+
+    def test_all_public_suites_load_native_frames_and_execute_from_official_initial_state(self):
+        sim = self.sim
+        for suite in TASK_MAP:
+            with self.subTest(suite=suite):
+                sim.command({'action': 'scene', 'scene_id': suite, 'task_id': f'{suite}:0', 'seed': 42})
+                initial = sim.checkpoint()['state']
+                observation = sim.observe()
+                self.assertEqual(sim.state()['scene_id'], suite)
+                self.assertEqual(sim.state()['evaluation']['task_id'], f'{suite}:0')
+                self.assertEqual([camera['name'] for camera in observation['cameras']], ['front', 'side', 'wrist'])
+                self.assertEqual(len({camera['image_base64'] for camera in observation['cameras']}), 3)
+                for camera in observation['cameras']:
+                    with Image.open(io.BytesIO(base64.b64decode(camera['image_base64']))) as image:
+                        self.assertEqual(image.size, (640, 426))
+                        self.assertGreater(np.asarray(image).std(), 10.)
+                with Image.open(io.BytesIO(sim.render())) as image:
+                    self.assertEqual(image.size, (960, 640))
+                    self.assertGreater(np.asarray(image).std(), 10.)
+                before = float(sim.sim.data.qpos[sim.robot._ref_joint_pos_indexes[0]])
+                sim.command({'action': 'control', 'index': 0, 'value': before+.04})
+                for _ in range(100):
+                    sim.step()
+                    if sim.task['status'] not in ('running', 'settling'): break
+                self.assertEqual(sim.task['status'], 'complete', sim.task)
+                self.assertGreater(float(sim.sim.data.qpos[sim.robot._ref_joint_pos_indexes[0]])-before, .01)
+                sim.command({'action': 'stop'})
+                self.assertEqual(sim.verify_task(sim.generation)['source'], 'libero_bddl_state')
+                sim.command({'action': 'reset'})
+                np.testing.assert_array_equal(sim.checkpoint()['state'], initial)
 
     def test_three_native_cameras_without_privileged_observations(self):
         sim = self.sim

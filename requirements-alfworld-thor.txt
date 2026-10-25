@@ -1,0 +1,12 @@
+# Python 3.11, Linux / WSLg. Official ALFWorld visual tasks use AI2-THOR 2.1.
+# Keep this runtime separate from the workbench's AI2-THOR 5.0 backend.
+alfworld==0.4.2
+textworld[pddl]==1.7.0
+ai2thor==2.1.0
+Flask==2.0.3
+Werkzeug==2.0.3
+Jinja2==3.0.3
+numpy==1.23.5
+networkx==2.8.8
+opencv-python-headless==4.8.1.78
+Pillow>=11,<14

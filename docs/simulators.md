@@ -11,16 +11,17 @@ EmbodiWorks 在同一个工作台选择后端，复用模型接入、实验记�
 | 后端 / 任务套件 | 当前实现 | 本次验收与安装说明 |
 | --- | --- | --- |
 | RoboCasa365 | 官方 65 项原子技能与 300 项复合厨房任务目录；PandaOmron 移动机械臂、原生控制与三相机 | 本机 Windows 的导航、抽屉、柜体抓放与烹饪组合任务样本，以及真实 Worker/Agent/视频回放链路通过；独立 Python 3.11，详见[RoboCasa365 指南](robocasa365.md)。未逐一运行全部 365 任务。 |
-| MuJoCo | Panda、SO-101、RM65 + GaiaHand、双/三 Panda；七类场景、三相机、关节/末端控制及任务评价 | 现有完整主后端。Windows 本机、Linux 渲染和三平台 CI 的各自边界见[安装文档](INSTALL.md)。 |
-| Genesis World | Panda 桌面抬起、放置、末端到达；Genesis 物理、IK、PD 和三相机 | 本机原生 Windows CPU 物理及主 Worker 集成通过；其他系统待实机验收。独立 `.venv-genesis`，安装见下文。 |
+| MuJoCo | Panda、SO-101、RM65 + GaiaHand、双/三 Panda；七类场景、三相机、关节/末端控制及任务评价 | 本轮主后端 27 项回归通过。Windows 本机、Linux 渲染和三平台 CI 的各自边界见[安装文档](INSTALL.md)。 |
+| Genesis World | Panda 桌面抬起、放置、末端到达；Genesis 物理、IK、PD 和三相机 | 本机 Windows CPU 物理的七项原生回归与一项主 Worker 集成通过；其他系统待实机验收。独立 `.venv-genesis`，安装见下文。 |
 | ManiSkill / SAPIEN | 官方 `PickCube-v1` / `PushCube-v1`、Panda；SAPIEN CPU PhysX、Vulkan 三相机及官方成功条件 | 本机 Windows 六项原生回归与一项真实主 Worker / Agent 集成通过；覆盖视频解码、回放及官方判据拒绝假完成。使用独立 Python 3.11，详见[ManiSkill 指南](maniskill.md)。 |
-| LIBERO | 官方五个套件、130 个任务目录；Panda、robosuite 控制器与官方 BDDL 评价 | 本机六项模块回归（五项原生、一项目录）与一项真实主 Worker / Agent 集成通过；任务和初态资产已核对，不将目录数量当作策略求解数量。详见[LIBERO 指南](libero.md)。 |
-| ALFWorld | 六类官方家庭任务；TextWorld/PDDL 文字观察与逐轮命令 | 本机 Ubuntu WSL 运行，六类任务正例及完整 Agent/记录闭环通过。预览是文字排版，**没有相机**。详见[家庭环境指南](household-environments.md)。 |
-| AI2-THOR | 官方 Unity 房间、第一人称 RGB、导航和物体交互；按原生物体元数据验收 | 本机 Ubuntu WSLg 的真实 SDK 与主 Worker 桥接通过；没有虚构侧视/腕部相机。逐房间和任务的验收边界见[家庭环境指南](household-environments.md)。 |
+| LIBERO | 官方五个套件、130 个任务目录；Panda、robosuite 控制器与官方 BDDL 评价 | 本机七项模块回归（六项原生、一项目录）与一项真实主 Worker / Agent 集成通过；新增覆盖每个套件第 0 项任务的初态、画面与动作，不代表求解全部 130 项任务。详见[LIBERO 指南](libero.md)。 |
+| ALFWorld · 文字 (`alfworld`) | 六类官方家庭任务；TextWorld/PDDL 文字观察与逐轮命令 | 本机 Ubuntu WSL 的四项原生、十项契约和两项 Worker / Agent 集成通过，含六类任务官方解法正例；没有相机。详见[家庭环境指南](household-environments.md)。 |
+| ALFWorld · 视觉 (`alfworld_thor`) | 对应官方 ALFRED 回合、Unity 第一人称 RGB、低层导航与交互，官方 ThorEnv 判定成功 | 独立 Python 3.11 / ALFWorld 0.4.2 / AI2-THOR 2.1；五项原生、十五项契约与一项真实 Worker / Agent 集成通过。覆盖六类任务样本加载、公开动作取放正例、假完成拒绝、真实视频与回放，详见[家庭环境指南](household-environments.md)。 |
+| AI2-THOR | 官方 Unity 房间、第一人称 RGB、导航和物体交互；按原生物体元数据验收 | 本机 Ubuntu WSLg 的七项原生与一项主 Worker 回归通过；覆盖四房间×三任务的加载、RGB 与初始状态，以及开门/拾取/开关的公开动作正例。具体边界见[家庭环境指南](household-environments.md)。 |
 | Isaac Lab / Newton | 独立 Isaac Lab 3.0、Newton MJWarp、官方 IK/驱动、Panda 桌面与三相机 | 本机 Windows RTX 5060 Ti 的八项原生回归、两项接口契约与一项真实主 Worker / Agent 集成通过；覆盖加载后立即观察、官方初态、实际末端到达、物理验收、视频和回放。详见[Isaac 指南](isaac.md)。 |
 | 完整 Isaac Sim | 与 Newton 分开的 Isaac Lab / PhysX / RTX 入口 | 本次未安装或实机验收完整 Sim；需要符合官方资源要求、手动完成许可流程。不会用 Newton 的验证替代完整 Sim 的证明。详见[Isaac 指南](isaac.md)。 |
 
-现有 MuJoCo 机器人与场景不会自动转换到其他引擎。加载后以当前后端返回的模型、任务和能力为准；不适用的控制会禁用或明确拒绝。ALFWorld / AI2-THOR 使用原生离散动作，机械臂 TCP、关节动作块及连续 VLA 接口不适用于它们。
+现有 MuJoCo 机器人与场景不会自动转换到其他引擎。加载后以当前后端返回的模型、任务和能力为准；不适用的控制会禁用或明确拒绝。ALFWorld 两种模式与 AI2-THOR 使用原生离散动作，机械臂 TCP、关节动作块及连续 VLA 接口不适用于它们。ALFWorld 文字和视觉模式可按相同任务族、种子与资产目录选择同一官方回合，但使用不同动作协议与检查点。
 
 环境切换完成后，任务目录、机器人控制和自动生成的任务草稿随当前会话更新，用户编辑过的指令保留。切换前发出的迟到响应不会覆盖新环境。子进程退出、原生环境重建失败或检查点重放失败时，工作台显示真实原因并锁定操作；在“仿真环境”选择原后端并重新加载可建立新会话。
 
@@ -28,7 +29,7 @@ EmbodiWorks 在同一个工作台选择后端，复用模型接入、实验记�
 
 LIBERO 是基于 robosuite / MuJoCo 的任务套件；ManiSkill 使用 SAPIEN 的物理与渲染；Isaac Lab 是可选择物理运行栈的框架。这些层次分别保存在实验身份中，不把任务套件都当作独立物理引擎。
 
-RoboCasa365 基于 robosuite / MuJoCo，环境身份单独记录其任务判据和版本。RoboDojo 则在“官方基准”页管理，由独立的官方 Isaac Sim 客户端运行，使用 XPolicyLab WebSocket 策略；本机未配置完整 Linux GPU 运行时也可导出计划、导入终局结果和视频。详见[RoboDojo 指南](robodojo.md)。
+RoboCasa365 基于 robosuite / MuJoCo，环境身份单独记录其任务判据和版本。RoboDojo 则在“官方基准”页管理，由独立的官方 Isaac Sim 5.1 客户端运行，使用 XPolicyLab WebSocket 策略。**RoboDojo 尚未完成本机原生仿真验收**：当前未配置其完整 Linux GPU 运行时，已提供计划导出和终局结果、视频导入；静态依赖检查通过也不代表原生任务运行成功。详见[RoboDojo 指南](robodojo.md)。
 
 ## Genesis 独立环境
 

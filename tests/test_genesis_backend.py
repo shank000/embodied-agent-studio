@@ -76,19 +76,23 @@ class GenesisBackendTests(unittest.TestCase):
     def test_checkpoint_replay_and_identity_validation(self):
         sim = self.sim
         checkpoint = sim.checkpoint(); frame = sim.trajectory_frame()
+        recorded_steps = sim.state()['steps']
         sim.command({'action': 'control', 'index': 0, 'value': .35})
         for _ in range(40): sim.step()
         sim.restore(checkpoint)
         self.assertEqual(sim.checkpoint()['state'], checkpoint['state'])
         self.assertEqual(sim.ctrl.tolist(), checkpoint['ctrl'])
         self.assertEqual(sim.time, checkpoint['time'])
+        self.assertEqual(sim.state()['steps'], recorded_steps)
         sim.replay_frame(frame)
         self.assertIsNotNone(sim.state()['playback'])
+        self.assertEqual(sim.state()['steps'], recorded_steps)
         branches = []
         for _ in range(2):
             sim.restore(checkpoint)
             sim.command({'action': 'control', 'index': 0, 'value': .2})
             for _ in range(50): sim.step()
+            self.assertEqual(sim.state()['steps'], recorded_steps+50)
             branches.append(sim.trajectory_frame())
         # Native SimState resets constraint caches. We require physically stable
         # paired rollouts at 1e-5 tolerance, not a bit-for-bit warm-start claim.
@@ -99,6 +103,13 @@ class GenesisBackendTests(unittest.TestCase):
             before = sim.checkpoint()
             with self.assertRaises(ValueError): sim.restore(invalid)
             self.assertEqual(sim.checkpoint(), before)
+        sim.reset()
+        initial = sim.checkpoint()
+        for _ in range(3): sim.step()
+        sim.restore(initial)
+        self.assertEqual((sim.state()['steps'], sim.time), (0, 0.))
+        sim.step()
+        self.assertEqual((sim.state()['steps'], sim.time), (1, sim.timestep))
 
     def test_bin_success_requires_full_containment_and_stable_release(self):
         from server.backends.genesis_backend import GenesisTaskEvaluator

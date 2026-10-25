@@ -114,7 +114,7 @@ class Worker:
 
     @staticmethod
     def validate_backend(simulation, state, engine_id):
-        discrete = engine_id in ('alfworld', 'ai2thor')
+        discrete = engine_id in ('alfworld', 'alfworld_thor', 'ai2thor')
         return (state.get('ready') is True
                 and (isinstance(state.get('environment'), dict) if discrete else bool(state.get('actuators')))
                 and state.get('backend', {}).get('engine_id') == engine_id
@@ -469,7 +469,7 @@ async def state():
 
 class SimulatorSelection(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    engine_id: Literal['mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365']
+    engine_id: Literal['mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'alfworld_thor', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365']
 
 
 @app.get('/api/simulators')

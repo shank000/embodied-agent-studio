@@ -19,7 +19,7 @@ class _WindowsWorkspace(PureWindowsPath):
 
 class EnvironmentRegistryTests(unittest.TestCase):
     def test_only_requested_and_previously_integrated_engines_are_registered(self):
-        expected = {'mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365'}
+        expected = {'mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'alfworld_thor', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365'}
         self.assertEqual(set(simulators.EVALUATORS), expected)
         self.assertEqual(set(simulators.RUNTIMES), expected-{'mujoco'})
         for unsupported in ('omnigibson', 'habitat', 'pybullet'):
@@ -43,21 +43,33 @@ class EnvironmentRegistryTests(unittest.TestCase):
         after = {name for name in sys.modules if name.split('.')[0] in sdk_modules}
         self.assertEqual(after, before, 'Host metadata queries must not import native optional SDK packages')
 
-    def test_all_new_catalog_tasks_register_and_load_frozen_official_metadata(self):
+    def test_all_catalog_tasks_validate_and_research_registration_matches_action_support(self):
         with tempfile.TemporaryDirectory(prefix='environment-protocols-') as folder:
             with patch.object(research, 'PROTOCOLS', Path(folder)):
-                for engine in ('maniskill', 'libero', 'alfworld', 'ai2thor', 'isaac', 'isaacsim'):
+                for engine in ('maniskill', 'libero', 'alfworld', 'alfworld_thor', 'ai2thor', 'isaac', 'isaacsim'):
                     models, scenes, tasks = simulators.supported_catalog(engine)
                     seen = set()
                     for scene_id, scene in scenes.items():
                         for task_id in scene['tasks']:
                             with self.subTest(engine=engine, scene=scene_id, task=task_id):
-                                protocol = research.register_protocol({'name': f'{engine}/{scene_id}/{task_id}',
-                                    'engine_id': engine, 'robot': next(iter(models)), 'scene_id': scene_id, 'task_id': task_id})
-                                loaded = research.get_protocol(protocol['protocol_id'])
-                                self.assertEqual(loaded['task'], tasks[task_id])
-                                self.assertEqual(loaded['spec']['engine_id'], engine)
-                                self.assertEqual(loaded['contract']['backend']['evaluator_source'], simulators.EVALUATORS[engine][0])
+                                spec = {'name': f'{engine}/{scene_id}/{task_id}',
+                                    'engine_id': engine, 'robot': next(iter(models)), 'scene_id': scene_id, 'task_id': task_id}
+                                research.ResearchProtocol.model_validate(spec)
+                                if simulators.backend_identity(engine)['action_mode'] == 'tcp_pose':
+                                    protocol = research.register_protocol(spec)
+                                    loaded = research.get_protocol(protocol['protocol_id'])
+                                    self.assertEqual(loaded['task'], tasks[task_id])
+                                    self.assertEqual(loaded['spec']['engine_id'], engine)
+                                    contract = loaded['contract']
+                                else:
+                                    # Discrete tasks remain selectable and evaluable, but
+                                    # cannot register a TCP-only research execution plan.
+                                    before = set(Path(folder).iterdir())
+                                    with self.assertRaisesRegex(ValueError, '普通 Agent'):
+                                        research.register_protocol(spec)
+                                    self.assertEqual(set(Path(folder).iterdir()), before)
+                                    contract = research.evaluation_contract(engine)
+                                self.assertEqual(contract['backend']['evaluator_source'], simulators.EVALUATORS[engine][0])
                                 seen.add(task_id)
                     self.assertEqual(seen, set(tasks))
 
@@ -100,6 +112,18 @@ class EnvironmentRegistryTests(unittest.TestCase):
         self.assertEqual(command, ['wsl.exe', '--distribution', 'Ubuntu', '--cd', '/mnt/d/robot work/具身平台',
             '--exec', marker_data['python'], '-u', '-m', 'server.backends.runtime', '--engine', 'ai2thor', '--generation-base', '17'])
         self.assertFalse(any(value in command for value in ('bash', 'sh', '-c', 'cmd', '/c')))
+
+    def test_alfworld_visual_contract_is_distinct_and_freezes_shared_native_code(self):
+        text = research.evaluation_contract('alfworld')
+        visual = research.evaluation_contract('alfworld_thor')
+        self.assertEqual(text['input_condition'], 'native_text')
+        self.assertEqual(visual['input_condition'], 'native_rgb_visible_metadata')
+        self.assertEqual(visual['backend']['action_mode'], 'discrete')
+        self.assertEqual(visual['backend']['state_schema'], 'alfworld-thor-lowlevel-v1')
+        self.assertNotEqual(text['backend']['evaluator_source'], visual['backend']['evaluator_source'])
+        for name in ('alfworld_backend.py', 'thor_backend.py', 'alfworld_thor_assets.py'):
+            self.assertIn('server/backends/'+name, visual['files'])
+        self.assertNotEqual(simulators.runtime_python('alfworld'), simulators.runtime_python('alfworld_thor'))
 
     def test_invalid_wsl_markers_are_rejected_before_launch(self):
         valid = {'kind': 'wsl', 'distribution': 'Ubuntu', 'python': '/home/researcher/env/bin/python3.11',

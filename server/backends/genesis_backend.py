@@ -385,6 +385,9 @@ class GenesisSimulation:
             setattr(rigid, key, torch.as_tensor(checkpoint['state'][key], dtype=tensor.dtype, device=tensor.device))
         self.scene.reset(state=state)
         self.ctrl, self.time, self.task_id, self.seed = ctrl, float(checkpoint['time']), checkpoint['task_id'], checkpoint['seed']
+        # Existing checkpoints store elapsed fixed-step time rather than a
+        # separate counter. Restore both public clocks to that recorded point.
+        self.physics_steps = round(self.time / self.timestep)
         self.robot.control_dofs_position(self._native_target(ctrl))
         self.cancel_motion(); self.paused = True; self.generation += 1
         self.run_deadline, self.stop_on_success = None, False

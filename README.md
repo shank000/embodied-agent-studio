@@ -22,8 +22,8 @@ EmbodiWorks 将机器人操作、家庭文字/视觉任务与实验记录放进�
 
 | 能力 | 工作方式 |
 | --- | --- |
-| 多后端任务 | MuJoCo、Genesis、ManiSkill、LIBERO、ALFWorld、AI2-THOR、RoboCasa365；Isaac 运行栈与验收状态见[多后端指南](docs/simulators.md)。 |
-| 官方基准 | RoboDojo 任务目录、评测计划、独立客户端与结果导入；完整运行需要 Linux GPU / Isaac Sim 5.1，见[RoboDojo 指南](docs/robodojo.md)。 |
+| 多后端任务 | MuJoCo、Genesis、ManiSkill、LIBERO、ALFWorld 文字／三维视觉、AI2-THOR、RoboCasa365；Isaac 运行栈与各环境验收状态见[多后端指南](docs/simulators.md)。 |
+| 官方基准 | RoboDojo 任务目录、评测计划、独立客户端与结果导入；尚未完成本机原生验收，完整运行需要 Linux GPU / Isaac Sim 5.1，见[RoboDojo 指南](docs/robodojo.md)。 |
 | 机器人操作 | MuJoCo 支持 Panda、SO-101、RM65 + GaiaHand、双／三 Panda 和七类场景；其他后端提供各自官方机器人与任务。 |
 | 灵活接入策略 | Codex 本机登录、OpenAI、DeepSeek／兼容 API、Claude、自定义 Agent，以及 SmolVLA 与自定义 VLA/WAM。 |
 | 组合决策 | 主 Agent、决策器和动作策略分别配置；支持单决策、级联复核与加权投票。 |
@@ -55,7 +55,7 @@ npm start
 
 三种系统共用源码与 `npm start`。CI 检查三平台的安装、构建与模型运动，另在 Linux 验证原生离屏渲染；完整验证范围见[安装说明](docs/INSTALL.md)。
 
-左侧“仿真环境”选择后端，再加载对应任务。MuJoCo 保留完整功能；ALFWorld / AI2-THOR 使用原生文字或离散交互，支持在本机 Windows 的 WSL/WSLg 运行。SDK 独立安装，任务和机器人不会跨引擎自动转换；[安装条件与实际验收范围](docs/simulators.md)分别说明。
+左侧“仿真环境”选择后端，再加载对应任务。ALFWorld 分为文字与三维视觉两个入口；要看对应官方家庭任务的 Unity 画面，选择“ALFWorld · 视觉”，按[家庭环境指南](docs/household-environments.md)准备独立 SDK 与资产。Windows 通过 WSL/WSLg 运行家庭环境。任务和机器人不会跨引擎自动转换；[安装条件与实际验收范围](docs/simulators.md)分别说明。
 
 ## 看见实验过程
 

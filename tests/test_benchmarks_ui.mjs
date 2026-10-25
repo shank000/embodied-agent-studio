@@ -101,6 +101,8 @@ test('invalid seeds, episode counts and ports preserve the error and make no pla
 
 test('ready start is single flight, and automated workbench controllers block new native jobs',async()=>{
   const pending=Promise.withResolvers(),ui=setup(catalog({readiness:{ready:true,checks:[]}}),()=>pending.promise);await ui.init();
+  assert.ok(ui.find('benchmark-readiness').textContent.includes('静态依赖检查通过'));
+  assert.ok(ui.find('benchmark-readiness').textContent.includes('原生加载与任务结果以实际运行日志为准'));
   const start=ui.button('运行官方评测'),first=ui.click(start);await ui.click(start);
   assert.equal(ui.calls.filter(call=>call.url.endsWith('/start')).length,1);
   assert.equal(ui.id('benchmark-policy').disabled,true);assert.equal(ui.button('停止评测').disabled,false);

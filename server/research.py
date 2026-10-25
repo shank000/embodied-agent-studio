@@ -40,14 +40,20 @@ def evaluation_contract(engine_id='mujoco'):
         paths = [f'server/backends/{RUNTIMES[engine_id][2]}.py', 'server/backends/runtime.py', 'server/simulators.py', 'server/task_verification.py', 'server/actions.py']
         if engine_id == 'libero': paths.append('server/backends/libero_catalog.py')
         if engine_id == 'robocasa365': paths.append('server/backends/robocasa_catalog.py')
-        if engine_id == 'ai2thor': paths.append('server/backends/alfworld_backend.py')
+        if engine_id in ('ai2thor', 'alfworld_thor'): paths.append('server/backends/alfworld_backend.py')
+        if engine_id == 'alfworld_thor': paths.extend(['server/backends/thor_backend.py', 'server/backends/alfworld_thor_assets.py'])
         contract.pop('mujoco')
         contract['backend'] = backend_identity(engine_id, engine['version'])
         contract['files'] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths}
-        if engine_id in ('alfworld','ai2thor'):
+        if engine_id in ('alfworld','alfworld_thor','ai2thor'):
             contract.update(input_condition='native_text' if engine_id=='alfworld' else 'native_rgb_visible_metadata',
                             inference_timing='turn_based', time_unit='environment_step')
     return contract
+
+
+def _require_continuous_research(engine_id):
+    if backend_identity(engine_id)['action_mode'] != 'tcp_pose':
+        raise ValueError('研究组合与配对评测目前只支持连续机械臂动作；此环境请使用普通 Agent 接管或原生环境动作。')
 
 
 class ResearchProtocol(BaseModel):
@@ -84,6 +90,9 @@ class ResearchProtocol(BaseModel):
 
 def register_protocol(spec):
     spec = spec if isinstance(spec, ResearchProtocol) else ResearchProtocol.model_validate(spec)
+    # Keep the schema readable for existing records; reject unsupported new
+    # experiments before writing an unusable protocol to the registry.
+    _require_continuous_research(spec.engine_id)
     content = {'spec': spec.model_dump(), 'contract': evaluation_contract(spec.engine_id),
                'task': supported_catalog(spec.engine_id)[2][spec.task_id], 'schema_version': 'embodied-protocol-v2'}
     encoded = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()
@@ -178,6 +187,10 @@ class ResearchController:
         request = request if isinstance(request, ResearchExperiment) else ResearchExperiment.model_validate(request)
         protocol = get_protocol(request.protocol_id)
         engine_id = protocol['spec'].get('engine_id', 'mujoco')
+        # Composition uses settle, physical checkpoints and TCP candidates.
+        # A saved discrete protocol must fail before taking control or logging
+        # an experiment that cannot execute even its initialization sequence.
+        _require_continuous_research(engine_id)
         if protocol['contract'] != evaluation_contract(engine_id):
             raise ValueError('物理环境或评价器已变化，请登记新的评测协议。')
         with self.worker.lock: current_engine = (self.worker.snapshot.get('backend') or {}).get('engine_id', 'mujoco')

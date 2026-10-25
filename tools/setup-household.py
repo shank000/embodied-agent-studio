@@ -20,18 +20,35 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSET_URL = 'https://github.com/alfworld/alfworld/releases/download/0.4.2/json_2.1.3_tw-pddl.zip'
+VISUAL_ASSET_URL = 'https://github.com/alfworld/alfworld/releases/download/0.2.2/json_2.1.1_json.zip'
 RESULT_PREFIX = 'EMBODI_HOUSEHOLD_RESULT='
+ENVIRONMENTS = {
+    'alfworld': ('3.12', 'requirements-alfworld.txt', 'alfworld', 'alfworld_backend', 'ALFWorldSimulation'),
+    'alfworld_thor': ('3.11', 'requirements-alfworld-thor.txt', 'alfworld', 'alfworld_thor_backend', 'ALFWorldThorSimulation'),
+    'ai2thor': ('3.12', 'requirements-thor.txt', 'ai2thor', 'thor_backend', 'ThorSimulation'),
+}
 
 
 def extract_alfworld_games(archive, destination):
     """Extract only official unseen task games, preserving existing local files."""
+    return _extract_alfworld_records(archive, destination, 'game.tw-pddl',
+                                   ('pddl_domain', 'pddl_problem', 'grammar', 'solvable'))
+
+
+def extract_alfworld_visual(archive, destination):
+    """Official scene/task records align with the corresponding text-game paths."""
+    return _extract_alfworld_records(archive, destination, 'traj_data.json',
+                                   ('task_type', 'scene', 'pddl_params', 'plan'))
+
+
+def _extract_alfworld_records(archive, destination, filename, required):
     destination = Path(destination).resolve()
     count = 0
     with zipfile.ZipFile(archive) as source:
         for item in source.infolist():
             path = PurePosixPath(item.filename)
             if (len(path.parts) != 5 or path.parts[:2] != ('json_2.1.1', 'valid_unseen')
-                    or path.name != 'game.tw-pddl' or any(part in ('', '.', '..') for part in path.parts)
+                    or path.name != filename or any(part in ('', '.', '..') for part in path.parts)
                     or '\\' in item.filename):
                 continue
             target = (destination/Path(*path.parts)).resolve()
@@ -40,28 +57,40 @@ def extract_alfworld_games(archive, destination):
             if not target.exists():
                 data = source.read(item)
                 game = json.loads(data)
-                if not all(key in game for key in ('pddl_domain', 'pddl_problem', 'grammar', 'solvable')):
+                if not isinstance(game, dict) or not all(key in game for key in required):
                     raise ValueError(f'官方回合缺少必需字段：{item.filename}')
                 # Exclusive creation keeps a concurrent user's existing file.
                 try:
                     with target.open('xb') as output: output.write(data)
                 except FileExistsError: pass
             count += 1
-    if not count: raise ValueError('归档中没有官方 json_2.1.1/valid_unseen/*/*/game.tw-pddl。')
+    if not count: raise ValueError(f'归档中没有官方 json_2.1.1/valid_unseen/*/*/{filename}。')
     return count
 
 
 def alfworld_assets(archive=None):
     destination = ROOT/'vendor/alfworld_data'
-    if archive is not None:
-        return extract_alfworld_games(archive, destination)
-    cache = ROOT/'vendor/alfworld-download/json_2.1.3_tw-pddl.zip'
+    cache = archive or download_archive(ASSET_URL, 'json_2.1.3_tw-pddl.zip')
+    count = extract_alfworld_games(cache, destination)
+    print(f'已准备 {count} 个官方 valid_unseen 文字回合。', flush=True)
+    return count
+
+
+def alfworld_visual_assets(archive=None):
+    cache = archive or download_archive(VISUAL_ASSET_URL, 'json_2.1.1_json.zip')
+    count = extract_alfworld_visual(cache, ROOT/'vendor/alfworld_data')
+    print(f'已准备 {count} 个官方 valid_unseen 视觉回合；未下载检测器或策略权重。', flush=True)
+    return count
+
+
+def download_archive(url, filename):
+    cache = ROOT/'vendor/alfworld-download'/filename
     if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
-        print(f'下载官方 ALFWorld 文字任务归档（约 36.5 MB）：{ASSET_URL}', flush=True)
+        print(f'下载官方 ALFWorld 任务归档：{url}', flush=True)
         temporary = None
         try:
-            with urllib.request.urlopen(ASSET_URL, timeout=60) as response, tempfile.NamedTemporaryFile(
+            with urllib.request.urlopen(url, timeout=60) as response, tempfile.NamedTemporaryFile(
                     dir=cache.parent, suffix='.partial', delete=False) as output:
                 temporary = Path(output.name)
                 shutil.copyfileobj(response, output, length=1024*1024)
@@ -70,15 +99,14 @@ def alfworld_assets(archive=None):
             temporary.replace(cache)
         finally:
             if temporary is not None and temporary.exists(): temporary.unlink()
-    count = extract_alfworld_games(cache, destination)
-    print(f'已准备 {count} 个官方 valid_unseen 回合；未下载训练集、视觉检测权重或预训练策略。', flush=True)
-    return count
+    return cache
 
 
 class RuntimeInstaller:
-    def __init__(self, distribution=None, archive=None):
+    def __init__(self, distribution=None, archive=None, visual_archive=None):
         self.distribution = distribution
         self.archive = archive
+        self.visual_archive = visual_archive
         self.prefix = []
         if os.name == 'nt':
             if not distribution: raise ValueError('Windows 需要已安装的 WSL 发行版，例如 --wsl Ubuntu。')
@@ -108,18 +136,29 @@ class RuntimeInstaller:
         return result.stdout
 
     def install(self, engine, verify=True):
+        python_version, requirement, package, module, name = ENVIRONMENTS[engine]
         folder = self.home+'/.local/share/embodiworks/'+engine if self.prefix else str(ROOT/f'.venv-{engine}')
         python = folder+'/bin/python'
+        marker = None
+        if self.prefix:
+            marker_folder = ROOT/f'.venv-{engine}'
+            marker_folder.mkdir(exist_ok=True)
+            marker = {'kind': 'wsl', 'distribution': self.distribution, 'python': python,
+                      'package': package, 'version': None, 'validated': False, 'assets_ready': False}
+            # A reinstall changes dependencies/assets. A previous successful
+            # probe cannot continue certifying this modified runtime on failure.
+            (marker_folder/'runtime.json').write_text(json.dumps(marker, indent=2), encoding='utf-8')
         exists = subprocess.run(self.prefix+[python, '--version'], capture_output=True).returncode == 0 if self.prefix else Path(python).is_file()
-        if not exists: self.run([self.uv, 'venv', '--python', '3.12', folder])
-        requirement = 'requirements-alfworld.txt' if engine == 'alfworld' else 'requirements-thor.txt'
+        if not exists: self.run([self.uv, 'venv', '--python', python_version, folder])
         self.run([self.uv, 'pip', 'install', '--python', python, '-r', requirement, '--index-url', 'https://pypi.org/simple'])
         self.run([self.uv, 'pip', 'check', '--python', python])
-        version = self.capture([python, '-c', f'from importlib.metadata import version;print(version({engine!r}))']).strip()
-        if engine == 'alfworld': alfworld_assets(self.archive)
+        version = self.capture([python, '-c', f'from importlib.metadata import version;print(version({package!r}))']).strip()
+        if engine in ('alfworld', 'alfworld_thor'): alfworld_assets(self.archive)
+        if engine == 'alfworld_thor':
+            alfworld_visual_assets(self.visual_archive)
+            self.run([python, '-c', 'from server.backends.alfworld_thor_assets import prepare_build; print(prepare_build())'])
         validated = False
         if verify:
-            module, name = ('alfworld_backend', 'ALFWorldSimulation') if engine == 'alfworld' else ('thor_backend', 'ThorSimulation')
             probe = (
                 f'from server.backends.{module} import {name};import json;'
                 f's={name}();'
@@ -129,7 +168,7 @@ class RuntimeInstaller:
                 f'print({RESULT_PREFIX!r}+json.dumps({{"version":s.backend["engine_version"],"image_shape":list(image.shape),"cameras":len(o["cameras"])}}))'
                 '\nfinally:s.close()\n'
             )
-            print(f'实际初始化 {engine}、读取观察与画面后关闭。AI2-THOR 首次会下载官方 Unity 构建（约 769 MB）。', flush=True)
+            print(f'实际初始化 {engine}、读取观察与画面后关闭。视觉环境首次会下载对应版本的官方 Unity 构建。', flush=True)
             output = self.capture([python, '-u', '-c', probe])
             print(output, end='')
             lines = [line[len(RESULT_PREFIX):] for line in output.splitlines() if line.startswith(RESULT_PREFIX)]
@@ -138,10 +177,7 @@ class RuntimeInstaller:
             validated = report.get('version') == version
             if not validated: raise RuntimeError('原生 SDK 版本与安装版本不一致，未标记为可用。')
         if self.prefix:
-            marker_folder = ROOT/f'.venv-{engine}'
-            marker_folder.mkdir(exist_ok=True)
-            marker = {'kind': 'wsl', 'distribution': self.distribution, 'python': python,
-                      'package': engine, 'version': version, 'validated': validated, 'assets_ready': validated}
+            marker.update(version=version, validated=validated, assets_ready=validated)
             # This is local machine configuration, never committed to Git.
             (marker_folder/'runtime.json').write_text(json.dumps(marker, indent=2), encoding='utf-8')
         print(f'{engine} {version}：'+('已通过真实启动验证。' if validated else '已安装；尚未运行验证，请去掉 --skip-verify 后重试。'), flush=True)
@@ -149,13 +185,14 @@ class RuntimeInstaller:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine', choices=['alfworld', 'ai2thor', 'all'], required=True)
+    parser.add_argument('--engine', choices=[*ENVIRONMENTS, 'all'], required=True)
     parser.add_argument('--wsl', default='Ubuntu' if os.name == 'nt' else None, help='现有 WSL 发行版名称；不会安装/修改 WSL')
     parser.add_argument('--archive', type=Path, help='已有官方 ALFWorld json_2.1.3_tw-pddl.zip，免重复下载')
+    parser.add_argument('--visual-archive', type=Path, help='已有官方 json_2.1.1_json.zip 视觉回合元数据归档')
     parser.add_argument('--skip-verify', action='store_true', help='只安装；WSL 后端未通过验证时不会标为可用')
     args = parser.parse_args()
-    installer = RuntimeInstaller(args.wsl, args.archive)
-    for engine in (['alfworld', 'ai2thor'] if args.engine == 'all' else [args.engine]):
+    installer = RuntimeInstaller(args.wsl, args.archive, args.visual_archive)
+    for engine in (list(ENVIRONMENTS) if args.engine == 'all' else [args.engine]):
         installer.install(engine, verify=not args.skip_verify)
 
 
