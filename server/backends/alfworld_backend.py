@@ -16,6 +16,7 @@ import textwrap
 
 
 ROOT = Path(__file__).resolve().parents[2]
+MAX_LAYOUT_SEED = 4294967295
 CONFIGURED_DATA = os.environ.get('ALFWORLD_DATA')
 TASKS = {
     'pick_and_place_simple': {'name': '取物并放置', 'instruction': '完成 ALFWorld 当前回合提供的取放任务。'},
@@ -44,8 +45,8 @@ class DiscreteEnvironment:
 
     def _initialize(self, model, scene, seed, task):
         self._validate(model, scene, task)
-        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2147483647:
-            raise ValueError('布局种子须为 0–2147483647 的整数。')
+        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= MAX_LAYOUT_SEED:
+            raise ValueError(f'布局种子须为 0–{MAX_LAYOUT_SEED} 的整数。')
         self.model_id, self.scene_id, self.seed, self.task_id = model, scene, seed, task
         self.generation, self.time, self.physics_steps = 1, 0., 0
         self.paused, self.render_suspended, self.speed = True, False, 1.
@@ -139,21 +140,30 @@ class DiscreteEnvironment:
 
     def restore(self, checkpoint):
         if not isinstance(checkpoint, dict): raise ValueError('回合检查点必须为对象。')
-        identity = checkpoint.get('backend') or {}
+        identity = checkpoint.get('backend')
+        if not isinstance(identity, dict): raise ValueError('检查点后端身份必须为对象。')
         for key in ('engine_id', 'engine_version', 'state_schema'):
             if identity.get(key) != self.backend[key]: raise ValueError('检查点引擎、版本或格式与当前环境不一致。')
         model, scene, task = (checkpoint.get(k) for k in ('model', 'scene_id', 'task_id'))
         self._validate(model, scene, task)
         seed, actions = checkpoint.get('seed'), checkpoint.get('actions')
-        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2147483647 or not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
+        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= MAX_LAYOUT_SEED or not isinstance(actions, list) or not all(isinstance(a, str) and a.strip() for a in actions):
             raise ValueError('检查点种子或动作序列无效。')
+        if not isinstance(checkpoint.get('episode_id'),str) or not checkpoint['episode_id'] or not isinstance(checkpoint.get('environment'),dict) or type(checkpoint.get('native_success')) is not bool:
+            raise ValueError('检查点缺少有效的回合、观察或原生成功状态。')
         self.model_id, self.scene_id, self.task_id, self.seed = model, scene, task, seed
         self.generation += 1
-        self.reset()
-        if self.episode_id != checkpoint.get('episode_id'): raise ValueError('官方环境回合与检查点不一致，请恢复对应版本的资产。')
-        for command in actions: self.execute(command)
-        if self.native_success() != checkpoint.get('native_success') or self.environment() != checkpoint.get('environment'):
-            raise ValueError('原生环境重新执行动作后与检查点不一致，未将回放声明为精确恢复。')
+        try:
+            self.reset()
+            if self.episode_id != checkpoint.get('episode_id'): raise ValueError('官方环境回合与检查点不一致，请恢复对应版本的资产。')
+            for command in actions: self.execute(command)
+            if self.native_success() != checkpoint.get('native_success') or self.environment() != checkpoint.get('environment'):
+                raise ValueError('原生环境重新执行动作后与检查点不一致，未将回放声明为精确恢复。')
+        except Exception as exc:
+            # Reset/replay has already replaced or advanced the native world.
+            # A recoverable protocol error would advertise this partial state
+            # as ready while the caller still expects the previous episode.
+            raise RuntimeError(f'{self.engine_name} 检查点恢复失败，当前回合未通过一致性验证；请重新加载环境：{exc}') from exc
         return {'restored': True, 'generation': self.generation, 'restore_mode': 'native_action_replay'}
 
     def trajectory_frame(self):
@@ -170,7 +180,7 @@ class DiscreteEnvironment:
             task = payload.get('task_id') or self.task_id
             self._validate(model, scene, task)
             seed = payload.get('seed', self.seed)
-            if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2147483647: raise ValueError('布局种子无效。')
+            if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= MAX_LAYOUT_SEED: raise ValueError('布局种子无效。')
             self.model_id, self.scene_id, self.task_id, self.seed = model, scene, task, seed
             try: self.reset()
             except Exception as exc:

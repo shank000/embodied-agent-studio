@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from . import recovery as recovery_module
 from .control import PoseAction
 from .runlog import RunLog, CURRENT_LOG, model_output
-from .telemetry import track_inference, controller_timing
+from .telemetry import track_inference, controller_timing, enter_recorded_run
 from .task_verification import verify_completion, environment_success
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -194,7 +194,11 @@ class PolicyController:
                 'observation_robot': self.observation['robot'] if self.observation else None}
 
     def reset_observation(self):
+        if self.state.get('active'): raise ValueError('请先停止当前策略任务，再清除场景观察。')
         self.observation = None; self.observation_id += 1
+        self.run_log = None
+        self.state = {'active': False, 'status': 'idle', 'round': 0,
+                      'message': '场景已重置，选择策略模型后开始。', 'history': []}
 
     def validate_start(self, kind, robot):
         config = self.configs[kind]
@@ -218,6 +222,7 @@ class PolicyController:
                       'message': '准备策略模型。', 'task': request.task, 'history': []}
         self.task = asyncio.create_task(self.run(request, config.model_copy(deep=True)))
         self._accepting = True
+        await enter_recorded_run(self.task, self.state)
         return self.snapshot()
 
     async def stop(self):
@@ -227,6 +232,8 @@ class PolicyController:
             try: await self.task
             except asyncio.CancelledError: pass
         self.task = None
+        if self.state.get('active'):
+            self.state.update(active=False, status='stopped', message='策略已停止，迟到的推理结果不会执行。')
 
     async def run(self, request, config):
         started = time.monotonic(); latencies = []; frames = 0; limited = 0

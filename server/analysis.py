@@ -202,6 +202,12 @@ def analyze_run(run_id, *, _ancestors=()):
             values = [child[field] for child in child_totals]
             totals[field] = sum(values) if values and all(value is not None for value in values) and not any(c.get('analysis_error') for c in children) else None
             totals['known_' + field] = sum(child.get('known_' + field, 0) for child in child_totals)
+        # A recorded batch stopped before launching any child has a measured
+        # zero-call clock. Historical/absent child evidence remains unknown.
+        if (known_empty and not ordered and not child_totals and not issues
+                and (result.get('timing') or {}).get('inference_calls') == 0
+                and not any(child.get('run_id') or child.get('metrics') or child.get('analysis_error') for child in children)):
+            totals = _totals([], known_empty=True)
     model, effort = _identity(result, ordered)
     if child_analyses:
         model = ' + '.join(sorted({child['model'] for child in child_analyses if child.get('model')})) or model

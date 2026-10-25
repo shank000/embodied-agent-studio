@@ -6,6 +6,7 @@ const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 const modes={agent:'视觉 Agent',policy:'策略模型',hybrid:'组合方法'};
 const statuses={idle:'等待任务',queued:'等待执行',preparing:'准备实验',loading:'加载模型',running:'运行中',observing:'采集观察',planning:'主 Agent 规划',thinking:'模型推理',deciding:'选择候选',executing:'执行动作',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verifying:'环境核验中',replan:'未通过核验 · 重新决策',unverified:'未通过环境验收',verified:'评价器确认成功',model_done:'模型自报完成（非验收）',blocked:'无法继续',error:'运行错误',failed:'执行未到位',stopped:'已停止',limit:'达到预算',round_complete:'本步结束',complete:'实验结束',completed:'实验结束',unfinished:'未结束'};
 let context,defaults,catalog,methods=[],protocols=[],experiments=[],registry={},episode=null,replayRun='',lastRegistry='',lastExperiment='',lastRun='',lastFinished='',currentState={},busy=false,stopping=false;
+let catalogRequest=0;
 const methodId=method=>method.method_id||method.id;
 const protocolId=protocol=>protocol.protocol_id||protocol.id;
 const experimentId=experiment=>experiment.experiment_id||experiment.run_id;
@@ -121,13 +122,15 @@ function renderExperiments(){
   if($('#rsi-experiment-history').value)renderExperiment(experiments.find(experiment=>experimentId(experiment)===$('#rsi-experiment-history').value)||{});
 }
 async function refresh(){
-  const results=await Promise.all([request('research/defaults'),request('research/methods'),request('research/protocols'),request('research/experiments'),request('scenes')]);
-  [defaults,methods,protocols,experiments,catalog]=results;
+  const results=await Promise.all([request('research/defaults'),request('research/methods'),request('research/protocols'),request('research/experiments'),reloadRsiCatalog()]);
+  [defaults,methods,protocols,experiments]=results;
   if(!$('#rsi-agent-json').value)fillConfigs({});
-  selectOptions($('#rsi-protocol-scene'),catalog.scenes);fillTasks();renderMethods();renderProtocols();renderExperiments();
+  renderMethods();renderProtocols();renderExperiments();
 }
-export async function reloadRsiCatalog(){
-  catalog=await request('scenes');selectOptions($('#rsi-protocol-scene'),catalog.scenes);fillTasks();
+export async function reloadRsiCatalog(expectedEngine){
+  const version=++catalogRequest,next=await request('scenes'),active=context?.getState?.()||currentState;
+  if(version!==catalogRequest||(expectedEngine&&next.engine_id!==expectedEngine)||(active?.backend?.engine_id&&next.engine_id!==active.backend.engine_id))return false;
+  catalog=next;selectOptions($('#rsi-protocol-scene'),catalog.scenes);fillTasks();return true;
 }
 function updatePromotionParent(){const recipe=methods.find(method=>methodId(method)===$('#rsi-promotion-candidate').value)?.recipe;if(recipe?.parent_id)$('#rsi-promotion-parent').value=recipe.parent_id;}
 function renderRegistry(){
@@ -137,7 +140,7 @@ function renderRegistry(){
 }
 function renderLocks(){
   if(!context)return;
-  const state=currentState,locked=!!(state.ready===false||state.backend_switching||state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active||state.benchmark?.active);
+  const state=currentState,locked=!!(state.ready===false||state.backend_switching||context.catalogReady?.()===false||(catalog?.engine_id&&state.backend?.engine_id&&catalog.engine_id!==state.backend.engine_id)||state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active||state.benchmark?.active);
   const discrete=['text','discrete'].includes(state.backend?.action_mode);
   let note=$('#rsi-environment-note');if(!note){note=document.createElement('p');note.id='rsi-environment-note';note.className='research-note';$('#rsi-run-message').after(note);}note.hidden=!discrete;note.textContent=discrete?'此方法组合与配对评测使用连续机械臂动作协议。当前环境请使用工作台 Agent 或原生命令；历史实验仍可查看与回放。':'';
   $('#rsi-run-start').disabled=busy||locked||!methods.length||discrete;$('#rsi-run-once').disabled=busy||locked||!methods.length||discrete;$('#rsi-run-stop').disabled=stopping||!state.research?.active;

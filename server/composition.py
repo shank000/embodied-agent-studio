@@ -18,7 +18,7 @@ from .control import PoseAction
 from .decision import DecisionConfig, choose_candidate, choose_decisions
 from .policy import PolicyConfig, PolicyOutput, predict_policy, warmup_policy, release_local_service, policy_task_with_feedback
 from .runlog import RunLog, CURRENT_LOG
-from .telemetry import controller_timing
+from .telemetry import controller_timing, enter_recorded_run
 from .task_verification import verify_completion, environment_success
 
 
@@ -235,6 +235,7 @@ class CompositionController:
                 'task': request.task, 'max_steps': 1 if request.one_step else request.max_steps,
                 'history': [], 'timings': {}, 'usage': {}}
             self.task = asyncio.create_task(self.run(request, recipe, credentials, agent_config, policy_config, decision_configs))
+            await enter_recorded_run(self.task, self.state)
             return self.snapshot()
 
     async def stop(self):
@@ -245,6 +246,8 @@ class CompositionController:
                 try: await self.task
                 except asyncio.CancelledError: pass
             self.task = None
+            if self.state.get('active'):
+                self.state.update(active=False, status='stopped', message='组合任务已停止，迟到结果不会提交。')
 
     def _assert_current(self, observation):
         snapshot = self._snapshot()

@@ -92,7 +92,7 @@ export function renderEnvironment(state){
   const nextSession=session(state);
   if(nextSession!==lastSession){lastSession=nextSession;lastCommands='';message('');nodes.input.value='';}
   const environment=state.environment||{};
-  nodes.mode.textContent=state.backend.action_mode==='text'?'文字环境 · 逐步动作':'视觉环境 · 离散动作';
+  nodes.mode.textContent=state.backend.action_mode==='text'?`文字环境 · 第 ${state.steps??0} 步`:`视觉环境 · 第 ${state.steps??0} 步`;
   nodes.task.textContent=typeof environment.task_name==='string'?environment.task_name:'等待读取当前任务';
   nodes.hint.textContent=state.backend.action_mode==='text'?'以下是官方文字观察；场景画面为文字排版，没有三路相机或机械臂 TCP。':'以下是原生第一人称观察与动作反馈；请使用导航或物体交互动作。';
   nodes.observation.textContent=typeof environment.observation_text==='string'?environment.observation_text:'等待原生环境观察…';

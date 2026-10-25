@@ -249,6 +249,8 @@ class Worker:
                     fps = frame_count / (start - fps_start)
                     frame_count, fps_start = 0, start
                 state = simulation.state()
+                if state.get('ready') is not True:
+                    raise RuntimeError(state.get('error') or '仿真后端当前未就绪。')
                 state.update({'fps': round(fps, 1), 'render_ms': round((time.perf_counter()-start)*1000, 1),
                               'ready': True, 'session_id': self.session_id})
                 with self.lock:

@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .artifacts import get_method, verify_method
 from .runlog import RunLog, run_folder, list_runs
 from .run_management import primary_models
-from .telemetry import batch_timing
+from .telemetry import batch_timing, enter_recorded_run
 from .scenes import SCENES, TASKS
 from .simulation import MODELS
 from .simulators import validate_selection, backend_identity, supported_catalog, RUNTIMES
@@ -192,6 +192,7 @@ class ResearchController:
                       'request': request.model_dump(), 'protocol_id': request.protocol_id, 'split': request.split,
                       'rows': rows, 'aggregates': aggregate_rows(rows, request.method_ids)}
         self.task = asyncio.create_task(self.run(request, protocol))
+        await enter_recorded_run(self.task, self.state)
         return self.state
 
     async def stop(self):
@@ -202,6 +203,10 @@ class ResearchController:
             except asyncio.CancelledError:
                 pass
         self.task = None
+        if self.state.get('active'):
+            self.state.update(active=False, status='stopped', message='研究实验已停止。')
+            for row in self.state.get('rows', []):
+                if row['status'] in ('queued', 'running'): row.update(status='stopped', message='实验尚未开始执行该试验。')
 
     async def run(self, request, protocol):
         with self.worker.lock: backend = self.worker.snapshot.get('backend')

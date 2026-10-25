@@ -70,7 +70,7 @@ jobs:
         run: node tools/python.mjs -m unittest tests.test_task_evaluation tests.test_completion_controllers -v
 
       - name: Check simulator isolation, selection and experiment identity
-        run: node tools/python.mjs -m unittest tests.test_backend_process tests.test_simulator_selection tests.test_analysis_simulators tests.test_environment_registry tests.test_discrete_agent tests.test_household_backends tests.test_isaac_backend tests.test_libero_backend tests.test_maniskill_backend tests.test_robocasa_backend tests.test_robodojo tests.test_robodojo_catalog_results tests.test_setup_robodojo tests.test_setup_robocasa365 -v
+        run: node tools/python.mjs -m unittest tests.test_backend_process tests.test_backend_lifecycle tests.test_controller_start_stop tests.test_simulator_selection tests.test_analysis_simulators tests.test_environment_registry tests.test_discrete_agent tests.test_household_backends tests.test_isaac_backend tests.test_libero_backend tests.test_maniskill_backend tests.test_robocasa_backend tests.test_robodojo tests.test_robodojo_catalog_results tests.test_setup_robodojo tests.test_setup_robocasa365 -v
 
   linux-rendering:
     name: Native rendering / Linux OSMesa

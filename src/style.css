@@ -50,3 +50,4 @@
 .camera-grid.single-camera{grid-template-columns:1fr}
 .environment-budget{display:flex;align-items:center;gap:10px;margin:16px 0;color:#62806a;font-size:13px}.environment-budget input{width:7em;min-width:0;padding:7px;border:1px solid #dbe6d7;border-radius:6px;background:#fbfdf8;color:#4b7143}
 .telemetry-cell[hidden],.camera-grid figure[hidden]{display:none!important}
+.sim-action[hidden],.tasks-heading[hidden]{display:none}

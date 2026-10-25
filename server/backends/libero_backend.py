@@ -21,8 +21,6 @@ import tempfile
 
 import numpy as np
 from PIL import Image
-from scipy.spatial.transform import Rotation, Slerp
-import yaml
 
 from ..actions import PoseAction
 from ..simulators import backend_identity
@@ -42,6 +40,7 @@ def configure_libero():
     spec = importlib.util.find_spec('libero')
     if spec is None:
         raise ValueError('LIBERO 未安装；请在独立环境安装 requirements-libero.txt。')
+    import yaml
     package = Path(next(iter(spec.submodule_search_locations))) / 'libero'
     if not (package/'assets').is_dir():
         raise ValueError('LIBERO 官方资产缺失；请按 requirements-libero.txt 从固定官方源码以 editable 模式安装。无需下载演示数据。')
@@ -136,6 +135,8 @@ def source_revision(package):
 class LiberoSimulation:
     def __init__(self, model_id='panda', render=True, scene_id='libero_spatial', seed=42, task_id=None):
         self._validate(model_id, scene_id, task_id or f'{scene_id}:0')
+        global Rotation, Slerp
+        from scipy.spatial.transform import Rotation, Slerp
         package = configure_libero()
         from libero.libero import get_libero_path
         from libero.libero.envs import OffScreenRenderEnv
@@ -160,6 +161,7 @@ class LiberoSimulation:
     def _load(self):
         if self.env is not None:
             self.env.close()
+            self.env = None
         index = int(self.task_id.split(':')[1])
         bddl = Path(self._libero_path('bddl_files'))/self.scene_id/(TASK_MAP[self.scene_id][index]+'.bddl')
         if not bddl.is_file():
@@ -537,15 +539,20 @@ class LiberoSimulation:
 
     def command(self, payload):
         action = payload['action']
-        if action in ('load', 'scene'):
+        if action in ('load', 'scene', 'reset'):
             model, scene = payload.get('model', self.model_id), payload.get('scene_id', self.scene_id)
             task = payload.get('task_id') or (self.task_id if scene == self.scene_id else f'{scene}:0')
             self._validate(model, scene, task)
             changed = task != self.task_id
-            self.model_id, self.scene_id, self.task_id, self.seed = model, scene, task, payload.get('seed', self.seed)
-            self._load() if changed else self.reset()
+            try:
+                self.model_id, self.scene_id, self.task_id, self.seed = model, scene, task, payload.get('seed', self.seed)
+                self._load() if changed else self.reset()
+            except Exception as exc:
+                cleanup = ''
+                try: self.close()
+                except Exception as cleanup_exc: cleanup = f'；资源清理失败：{cleanup_exc}'
+                raise RuntimeError(f'LIBERO 场景重建失败，仿真进程未就绪：{type(exc).__name__}: {exc}{cleanup}') from exc
             self.generation += 1
-        elif action == 'reset': self.reset(); self.generation += 1
         elif action == 'pause': self.paused = bool(payload['value'])
         elif action == 'render_suspend': self.render_suspended = bool(payload['value']); self.paused = True
         elif action == 'step':
@@ -592,5 +599,6 @@ class LiberoSimulation:
         return '操作已完成。'
 
     def close(self):
-        if self.env is not None:
-            self.env.close(); self.env = None
+        environment, self.env = self.env, None
+        self.native = self.robot = self.sim = None
+        if environment is not None: environment.close()

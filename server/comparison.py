@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .agent import AgentStart, validate_agent_access
 from .policy import PolicyStart, release_local_service
 from .runlog import RunLog, run_folder
-from .telemetry import batch_timing
+from .telemetry import batch_timing, enter_recorded_run
 from .scenes import SCENES, TASKS
 from .simulation import MODELS
 from .simulators import validate_selection, supported_catalog
@@ -63,6 +63,7 @@ class ComparisonController:
                 for seed in request.seeds for method in request.methods]
         self.state = {'active':True, 'status':'preparing', 'message':'准备共享初始场景。', 'rows':rows, 'request':request.model_dump()}
         self.task = asyncio.create_task(self.run(request))
+        await enter_recorded_run(self.task, self.state)
         return self.state
 
     async def stop(self):
@@ -71,6 +72,10 @@ class ComparisonController:
             try: await self.task
             except asyncio.CancelledError: pass
         self.task = None
+        if self.state.get('active'):
+            self.state.update(active=False, status='stopped', message='对比实验已停止。')
+            for row in self.state.get('rows', []):
+                if row['status'] in ('queued', 'running'): row.update(status='stopped', message='实验尚未开始执行该试验。')
 
     async def run(self, request):
         with self.worker.lock: backend = self.worker.snapshot.get('backend')

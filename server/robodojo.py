@@ -306,6 +306,14 @@ class RoboDojoController:
             try: await self.task
             except asyncio.CancelledError: pass
         self.task=None
+        # A task cancelled before its first coroutine step never reaches the
+        # run() finally block. The accepted job already has a RunLog here.
+        if self.state.get('active'):
+            await self._terminate();self.process=None
+            self.state.update(active=False,status='stopped',message='评测已停止，原生客户端尚未开始执行。')
+            if self.log:
+                self.log.finish({'status':'stopped','message':self.state['message'],
+                    'rows':self.state.get('rows',[]),'metrics':{'success':None,'inference_count':None,'inference_s':None}})
 
     async def run(self,spec,config):
         source=Path(config['source_root']);log=self.log;started=time.monotonic()

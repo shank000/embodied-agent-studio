@@ -1,9 +1,11 @@
+import {setTaskDraft,syncTaskDraft} from './task_drafts.js';
 const $=selector=>document.querySelector(selector);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const names={agent:'视觉 Agent',smolvla:'SmolVLA',vla:'自定义 VLA',wam:'自定义 WAM'};
 const statuses={idle:'等待任务',loading:'加载模型',preparing:'准备实验',observing:'采集观察',thinking:'策略推理',executing:'执行动作',repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停 · 等待处理',retrying:'重试当前轮',verifying:'环境核验中',replan:'未通过核验 · 重新决策',unverified:'未通过环境验收',verified:'评价器确认成功',model_done:'模型自报完成（非验收）',blocked:'无法继续',error:'运行错误',failed:'执行失败',stopped:'已停止',cancelled:'已取消',canceled:'已取消',interrupted:'服务中断',returned:'已返回',round_complete:'本轮结束',limit:'达到上限',running:'运行中',complete:'实验结束',unfinished:'未结束'};
 statuses.imported='已导入外部结果';
 let context, catalog, configs={}, lastGeneration=-1, lastRows='', lastPolicy='', currentPage='workspace', runs=[], selectedRun='',resultsOffset=0,resultsHasMore=true,analysisCatalog=[],refreshingResults=false,lastResultRefresh=0,lastRunStates='';
+let catalogRequest=0,lastTaskContext='';
 let selectedResult=null,resultsGeneration=0,detailGeneration=0,analysisGeneration=0,analysisCatalogGeneration=0,hasAnalysisResults=false,resultMutationPending=false,lastDetailKey='';
 const checkedResults=new Set();
 let batchDeleteIds=[];
@@ -84,7 +86,7 @@ function options(select,items,value){select.replaceChildren(...items.map(item=>{
 function tasksFor(sceneId,select,taskId){const scene=catalog.scenes.find(s=>s.id===sceneId);options(select,scene.tasks.map(id=>({id,name:catalog.tasks[id].name})),scene.tasks.includes(taskId)?taskId:scene.tasks[0]);}
 function updateSceneInfo(){if(!catalog)return;const scene=catalog.scenes.find(s=>s.id===$('#scene-select').value);$('#scene-description').textContent=scene.description;}
 function updateCompareCriterion(){if(catalog)$('#comparison-criterion').textContent=catalog.tasks[$('#compare-task').value]?.criterion||'';}
-function fillTask(){if(!catalog)return;const instruction=catalog.tasks[$('#task-select').value].instruction;$('#command').value=instruction;$('#policy-task').value=instruction;}
+function fillTask(){if(!catalog)return;const instruction=catalog.tasks[$('#task-select').value]?.instruction;if(instruction){setTaskDraft($('#command'),instruction);setTaskDraft($('#policy-task'),instruction);}}
 let policyRobot=null,researchControlsLocked=true,environmentDiscrete=false;
 function updatePolicySummary(){const kind=$('#policy-kind').value;const config=configs[kind];$('#policy-model-name').textContent=config?.model||names[kind];$('#policy-model-note').textContent=kind==='smolvla'?'官方 SmolVLA 直接预测动作块。默认映射为 SO-101，基础权重未在当前场景微调。':`${names[kind]} 通过你配置的推理服务预测动作。${config?.endpoint?'接口已配置。':'尚未配置接口。'}`;updatePolicyAvailability();}
 function updatePolicyAvailability(robot=policyRobot,locked=researchControlsLocked){
@@ -107,11 +109,14 @@ function updateComparisonAvailability(locked=researchControlsLocked){
 }
 function changePage(page){currentPage=page;for(const name of ['workspace','rsi','comparison','logs','benchmarks']){const view=$(`#${name}-view`);if(view)view.hidden=name!==page;}document.querySelectorAll('[data-page]').forEach(button=>button.classList.toggle('selected',button.dataset.page===page));if(page==='logs'){refreshLogs();refreshPricingStatus();}}
 
-export async function reloadResearchCatalog(){
-  catalog=await request('scenes');lastGeneration=-1;
+export async function reloadResearchCatalog(expectedEngine){
+  const version=++catalogRequest,next=await request('scenes'),active=context?.getState?.();
+  if(version!==catalogRequest||(expectedEngine&&next.engine_id!==expectedEngine)||(active?.backend?.engine_id&&next.engine_id!==active.backend.engine_id))return false;
+  catalog=next;lastGeneration=-1;
   for(const selector of ['#scene-select','#compare-scene'])options($(selector),catalog.scenes,catalog.scenes[0]?.id);
   const scene=catalog.scenes[0]?.id;if(!scene)return;
   tasksFor(scene,$('#task-select'));tasksFor(scene,$('#compare-task'));updateSceneInfo();updateCompareCriterion();
+  return true;
 }
 
 export async function initResearch(callbacks){
@@ -125,7 +130,7 @@ export async function initResearch(callbacks){
   $('#compare-robot').addEventListener('change',()=>updateComparisonAvailability());
   document.querySelectorAll('input[name="method"]').forEach(input=>input.addEventListener('change',()=>updateComparisonAvailability()));
   $('#use-task').addEventListener('click',fillTask);
-  $('#apply-scene').addEventListener('click',async()=>{await context.operate({action:'scene',scene_id:$('#scene-select').value,task_id:$('#task-select').value,seed:Number($('#scene-seed').value)});fillTask();});
+  $('#apply-scene').addEventListener('click',async()=>{const result=await context.operate({action:'scene',scene_id:$('#scene-select').value,task_id:$('#task-select').value,seed:Number($('#scene-seed').value)});if(result)fillTask();});
   $('#policy-kind').addEventListener('change',updatePolicySummary);
   $('#policy-form').addEventListener('submit',event=>{event.preventDefault();startPolicy(false);});
   $('#policy-one-chunk').addEventListener('click',()=>startPolicy(true));
@@ -163,12 +168,9 @@ export async function initResearch(callbacks){
   $('#analysis-model').addEventListener('change',()=>fillSelect($('#analysis-task'),analysisCatalog.filter(run=>run.model===$('#analysis-model').value).map(run=>run.task),'请选择同一任务'));
   $('#result-children').addEventListener('click',event=>{const button=event.target.closest('[data-result-run]');if(button)showRun(runs.find(run=>run.run_id===button.dataset.resultRun)||{run_id:button.dataset.resultRun});});
   try{
-    [catalog,configs]=await Promise.all([request('scenes'),request('policy/config')]);
-    const initialScene=catalog.scenes[0]?.id;
-    for(const selector of ['#scene-select','#compare-scene'])options($(selector),catalog.scenes,initialScene);
-    if(initialScene){tasksFor(initialScene,$('#task-select'));tasksFor(initialScene,$('#compare-task'));}
+    const [,nextConfigs]=await Promise.all([reloadResearchCatalog(),request('policy/config')]);configs=nextConfigs;
     updateSceneInfo();updateCompareCriterion();updatePolicySummary();
-    if(!$('#policy-task').value)$('#policy-task').value=catalog.tasks[$('#task-select').value]?.instruction||'';
+    if(catalog&&!$('#policy-task').value)setTaskDraft($('#policy-task'),catalog.tasks[$('#task-select').value]?.instruction||'');
   }catch(error){context.toast(error.message);}
 }
 
@@ -199,14 +201,17 @@ async function savePolicySettings(event){
 
 export function renderResearch(state){
   if(!context)return;
-  if(catalog&&catalog.scenes.some(scene=>scene.id===state.scene_id)&&state.generation!==lastGeneration){
+  const matchingCatalog=!catalog?.engine_id||!state.backend?.engine_id||catalog.engine_id===state.backend.engine_id;
+  if(catalog&&matchingCatalog&&catalog.scenes.some(scene=>scene.id===state.scene_id)&&state.generation!==lastGeneration){
     lastGeneration=state.generation;$('#scene-select').value=state.scene_id;$('#scene-seed').value=state.seed;
     tasksFor(state.scene_id,$('#task-select'),state.evaluation?.task_id);updateSceneInfo();
     $('#model-note').hidden=!state.model_note;$('#model-note').textContent=state.model_note;
   }
+  const taskContext=JSON.stringify([state.session_id,state.backend?.engine_id,state.generation,state.evaluation?.task_id]);
+  if(taskContext!==lastTaskContext&&state.evaluation?.instruction){lastTaskContext=taskContext;for(const id of ['#command','#policy-task'])syncTaskDraft($(id),state.evaluation.instruction);}
   renderSceneEvaluation(state.evaluation);
   if(state.model==='rm65_gaia'){$('#gripper-label').textContent='灵巧手';$('#gripper-status').textContent='15 关节';$('#gripper-detail').textContent='可在关节控制中逐指调节';}
-  const policy=state.policy||{},comparison=state.comparison||{},locked=!!(state.ready===false||state.backend_switching||state.agent?.active||policy.active||comparison.active||state.research?.active||state.experiment?.active||state.benchmark?.active);
+  const policy=state.policy||{},comparison=state.comparison||{},locked=!!(state.ready===false||state.backend_switching||!matchingCatalog||context.catalogReady?.()===false||state.agent?.active||policy.active||comparison.active||state.research?.active||state.experiment?.active||state.benchmark?.active);
   policyRobot=state.model;researchControlsLocked=locked;environmentDiscrete=['text','discrete'].includes(state.backend?.action_mode);
   $('#policy-status').textContent=statuses[policy.status]||policy.status||'等待任务';$('#policy-message').textContent=policy.message||'';
   $('#policy-round').textContent=`${policy.round||0} / ${policy.max_rounds||configs[$('#policy-kind').value]?.max_chunks||60} 次`;
@@ -417,7 +422,8 @@ function renderResultAnalysis(analysis,run,events=[]){
   $('#result-task-text').textContent=analysis.task||run.task||'';const message=analysis.message||analysis.error||run.message||'';$('#result-outcome-message').textContent=typeof message==='string'?message:JSON.stringify(message);$('#result-outcome-message').hidden=!message;$('#result-outcome-message').classList.toggle('error',['error','failed','blocked'].includes(analysis.status||run.status));
   $('#result-data-issues').textContent=(analysis.issues||[]).length?`记录读取提示：${analysis.issues.join('；')}`:'';$('#result-data-issues').hidden=!analysis.issues?.length;
   const environmentSteps=metric((analysis.metrics??run.metrics)?.environment_steps);
-  $('#result-summary').innerHTML=[[analysis.record_origin==='external_import'?'本次归档耗时':'完整墙钟',secondsText(wall)],['模型调用次数',numberText(total.calls)],['总 tokens',numberText(total.total_tokens)],['输出 tokens',numberText(total.output_tokens)],['累计调用耗时',secondsText(total.inference_s)],['用量记录',total.usage_complete?'完整':'存在缺失'],...(environmentSteps==null?[]:[['环境动作步数',numberText(environmentSteps)]])].map(([label,value])=>`<div><small>${escape(label)}</small><strong>${escape(value)}</strong></div>`).join('');
+  const usageLabel=total.calls===0&&total.input_tokens===0&&total.output_tokens===0?'无模型调用':total.usage_complete?'完整':'存在缺失';
+  $('#result-summary').innerHTML=[[analysis.record_origin==='external_import'?'本次归档耗时':'完整墙钟',secondsText(wall)],['模型调用次数',numberText(total.calls)],['总 tokens',numberText(total.total_tokens)],['输出 tokens',numberText(total.output_tokens)],['累计调用耗时',secondsText(total.inference_s)],['用量记录',usageLabel],...(environmentSteps==null?[]:[['环境动作步数',numberText(environmentSteps)]])].map(([label,value])=>`<div><small>${escape(label)}</small><strong>${escape(value)}</strong></div>`).join('');
   renderResultCompletion(analysis,run,events);
   renderNativeBenchmark(analysis);
   renderResultCost(analysis.cost);

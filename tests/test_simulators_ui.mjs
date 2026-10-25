@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import {setTaskDraft,syncTaskDraft} from '../src/task_drafts.js';
 
 class Element{
   constructor(tag='div'){this.tagName=tag;this.children=[];this.value='';this.disabled=false;this.hidden=false;this.attributes={};this.listeners={};this.classes=new Set();this.classList={toggle:(name,on)=>on?this.classes.add(name):this.classes.delete(name)};}
@@ -22,7 +23,7 @@ const catalog=(genesisStatus='available')=>({active:'mujoco',session_id:'session
 function setup(responses,onChanged=async()=>{},file='simulators.js'){
   const nodes=new Map(),calls=[];
   const element=id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id);};
-  const scope=vm.createContext({URL,URLSearchParams,console,callbacks:{onChanged},document:{querySelector:selector=>element(selector.slice(1)),createElement:tag=>new Element(tag)},fetch:async(url,options={})=>{
+  const scope=vm.createContext({URL,URLSearchParams,console,setTaskDraft,syncTaskDraft,callbacks:{onChanged},document:{querySelector:selector=>element(selector.slice(1)),createElement:tag=>new Element(tag)},fetch:async(url,options={})=>{
     calls.push({url,...options});
     const next=responses.shift();
     if(next instanceof Error)throw next;
@@ -30,7 +31,7 @@ function setup(responses,onChanged=async()=>{},file='simulators.js'){
     assert.ok(next,'Unexpected request');
     return{ok:next.status==null||next.status<400,status:next.status||200,json:async()=>structuredClone(next.body)};
   }});
-  const source=readFileSync(new URL('../src/'+file,import.meta.url),'utf8').replace(/\bexport /g,'');
+  const source=readFileSync(new URL('../src/'+file,import.meta.url),'utf8').replace(/^import .*;\s*$/gm,'').replace(/\bexport /g,'');
   vm.runInContext(source,scope);
   return{element,calls,run:code=>vm.runInContext(code,scope),scope};
 }

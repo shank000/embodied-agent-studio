@@ -8,6 +8,7 @@ import {initEnvironment,renderEnvironment} from './environment.js';
 import {initLayout} from './layout.js';
 import {initRepair,renderRepair} from './repair.js';
 import {initMultiarm,renderMultiarm,updateModelCatalog} from './multiarm.js';
+import {setTaskDraft} from './task_drafts.js';
 
 const icons={
   cube:'<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9M8 5.2l8 4.6"/>',
@@ -24,18 +25,22 @@ document.querySelectorAll('[data-icon-before]').forEach(el=>el.insertAdjacentHTM
 const $=s=>document.querySelector(s);
 let state=null, generation=-1, activeRobot='', connected=false, busy=false, toastTimer, lastTaskKey='', lastEvent=0, frameStarted=false;
 let agentConfig=null, lastObservation=-1, lastHistory='';
+let renderedModelContext='';
 let catalogSession='',catalogLoading=false,catalogPromise=null;
 function reloadWorkspaceCatalog(){
   if(catalogPromise)return catalogPromise;
   catalogLoading=true;
   catalogPromise=(async()=>{
+    const session=state?.session_id,engine=state?.backend?.engine_id;
     try{
       const response=await fetch('/api/models');if(!response.ok)throw new Error('模型目录读取失败');
-      const models=await response.json();updateModelCatalog(models,state?.model);
-      await Promise.all([reloadResearchCatalog(),reloadRsiCatalog()]);
-      catalogSession=state?.session_id||'';enableControls();return true;
+      const models=await response.json();
+      if(session!==state?.session_id||engine!==state?.backend?.engine_id)return false;
+      const refreshed=await Promise.all([reloadResearchCatalog(engine),reloadRsiCatalog(engine)]);
+      if(refreshed.some(result=>result===false)||session!==state?.session_id||engine!==state?.backend?.engine_id)return false;
+      updateModelCatalog(models,state?.model);catalogSession=session||'';return true;
     }catch(error){toast(error.message);return false;}
-    finally{catalogLoading=false;catalogPromise=null;}
+    finally{catalogLoading=false;catalogPromise=null;enableControls();}
   })();
   return catalogPromise;
 }
@@ -59,9 +64,9 @@ async function agentApi(path,payload){
 }
 function enableControls(){
   const enabled=connected&&!busy&&!state?.backend_switching;
-  document.querySelectorAll('.sim-action, [data-model], #reset, #view-reset, #pause, #gripper-open, #gripper-close, #stop, #send, #command, #speed, #apply-scene, #scene-select, #task-select, #scene-seed, .viewer-options input, #joint-controls input, [data-view]').forEach(el=>el.disabled=!enabled);
+  document.querySelectorAll('.sim-action, [data-model], #reset, #view-reset, #pause, #gripper-open, #gripper-close, #stop, #send, #command, #speed, #apply-scene, #scene-select, #task-select, #scene-seed, #use-task, .viewer-options input, #joint-controls input, [data-view]').forEach(el=>el.disabled=!enabled);
   $('#step').disabled=!enabled||!state?.paused;
-  const active=['running','settling'].includes(state?.task.status);
+  const active=['running','settling'].includes(state?.task?.status);
   document.querySelectorAll('[data-action="home"],[data-action="demo"]').forEach(el=>el.disabled=!enabled||active);
   const takeover=!!(state?.agent?.active||state?.policy?.active||state?.comparison?.active||state?.research?.active||state?.experiment?.active||state?.benchmark?.active);
   $('#agent-record-video').disabled=!enabled||takeover;
@@ -74,6 +79,9 @@ function enableControls(){
   if(takeover)document.querySelectorAll('[data-model],#joint-controls input,.sim-action,#gripper-open,#gripper-close,#command,#send,#speed,#gravity,#step,#apply-scene,#scene-select,#task-select,#scene-seed').forEach(el=>el.disabled=true);
   const capabilities=state?.backend?.capabilities;
   if(capabilities){for(const el of document.querySelectorAll('[data-action]'))if(!capabilities.includes(el.dataset.action))el.disabled=true;
+    const presets=[...document.querySelectorAll('.sim-action')];
+    for(const preset of presets)preset.hidden=!capabilities.includes(preset.dataset.action);
+    const presetHeading=$('.tasks-heading');if(presetHeading)presetHeading.hidden=!presets.some(preset=>!preset.hidden);
     for(const name of ['contacts','joints','collision'])if(!capabilities.includes('flags'))$(`#show-${name}`).disabled=true;
     if(!capabilities.includes('gravity'))$('#gravity').disabled=true;
     if(!capabilities.includes('instruction'))for(const id of ['#gripper-open','#gripper-close'])$(id).disabled=true;
@@ -83,14 +91,15 @@ function enableControls(){
   $('#agent-environment-steps').disabled=!enabled||takeover||!discrete;
   $('#policy-tab').disabled=discrete;$('#joints-tab').disabled=discrete;
   if(discrete)$('#pause').disabled=true;
+  if(catalogLoading||state?.session_id!==catalogSession)document.querySelectorAll('[data-model],#apply-scene,#scene-select,#task-select,#scene-seed,#use-task').forEach(el=>el.disabled=true);
 }
 async function operate(payload,{message=false}={}){
   if(!connected||busy)return;
   try{
     busy=true;enableControls();
     if(payload.action==='load'){$('#scene-error').hidden=false;$('#scene-error').textContent='正在编译模型与加载原生渲染资源…';}
-    const result=await api(payload);await poll();if(message)toast(result.message);
-  }catch(error){toast(error.message);}
+    const result=await api(payload);await poll();if(message)toast(result.message);return result;
+  }catch(error){toast(error.message);return null;}
   finally{busy=false;enableControls();if(connected)$('#scene-error').hidden=true;}
 }
 const angular=a=>!a.unit||a.unit==='rad';
@@ -144,8 +153,14 @@ function renderTask(){
   $('#task-result').textContent=task.status==='failed'&&task.message?task.message:status[task.status]||task.status;
 }
 function renderState(){
-  if(state.generation!==generation||state.active_robot!==activeRobot){generation=state.generation;activeRobot=state.active_robot;buildJoints();}
+  const modelContext=JSON.stringify([state.session_id,state.backend?.engine_id,state.model]);
+  if(state.generation!==generation||state.active_robot!==activeRobot||modelContext!==renderedModelContext){generation=state.generation;activeRobot=state.active_robot;renderedModelContext=modelContext;lastEvent=0;$('#event-log').replaceChildren();buildJoints();}
   const discrete=['text','discrete'].includes(state.backend?.action_mode);
+  const textEnvironment=state.backend?.action_mode==='text';
+  $('.scene-column').dataset.actionMode=state.backend?.action_mode||'tcp_pose';
+  $('.viewport-panel').hidden=textEnvironment;$('.telemetry').hidden=textEnvironment;
+  frame.alt=textEnvironment?'原生文字观察预览（用于视频与回放）':`${state.engine} 原生相机画面`;
+  frame.title=state.backend?.capabilities?.includes('camera')?'左键拖动旋转；右键、中键或 Shift + 左键拖动平移；滚轮缩放。点击预设视角可复位。':textEnvironment?'任务观察与可执行动作显示在环境交互面板。':'使用环境交互中的原生导航命令改变视角。';
   environmentBudget.hidden=!discrete;
   $('#connection').replaceChildren(document.createElement('i'),document.createTextNode(`${state.engine} 已连接`));$('#fps').textContent=`${state.fps.toFixed(0)} FPS`;$('#sim-time').textContent=discrete?`第 ${state.steps} 步`:`t = ${state.time.toFixed(3)} s`;
   const active=['running','settling'].includes(state.task.status);
@@ -209,11 +224,14 @@ function renderAgent(){
     for(const name of ['front','side','wrist']){const img=$(`#camera-${name}`),visible=names.includes(name);img.closest('figure').hidden=!visible;img.hidden=!valid||!visible;img.nextElementSibling.hidden=valid&&visible;if(valid&&visible)img.src=`/api/${sourceName}/camera/${name}?observation=${source.observation_id}`;else img.removeAttribute('src');}
   }
 }
-function disconnected(message){
-  connected=false;$('#connection').textContent='仿真服务未连接';$('#scene-error').hidden=false;$('#scene-error').replaceChildren();
-  const title=document.createElement('strong');title.textContent='仿真服务未连接';const detail=document.createElement('p');detail.textContent=message;
-  const help=document.createElement('p');help.textContent='请启动项目中的仿真服务，再点击下方按钮重新连接。';const retry=document.createElement('button');retry.textContent='重新连接';retry.className='secondary';retry.addEventListener('click',()=>{frameStarted=false;poll();});$('#scene-error').append(title,detail,help,retry);
-  frame.removeAttribute('src');frameStarted=false;$('#robot-status').textContent='离线';$('#scene-status').textContent='引擎离线';$('#status-dot').classList.remove('running');enableControls();
+function disconnected(message,{serviceReachable=false}={}){
+  const status=serviceReachable?'仿真环境未就绪':'仿真服务未连接';
+  connected=false;state={...state,ready:false};$('#connection').textContent=status;$('#scene-error').hidden=false;$('#scene-error').replaceChildren();
+  $('.viewport-panel').hidden=false;
+  const title=document.createElement('strong');title.textContent=status;const detail=document.createElement('p');detail.textContent=message;
+  const help=document.createElement('p');help.textContent=serviceReachable?'仿真服务仍在线。可在左侧“仿真环境”中点击“重新加载环境”，或选择其他已安装环境。':'请启动项目中的仿真服务，再点击下方按钮重新连接。';const retry=document.createElement('button');retry.textContent=serviceReachable?'刷新环境状态':'重新连接';retry.className='secondary';retry.addEventListener('click',()=>{frameStarted=false;poll();});$('#scene-error').append(title,detail,help,retry);
+  frame.removeAttribute('src');frameStarted=false;$('#robot-status').textContent=serviceReachable?'未就绪':'离线';$('#scene-status').textContent=serviceReachable?'引擎未就绪':'引擎离线';$('#status-dot').classList.remove('running');enableControls();
+  renderResearch(state);renderRsi(state);renderMultiarm(state,{disabled:true});renderEnvironment(state);renderSimulator(state);renderBenchmarks(state);
 }
 let pollPromise=null,lastPollAt=0,lastPollError='';
 function poll(){
@@ -228,7 +246,8 @@ async function pollState(){
     if(!next.ready){
       state=next;renderSimulator(next);
       if(next.model&&next.task&&next.actuators){renderAgent();renderResearch(next);renderRsi(next);renderRepair(next);}
-      throw new Error(next.error||'引擎尚未准备好');
+      lastPollError=next.error||'环境仍在初始化，请等待完成。';
+      disconnected(lastPollError,{serviceReachable:true});return;
     }
     state=next;connected=true;if(!frameStarted){frame.src=`/api/stream?session=${Date.now()}`;frameStarted=true;}
     $('#scene-error').hidden=true;renderState();lastPollError='';
@@ -257,7 +276,7 @@ async function submit(event,oneRound=false){
 $('#command-form').addEventListener('submit',submit);$('#command').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();submit();}});
 $('#help').addEventListener('click',()=>$('#help-dialog').showModal());$('#close-help').addEventListener('click',()=>$('#help-dialog').close());
 $('#agent-one-round').addEventListener('click',()=>submit(null,true));
-$('#example-task').addEventListener('click',()=>{$('#command').value=state?.evaluation?.instruction||'';$('#command').focus();});
+$('#example-task').addEventListener('click',()=>{setTaskDraft($('#command'),state?.evaluation?.instruction||'');$('#command').focus();});
 $('#agent-stop').addEventListener('click',async()=>{try{await agentApi('stop',{});await poll();}catch(error){toast(error.message);}});
 $('#capture-observation').addEventListener('click',async()=>{busy=true;enableControls();try{await agentApi('observe',{});await poll();}catch(error){toast(error.message);}finally{busy=false;enableControls();}});
 const providerNames={codex:'Codex · 本机登录',openai:'OpenAI · Responses API',compatible:'兼容服务 · Chat Completions',anthropic:'Claude · Messages API',custom:'自定义 Agent 服务'};
@@ -320,8 +339,8 @@ $('#close-agent-config').addEventListener('click',()=>$('#agent-config-dialog').
 $('#agent-config-form').addEventListener('submit',async event=>{event.preventDefault();try{if(capabilityLoading)throw new Error('模型能力正在读取，请稍候再应用。');agentConfig=await agentApi('config',{provider:$('#config-provider').value,model:$('#config-model').value.trim(),base_url:$('#config-base-url').value.trim(),api_key:$('#config-api-key').value,reasoning:selectedReasoning(),reasoning_native:true,deepseek_thinking:$('#config-deepseek-thinking').value,max_output_tokens:$('#config-output-tokens').disabled?(agentConfig?.max_output_tokens??16384):Number($('#config-output-tokens').value),max_rounds:Number($('#config-rounds').value)||null,timeout_s:Number($('#config-timeout').value)});$('#config-api-key').value='';updateConfigSummary();$('#agent-config-dialog').close();toast('模型配置已应用。');}catch(error){$('#config-error').textContent=error.message;$('#config-error').hidden=false;}});
 agentApi('config').then(config=>{agentConfig=config;updateConfigSummary();}).catch(()=>{});
 initBenchmarks({toast});
-initResearch({operate,toast,selectTab});
-initRsi({operate,toast,selectTab});
+initResearch({operate,toast,selectTab,getState:()=>state,catalogReady:()=>!catalogLoading&&state?.session_id===catalogSession});
+initRsi({operate,toast,selectTab,getState:()=>state,catalogReady:()=>!catalogLoading&&state?.session_id===catalogSession});
 initRepair({toast});
 initMultiarm({operate});
 initEnvironment({execute:async payload=>{if(!connected||busy)throw new Error('工作台正在处理其他操作，请稍后重试。');busy=true;enableControls();try{const result=await api(payload);await poll();return result;}finally{busy=false;enableControls();}}});
@@ -344,7 +363,7 @@ async function flushCamera(){
   finally{cameraSending=false;if(Object.values(cameraPending).some(Boolean))flushCamera();}
 }
 frame.addEventListener('contextmenu',e=>e.preventDefault());
-frame.addEventListener('pointerdown',e=>{if(![0,1,2].includes(e.button))return;e.preventDefault();pointer={id:e.pointerId,x:e.clientX,y:e.clientY,pan:e.button!==0||e.shiftKey};frame.setPointerCapture(e.pointerId);});
+frame.addEventListener('pointerdown',e=>{if(!connected||state?.backend?.capabilities&&!state.backend.capabilities.includes('camera')||![0,1,2].includes(e.button))return;e.preventDefault();pointer={id:e.pointerId,x:e.clientX,y:e.clientY,pan:e.button!==0||e.shiftKey};frame.setPointerCapture(e.pointerId);});
 frame.addEventListener('pointermove',e=>{
   if(!pointer||pointer.id!==e.pointerId)return;
   const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;
@@ -356,6 +375,6 @@ frame.addEventListener('pointermove',e=>{
   pointer.x=e.clientX;pointer.y=e.clientY;flushCamera();
 });
 for(const type of ['pointerup','pointercancel','lostpointercapture'])frame.addEventListener(type,e=>{if(pointer?.id===e.pointerId)pointer=null;});
-frame.addEventListener('wheel',e=>{e.preventDefault();cameraPending.zoom+=e.deltaY*.001;flushCamera();},{passive:false});
+frame.addEventListener('wheel',e=>{if(!connected||state?.backend?.capabilities&&!state.backend.capabilities.includes('camera'))return;e.preventDefault();cameraPending.zoom+=e.deltaY*.001;flushCamera();},{passive:false});
 frame.addEventListener('error',()=>{frameStarted=false;if(connected){$('#scene-error').hidden=false;$('#scene-error').textContent='原生画面连接中断，正在重新连接。';}});
 poll();setInterval(()=>{if(!busy&&(connected||Date.now()-lastPollAt>2000))poll();},250);

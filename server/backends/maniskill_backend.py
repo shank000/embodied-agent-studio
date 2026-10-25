@@ -138,6 +138,7 @@ class ManiSkillSimulation:
         if self.env is not None:
             self.cameras = {}; self.kinematics = None; self.robot = None
             self.env.close()
+            self.env = None
         self.env = gym.make(TASKS[self.task_id]['env_id'], robot_uids='panda', num_envs=1,
             obs_mode='none', reward_mode='none', control_mode='pd_joint_pos',
             sim_backend='physx_cpu', render_backend='gpu' if self.render_enabled else 'none',
@@ -427,16 +428,21 @@ class ManiSkillSimulation:
 
     def command(self, payload):
         action = payload['action']
-        if action in ('load', 'scene'):
+        if action in ('load', 'scene', 'reset'):
             model = payload.get('model', self.model_id); scene = payload.get('scene_id', self.scene_id)
             task = payload.get('task_id') or scene
             self._validate(model, scene, task)
             old = self.scene_id
-            self.model_id, self.scene_id, self.task_id, self.seed = model, scene, task, payload.get('seed', self.seed)
-            if old != scene: self._load()
-            else: self.reset()
+            try:
+                self.model_id, self.scene_id, self.task_id, self.seed = model, scene, task, payload.get('seed', self.seed)
+                if old != scene: self._load()
+                else: self.reset()
+            except Exception as exc:
+                cleanup = ''
+                try: self.close()
+                except Exception as cleanup_exc: cleanup = f'；资源清理失败：{cleanup_exc}'
+                raise RuntimeError(f'ManiSkill 场景重建失败，仿真进程未就绪：{type(exc).__name__}: {exc}{cleanup}') from exc
             self.generation += 1
-        elif action == 'reset': self.reset(); self.generation += 1
         elif action == 'pause': self.paused = bool(payload['value'])
         elif action == 'render_suspend': self.render_suspended = bool(payload['value']); self.paused = True
         elif action == 'step':
@@ -482,9 +488,9 @@ class ManiSkillSimulation:
         return '操作已完成。'
 
     def close(self):
-        if self.env is not None:
-            self.cameras = {}; self.kinematics = None; self.robot = None
-            self.env.close(); self.env = None
+        environment, self.env = self.env, None
+        self.cameras = {}; self.kinematics = None; self.robot = None
+        if environment is not None: environment.close()
         if self._sdk_directory is not None:
             folder = self._sdk_directory.name
             if folder in sys.path: sys.path.remove(folder)

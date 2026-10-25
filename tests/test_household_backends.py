@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import zipfile
 
 from server.backends.alfworld_backend import ALFWorldSimulation
@@ -14,6 +14,61 @@ from server.backends.thor_backend import ThorSimulation, decode_action
 
 
 class HouseholdActionContracts(unittest.TestCase):
+    def restore_fixture(self):
+        sim = object.__new__(ALFWorldSimulation)
+        sim.backend = {'engine_id':'alfworld','engine_version':'test-fixture','state_schema':'alfworld-integration-v1'}
+        sim.model_id, sim.scene_id, sim.task_id, sim.seed, sim.generation = 'alfworld_agent', 'alfworld_unseen', 'pick_and_place_simple', 42, 7
+        sim.episode_id = 'official-episode'
+        sim.reset, sim.execute = Mock(), Mock()
+        sim.native_success = lambda:False
+        sim.environment = lambda:{'observation_text':'official observation'}
+        checkpoint = {'backend':sim.backend.copy(),'model':sim.model_id,'scene_id':sim.scene_id,
+            'task_id':sim.task_id,'seed':sim.seed,'episode_id':sim.episode_id,'actions':[],
+            'native_success':False,'environment':sim.environment()}
+        return sim, checkpoint
+
+    def test_invalid_checkpoint_identity_is_rejected_before_native_mutation(self):
+        for field, value in [('backend',{'engine_id':'mujoco'}),('backend','mujoco'),
+                ('backend',[1]),('environment',None),('native_success',1),('episode_id',''),('actions',[''])]:
+            with self.subTest(field=field,value=value):
+                sim, checkpoint = self.restore_fixture();checkpoint[field] = value
+                with self.assertRaises(ValueError): sim.restore(checkpoint)
+                sim.reset.assert_not_called();sim.execute.assert_not_called()
+                self.assertEqual(sim.generation,7)
+
+    def test_failed_reset_or_replay_cannot_leave_a_ready_partial_episode(self):
+        for phase in ('reset','action','observation'):
+            with self.subTest(phase=phase):
+                sim, checkpoint = self.restore_fixture()
+                if phase == 'reset': sim.reset.side_effect = ValueError('fixture asset missing')
+                elif phase == 'action':
+                    checkpoint['actions'] = ['fixture action']
+                    sim.execute.side_effect = ValueError('fixture action rejected')
+                else: checkpoint['environment'] = {'observation_text':'different observation'}
+                with self.assertRaisesRegex(RuntimeError,'检查点恢复失败') as error: sim.restore(checkpoint)
+                self.assertIsInstance(error.exception.__cause__,ValueError)
+                self.assertEqual(sim.generation,8)
+
+    def test_layout_seed_uses_the_public_unsigned_32_bit_range(self):
+        for seed in (2147483648,4294967295):
+            with self.subTest(seed=seed):
+                sim, checkpoint = self.restore_fixture()
+                with patch('server.backends.alfworld_backend.version',return_value='test-fixture'):
+                    sim._initialize(sim.model_id,sim.scene_id,seed,sim.task_id)
+                self.assertEqual(sim.seed,seed)
+                sim.command({'action':'scene','seed':seed})
+                checkpoint['seed'] = seed
+                self.assertTrue(sim.restore(checkpoint)['restored'])
+                self.assertEqual(sim.seed,seed)
+        for seed in (-1,4294967296,True):
+            sim, checkpoint = self.restore_fixture()
+            checkpoint['seed'] = seed
+            with self.subTest(invalid=seed):
+                with self.assertRaises(ValueError): sim.command({'action':'scene','seed':seed})
+                with self.assertRaises(ValueError): sim.restore(checkpoint)
+                sim.reset.assert_not_called()
+                self.assertEqual(sim.generation,7)
+
     def test_unity_debug_actions_and_force_parameters_are_rejected(self):
         for action in ('TeleportFull', 'SetObjectPoses', '{"action":"OpenObject","objectId":"x","forceAction":true}',
                        '{"action":"TeleportFull","objectId":"x"}', '[]', 'null'):
@@ -194,6 +249,11 @@ class NativeALFWorldTests(unittest.TestCase):
         self.assertEqual(image.shape, (640, 960, 3))
         self.sim.reset()
         self.assertEqual((self.sim.episode_id, self.sim.observation_text), (episode, observation))
+        self.sim.command({'action':'scene','seed':4294967295})
+        maximum_seed_checkpoint = self.sim.checkpoint()
+        self.sim.execute('look');self.sim.restore(maximum_seed_checkpoint)
+        self.assertEqual(self.sim.seed,4294967295)
+        self.assertEqual(self.sim.environment(),maximum_seed_checkpoint['environment'])
 
 
 @unittest.skipUnless(os.environ.get('EMBODI_TEST_THOR') == '1', 'Requires the isolated AI2-THOR SDK, Unity assets and usable display')

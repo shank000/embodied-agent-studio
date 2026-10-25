@@ -116,3 +116,22 @@ class RoboDojoIntegrationTests(unittest.TestCase):
                 self.assertIsNone(controller.task);self.assertIsNone(controller.process)
                 self.assertIsNone(controller.log)
         asyncio.run(scenario())
+
+    def test_accepted_job_stopped_before_first_tick_is_archived_and_unlocked(self):
+        async def scenario():
+            controller=robodojo.RoboDojoController()
+            source=self.root/'source';adapter=source/'XPolicyLab/policy/demo_policy/deploy.py'
+            adapter.parent.mkdir(parents=True);adapter.write_text('# synthetic policy fixture',encoding='utf-8')
+            config={'kind':'native','source_root':str(source),'python':'fixture-python-not-executed'}
+            with patch.object(robodojo,'plan',return_value={'ready':True,'commands':[]}), \
+                    patch.object(robodojo,'runtime_config',return_value=config):
+                state=await controller.start({});identifier=state['run_id']
+                await controller.stop()
+            self.assertFalse(controller.state['active']);self.assertEqual(controller.state['status'],'stopped')
+            self.assertIsNone(controller.process)
+            record=analyze_run(identifier)
+            self.assertEqual(record['status'],'stopped')
+            self.assertEqual(record['model'],'demo_policy')
+            self.assertEqual(record['rounds'],[])
+            self.assertIn('尚未开始',record['message'])
+        asyncio.run(scenario())

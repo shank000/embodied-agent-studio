@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import {setTaskDraft,syncTaskDraft} from '../src/task_drafts.js';
 
 class Element {
   constructor(tag='div', id='') { this.tagName=tag;this.id=id;this.children=[];this.dataset={};this.value='';this.hidden=false;this.disabled=false;this.open=false;this.scrollTop=0;this.scrollLeft=0;this.classList={toggle(){}}; }
+  get options(){return this.children.filter(child=>child.tagName==='option');}
   set textContent(value) { this.replaceChildren();this.text=String(value); }
   get textContent() { return (this.text||'')+this.children.map(child=>child.textContent).join(''); }
   set innerHTML(value) {
@@ -15,7 +17,7 @@ class Element {
   }
   get innerHTML() { return this.html||''; }
   replaceChildren(...nodes) { for(const child of this.children)child.parentElement=null;this.children=[];this.text='';this.html='';this.append(...nodes); }
-  append(...nodes) { for(const node of nodes)this.insertBefore(node,null); }
+  append(...nodes) { for(const node of nodes)this.insertBefore(node,null);if(this.tagName==='select'&&!this.options.some(option=>option.value===this.value))this.value=this.options[0]?.value||''; }
   insertBefore(node,before) { node.remove();const index=before?this.children.indexOf(before):this.children.length;this.children.splice(index,0,node);node.parentElement=this; }
   remove() { if(this.parentElement){const list=this.parentElement.children;list.splice(list.indexOf(this),1);this.parentElement=null;} }
   querySelectorAll(selector) {
@@ -32,7 +34,7 @@ class Element {
 
 function moduleContext(file,extra={}) {
   const nodes=new Map(),element=id=>{if(!nodes.has(id))nodes.set(id,new Element('div',id));return nodes.get(id);};
-  const scope=vm.createContext({console,URLSearchParams,window:{addEventListener(){}},...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
+  const scope=vm.createContext({console,URLSearchParams,setTaskDraft,syncTaskDraft,window:{addEventListener(){}},...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
   const code=readFileSync(new URL('../src/'+file,import.meta.url),'utf8').replace(/^import .*;\s*$/gm,'').replace(/\bexport /g,'');
   vm.runInContext(code,scope);
   return {scope,element,run:code=>vm.runInContext(code,scope)};
@@ -337,4 +339,155 @@ test('external benchmark archives label archive time and keep external inference
   assert.doesNotMatch(element('result-summary').innerHTML,/完整墙钟/);
   assert.match(element('result-native-benchmark').textContent,/原实验墙钟.*未上报/);
   run('clearResult()');assert.equal(element('result-native-benchmark').hidden,true);
+});
+
+test('known empty cancelled runs show no calls while unknown historical usage remains missing',()=>{
+  const {scope,element,run}=resultsContext();
+  scope.analysis={run_id:'cancelled-fixture',status:'stopped',rounds:[],total:{calls:0,input_tokens:0,output_tokens:0,usage_complete:false}};
+  run('renderResultAnalysis(analysis,{},[])');
+  assert.match(element('result-summary').innerHTML,/无模型调用/);
+  scope.analysis.total={calls:0,input_tokens:null,output_tokens:null,usage_complete:false};
+  run('renderResultAnalysis(analysis,{},[])');
+  assert.match(element('result-summary').innerHTML,/存在缺失/);
+  assert.doesNotMatch(element('result-summary').innerHTML,/无模型调用/);
+});
+
+test('generated task instructions follow the active environment while handwritten tasks survive changes',()=>{
+  const {scope,element,run}=resultsContext();
+  scope.active={session_id:'robot-session',generation:1,model:'panda',backend:{engine_id:'mujoco'},evaluation:{task_id:'drawer',instruction:'Open the drawer.'},policy:{},comparison:{}};
+  run('renderResearch(active)');
+  assert.equal(element('command').value,'Open the drawer.');
+  assert.equal(element('policy-task').value,'Open the drawer.');
+  element('policy-task').value='My custom research task';
+  scope.active={...scope.active,session_id:'text-session',generation:2,model:'alfworld_agent',backend:{engine_id:'alfworld',action_mode:'text'},evaluation:{task_id:'put',instruction:'Put the mug in the sink.'}};
+  run('renderResearch(active)');
+  assert.equal(element('command').value,'Put the mug in the sink.');
+  assert.equal(element('policy-task').value,'My custom research task');
+});
+
+test('a rejected scene application does not replace task drafts with an unapplied candidate',async()=>{
+  const {scope,element,run}=resultsContext();
+  scope.nativeCatalog={engine_id:'fixture',scenes:[{id:'room',name:'Room',tasks:['one','two']}],tasks:{one:{name:'One',instruction:'First task'},two:{name:'Two',instruction:'Second task'}}};
+  run("request=async path=>path==='scenes'?nativeCatalog:{}");
+  await run('initResearch({toast(){},operate:async()=>null,selectTab(){}})');
+  element('task-select').value='two';element('command').value='Keep this task';element('policy-task').value='Keep policy task';
+  await element('apply-scene').listeners.click();
+  assert.equal(element('command').value,'Keep this task');assert.equal(element('policy-task').value,'Keep policy task');
+  run('context.operate=async()=>({ok:true})');await element('apply-scene').listeners.click();
+  assert.equal(element('command').value,'Second task');assert.equal(element('policy-task').value,'Second task');
+});
+
+for(const [file,reload] of [['research.js','reloadResearchCatalog'],['rsi.js','reloadRsiCatalog']])test(`${file} rejects an old engine catalog that arrives after the replacement`,async()=>{
+  const {scope,element,run}=moduleContext(file);
+  if(file==='rsi.js')element('rsi-protocol-scene').tagName='select';
+  scope.first={engine_id:'first',scenes:[{id:'first-room',name:'First',tasks:['a']}],tasks:{a:{name:'A'}}};
+  scope.second={engine_id:'second',scenes:[{id:'second-room',name:'Second',tasks:['b']}],tasks:{b:{name:'B'}}};
+  run("let pending=[];let live={backend:{engine_id:'first'}};context={getState:()=>live};request=()=>new Promise(resolve=>pending.push(resolve));");
+  const old=run(`${reload}('first')`);
+  run("live={backend:{engine_id:'second'}}");const current=run(`${reload}('second')`);
+  run('pending[1](second)');assert.equal(await current,true);
+  run('pending[0](first)');assert.equal(await old,false);
+  assert.equal(run('catalog.engine_id'),'second');
+  assert.equal(element(file==='research.js'?'scene-select':'rsi-protocol-scene').value,'second-room');
+});
+
+test('workspace model responses cannot mark an old catalog as belonging to a new session',async()=>{
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
+  const code=source.slice(source.indexOf('function reloadWorkspaceCatalog()'),source.indexOf('const frame='));
+  const updates=[],scope=vm.createContext({updates,toast(){},enableControls(){},updateModelCatalog:models=>updates.push(models),reloadResearchCatalog:async()=>true,reloadRsiCatalog:async()=>true});
+  vm.runInContext("let state={session_id:'old',backend:{engine_id:'old'}};let catalogSession='',catalogLoading=false,catalogPromise=null;let pending=[];let fetch=()=>new Promise(resolve=>pending.push(resolve));",scope);
+  vm.runInContext(code,scope);const first=vm.runInContext('reloadWorkspaceCatalog()',scope);
+  vm.runInContext("state={session_id:'new',backend:{engine_id:'new'}};pending[0]({ok:true,json:async()=>[{id:'old-robot'}]})",scope);
+  assert.equal(await first,false);assert.equal(updates.length,0);assert.equal(vm.runInContext('catalogSession',scope),'');
+  const next=vm.runInContext('reloadWorkspaceCatalog()',scope);vm.runInContext("pending[1]({ok:true,json:async()=>[{id:'new-robot'}]})",scope);
+  assert.equal(await next,true);assert.equal(updates.length,1);assert.equal(updates[0][0].id,'new-robot');assert.equal(vm.runInContext('catalogSession',scope),'new');
+});
+
+test('environments without camera controls retain normal page scrolling and do not capture pointer gestures',()=>{
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8'),listeners={},calls=[];
+  const scope=vm.createContext({frame:{addEventListener:(type,fn)=>listeners[type]=fn,setPointerCapture:id=>calls.push(id)},flushCamera:()=>calls.push('camera'),calls});
+  vm.runInContext("let connected=true,state={backend:{capabilities:['observe']}},pointer=null,cameraPending={zoom:0};",scope);
+  for(const line of source.split('\n').filter(line=>line.startsWith("frame.addEventListener('pointerdown'")||line.startsWith("frame.addEventListener('wheel'")))vm.runInContext(line,scope);
+  const event={button:0,pointerId:1,deltaY:10,preventDefault:()=>calls.push('prevented')};listeners.pointerdown(event);listeners.wheel(event);
+  assert.deepEqual(calls,[]);
+  vm.runInContext("state.backend.capabilities=['camera']",scope);listeners.pointerdown(event);listeners.wheel(event);
+  assert.deepEqual(calls,['prevented',1,'prevented','camera']);
+});
+
+test('a replacement server session rebuilds robot controls even when generation and active arm repeat',()=>{
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8'),start=source.indexOf('function renderState(){')+'function renderState(){'.length;
+  const body=source.slice(start,source.indexOf('const discrete=',start)),counts={build:0,clear:0};
+  const scope=vm.createContext({counts,buildJoints:()=>counts.build++,$:()=>({replaceChildren:()=>counts.clear++})});
+  vm.runInContext("let state={session_id:'first',backend:{engine_id:'robocasa365'},model:'panda_omron',generation:1,active_robot:'arm1'};let generation=-1,activeRobot='',renderedModelContext='',lastEvent=0;",scope);
+  vm.runInContext(`function renderControls(){${body}}`,scope);vm.runInContext('renderControls();renderControls()',scope);
+  assert.equal(counts.build,1);
+  vm.runInContext("state={session_id:'second',backend:{engine_id:'mujoco'},model:'panda',generation:1,active_robot:'arm1'};renderControls()",scope);
+  assert.equal(counts.build,2);assert.equal(counts.clear,2);
+});
+
+test('initialization failures without robot fields still disable controls, and task helpers unlock after catalog sync',()=>{
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8'),body=source.slice(source.indexOf('function enableControls(){'),source.indexOf('async function operate('));
+  const nodes=new Map(),element=id=>{if(!nodes.has(id))nodes.set(id,{disabled:false});return nodes.get(id);},useTask=element('#use-task');
+  const scope=vm.createContext({$:element,document:{querySelectorAll:selector=>selector.includes('#use-task')?[useTask]:[]}});
+  vm.runInContext("let state={ready:false,error:'Native initialization failed'},connected=false,busy=false,catalogLoading=false,catalogSession='';",scope);vm.runInContext(body,scope);
+  assert.doesNotThrow(()=>vm.runInContext('enableControls()',scope));assert.equal(useTask.disabled,true);
+  vm.runInContext("state={ready:true,session_id:'new',task:{status:'idle'},paused:true};connected=true;catalogLoading=true;enableControls()",scope);assert.equal(useTask.disabled,true);
+  vm.runInContext("catalogLoading=false;catalogSession='new';enableControls()",scope);assert.equal(useTask.disabled,false);
+});
+
+for(const file of ['research.js','rsi.js'])test(`${file} locks execution after a network disconnect and unlocks after the next ready state`,()=>{
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
+  const disconnected=source.slice(source.indexOf('function disconnected('),source.indexOf('let pollPromise='));
+  const {scope,element,run}=moduleContext(file,{renderRunTimer(){},renderRunVideo(){}});
+  const methods=[{value:'agent',disabled:false},{value:'vla',disabled:false}];
+  scope.document.querySelectorAll=selector=>selector==='input[name="method"]:checked'?methods:[];
+  const render=file==='research.js'?'renderResearch':'renderRsi';
+  const other=file==='research.js'?'renderRsi':'renderResearch';
+  scope[other]=()=>{};
+  Object.assign(scope,{enableControls(){},renderMultiarm(){},renderEnvironment(){},renderSimulator(){},renderBenchmarks(){},frame:{removeAttribute(){}},poll(){}});
+  element('status-dot').classList.remove=()=>{};
+  scope.live={ready:true,session_id:'session',generation:1,model:'panda',backend:{engine_id:'mujoco'},
+    agent:{active:false},policy:{active:false,run_id:'previous-run'},comparison:{active:false},research:{},experiment:{}};
+  run('let state=live,connected=true,frameStarted=true;context={toast(){},catalogReady:()=>true,getState:()=>state};');
+  if(file==='rsi.js')run("methods=[{id:'one'},{id:'two'}];protocols=[{id:'protocol'}]");
+  element('policy-kind').value='vla';element('command').value='Keep my task';element('policy-task').value='Keep policy task';
+  run(`${render}(state)`);
+  const controls=file==='research.js'?['policy-start','policy-one-chunk','compare-start']:['rsi-run-start','rsi-experiment-start','rsi-save-protocol'];
+  for(const id of controls)assert.equal(element(id).disabled,false,id+' initially ready');
+  run(disconnected);run("disconnected('Connection refused')");
+  for(const id of controls)assert.equal(element(id).disabled,true,id+' offline');
+  assert.equal(run('state.ready'),false);assert.equal(run('state.policy.run_id'),'previous-run');
+  assert.equal(element('command').value,'Keep my task');assert.equal(element('policy-task').value,'Keep policy task');
+  assert.match(element('scene-error').textContent,/Connection refused/);
+  run(`state=live;connected=true;${render}(state)`);
+  for(const id of controls)assert.equal(element(id).disabled,false,id+' reconnected');
+  run("state=null;disconnected('Startup unavailable')");
+  for(const id of controls)assert.equal(element(id).disabled,true,id+' initial failure');
+});
+
+test('polling distinguishes a reachable unready environment from an unreachable service without replacing the real error',async()=>{
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
+  const start=source.indexOf('function disconnected(');
+  const code=source.slice(start,source.indexOf("document.querySelectorAll('[data-model]')",start));
+  for(const scenario of [
+    {state:{ready:false,error:'ALFWorld process exited: fixture cause'},status:'仿真环境未就绪',detail:'ALFWorld process exited: fixture cause',button:'刷新环境状态'},
+    {state:{ready:false},status:'仿真环境未就绪',detail:'环境仍在初始化，请等待完成。',button:'刷新环境状态'},
+    {error:'Failed to fetch',status:'仿真服务未连接',detail:'Failed to fetch',button:'重新连接'}
+  ]){
+    const nodes=new Map(),element=id=>{if(!nodes.has(id))nodes.set(id,new Element('div',id));return nodes.get(id);};
+    const rendered=[],urls=[];element('#status-dot').classList.remove=()=>{};
+    const scope=vm.createContext({AbortSignal,$:element,document:{createElement:tag=>new Element(tag)},
+      frame:{removeAttribute(){}},enableControls(){},renderAgent(){},renderRepair(){},renderState(){},
+      renderResearch:state=>rendered.push(state),renderRsi(){},renderMultiarm(){},renderEnvironment(){},renderSimulator(){},renderBenchmarks(){},
+      fetch:async url=>{urls.push(url);if(scenario.error)throw new TypeError(scenario.error);return {ok:true,json:async()=>scenario.state};}});
+    vm.runInContext('let state=null,connected=false,frameStarted=false;'+code,scope);
+    await vm.runInContext('pollState()',scope);
+    assert.equal(element('#connection').textContent,scenario.status);
+    assert.equal(element('#robot-status').textContent,scenario.state?'未就绪':'离线');
+    const error=element('#scene-error');assert.match(error.textContent,new RegExp(scenario.detail.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+    assert.equal(error.querySelector('button').textContent,scenario.button);
+    if(scenario.state){assert.match(error.textContent,/左侧.*重新加载环境/);assert.doesNotMatch(error.textContent,/请启动项目|服务未连接/);}
+    else assert.match(error.textContent,/请启动项目中的仿真服务/);
+    assert.equal(rendered.at(-1).ready,false);assert.deepEqual(urls,['/api/state']);
+  }
 });

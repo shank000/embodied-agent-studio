@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from .control import PoseAction
 from .actions import EnvironmentAction
 from .runlog import RunLog, CURRENT_LOG, model_output
-from .telemetry import track_inference, controller_timing
+from .telemetry import track_inference, controller_timing, enter_recorded_run
 from .recovery import invoke_with_recovery
 from .task_verification import public_feedback, verify_completion, environment_success
 
@@ -421,8 +421,10 @@ class AgentController:
                 'codex_available': available}
 
     def reset_observation(self):
+        if self.state.get('active'): raise ValueError('请先停止当前 Agent 任务，再清除场景观察。')
         self.observation = None
         self.observation_id += 1
+        self.run_log = None
         self.state = {'active': False, 'status': 'idle', 'round': 0, 'message': '场景已重置，等待新任务。', 'history': []}
 
     def snapshot(self):
@@ -449,6 +451,7 @@ class AgentController:
                       'record_video': request.record_video}
         self.task = asyncio.create_task(self.run(request.one_round))
         self._accepting = True
+        await enter_recorded_run(self.task, self.state)
         return self.snapshot()
 
     async def stop(self):
@@ -458,6 +461,8 @@ class AgentController:
             try: await self.task
             except asyncio.CancelledError: pass
         self.task = None
+        if self.state.get('active'):
+            self.state.update(active=False, status='stopped', message='Agent 已停止，未执行的模型输出已丢弃。')
 
     async def run(self, one_round):
         initial = None

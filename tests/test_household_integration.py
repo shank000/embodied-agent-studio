@@ -50,6 +50,36 @@ class HouseholdWorkerCase(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.getenv('EMBODI_TEST_HOUSEHOLD') == '1', 'Opt-in native ALFWorld/WSL integration')
 class ALFWorldIntegrationTests(HouseholdWorkerCase):
+    async def test_inconsistent_native_restore_marks_worker_unready_instead_of_publishing_partial_state(self):
+        worker = Worker(); worker.initial_engine_id = 'alfworld'; worker.thread.start()
+        self.addAsyncCleanup(self.close_worker, worker)
+        self.assertTrue(await asyncio.to_thread(worker.ready.wait, 30))
+        self.assertIsNone(worker.failure)
+        checkpoint = await worker.execute({'action':'checkpoint'})
+        old_session = worker.session_id
+        observation = await worker.execute({'action':'observe'})
+        action = next(value for value in observation['environment']['admissible_commands'] if value.startswith('go to '))
+        await worker.execute({'action':'environment_action','generation':observation['generation'],'environment_action':action})
+        # A mismatched saved observation simulates a replay that the current
+        # official assets cannot reproduce. Reset has already changed the world.
+        checkpoint['environment']['observation_text'] += '\nExpected observation differs.'
+        with self.assertRaises(HTTPException) as failure:
+            await worker.execute({'action':'restore','checkpoint':checkpoint})
+        self.assertEqual(failure.exception.status_code,500)
+        with worker.lock:
+            self.assertFalse(worker.snapshot['ready'])
+            self.assertIn('检查点恢复失败',worker.snapshot['error'])
+        self.assertIsNotNone(worker.failure)
+        recovered = await worker.restart('alfworld')
+        self.assertEqual(recovered['backend']['engine_id'],'alfworld')
+        self.assertNotEqual(worker.session_id,old_session)
+        self.assertIsNone(worker.failure)
+        with worker.lock: self.assertTrue(worker.snapshot['ready'])
+        with self.assertRaises(HTTPException) as stale:
+            await worker.execute({'action':'environment_action','generation':observation['generation'],'environment_action':action})
+        self.assertEqual(stale.exception.status_code,400)
+        with worker.lock: self.assertTrue(worker.snapshot['ready'])
+
     async def test_false_done_replans_native_action_and_archives_real_text_episode(self):
         worker = await self.open_worker('alfworld')
         agent = AgentController(worker)

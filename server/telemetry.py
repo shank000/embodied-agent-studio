@@ -150,6 +150,19 @@ def track_inference(phase):
     return decorate
 
 
+async def enter_recorded_run(task, state):
+    """Enter the run's logging/finally scope before acknowledging its start."""
+    await asyncio.sleep(0)
+    if task.done():
+        try: task.result()
+        except asyncio.CancelledError:
+            state.update(active=False, status='stopped', message='实验启动已取消。')
+            raise
+        except Exception as exc:
+            state.update(active=False, status='error', message=str(exc) or type(exc).__name__)
+            raise
+
+
 def controller_timing(state, log=None):
     if log is not None and state.get('run_id') == log.id:
         return {**state, **log.timing_snapshot()}

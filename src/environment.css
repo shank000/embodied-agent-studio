@@ -1,5 +1,6 @@
 .environment-panel{margin-top:14px;padding:17px;border:1px solid #d8e6d8;border-radius:10px;background:#fbfdf9;min-width:0}
 .environment-panel[hidden]{display:none!important}
+.scene-column[data-action-mode="text"]:not(.layout-arranged)>#environment-panel{order:-1;margin-top:0}
 .environment-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .environment-heading h3{font-size:15px;color:#345744;margin:0}
 .environment-mode{font-size:12px;color:#6d846e}

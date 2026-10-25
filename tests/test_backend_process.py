@@ -13,7 +13,7 @@ from unittest.mock import patch
 from PIL import Image
 from fastapi import HTTPException
 
-from server.backends.process_backend import BackendProcessError, ProcessBackend, ROOT
+from server.backends.process_backend import BackendProcessError, ProcessBackend, ROOT, _decode_image
 from server.backends.runtime import dispatch
 
 
@@ -42,7 +42,8 @@ class Simulation:
     def state(self):
         return {'model': self.model_id, 'generation': self.generation,
                 'paused': self.paused, 'speed': self.speed,
-                'timestep': self.timestep, 'time': self.time}
+                'timestep': self.timestep, 'time': self.time,
+                'backend': {'engine_id': 'genesis'}, 'actuators': [{'index': 0}]}
     def command(self, payload):
         action = payload['action']
         if action == 'pause': self.paused = payload['value']
@@ -87,6 +88,46 @@ sys.modules['server.backends.genesis_backend'] = module
 from server.backends.runtime import main
 raise SystemExit(main())
 '''
+
+
+class ImageTransportTests(unittest.TestCase):
+    def encoded(self, image_format):
+        output = io.BytesIO()
+        Image.new('RGB', (3, 2), 'green').save(output, image_format)
+        return output.getvalue(), base64.b64encode(output.getvalue()).decode('ascii')
+
+    def test_jpeg_preview_validates_image_without_allocating_discarded_rgb_array(self):
+        raw, encoded = self.encoded('JPEG')
+        with patch('server.backends.process_backend.np.array', side_effect=MemoryError('RGB allocation')) as array:
+            decoded, rgb = _decode_image(encoded, 'JPEG', decode_rgb=False)
+        self.assertEqual(decoded, raw)
+        self.assertIsNone(rgb)
+        array.assert_not_called()
+        with self.assertRaisesRegex(BackendProcessError, '无效的 JPEG'):
+            _decode_image(base64.b64encode(b'not a JPEG').decode('ascii'), 'JPEG', decode_rgb=False)
+
+    def test_rgb_video_array_owns_its_pixels_after_image_is_closed(self):
+        raw, encoded = self.encoded('PNG')
+        decoded, rgb = _decode_image(encoded, 'PNG')
+        self.assertEqual(decoded, raw)
+        self.assertEqual(rgb.shape, (2, 3, 3))
+        self.assertTrue(rgb.flags.owndata)
+        self.assertTrue(rgb.flags.writeable)
+        rgb[0, 0] = [1, 2, 3]
+        self.assertEqual(rgb[0, 0].tolist(), [1, 2, 3])
+
+    def test_memory_failure_preserves_real_cause_and_recovery_advice(self):
+        _, encoded = self.encoded('PNG')
+        failure = MemoryError('fixture frame allocation failed')
+        with patch('server.backends.process_backend.np.array', side_effect=failure):
+            with self.assertRaisesRegex(BackendProcessError, '内存不足.*MemoryError.*重新加载') as error:
+                _decode_image(encoded, 'PNG')
+        self.assertIs(error.exception.__cause__, failure)
+        self.assertNotIn('无效', str(error.exception))
+        _, jpeg = self.encoded('JPEG')
+        with patch.object(Image.Image, 'load', side_effect=failure):
+            with self.assertRaisesRegex(BackendProcessError, '内存不足'):
+                _decode_image(jpeg, 'JPEG', decode_rgb=False)
 
 
 class BackendProcessTests(unittest.TestCase):
@@ -171,8 +212,44 @@ time.sleep(30)
         with self.assertRaisesRegex(BackendProcessError, 'native crash diagnostic'):
             backend.command({'action': 'crash'})
         self.assertEqual(backend.process.poll(), 17)
+        self.assertFalse(backend.state()['ready'])
+        self.assertIn('中断', backend.state()['error'])
         with self.assertRaises(BackendProcessError):
             backend.step()
+
+    def test_idle_process_exit_and_normal_close_cannot_report_cached_ready_state(self):
+        backend = self.backend()
+        last = backend.state()
+        backend.process.kill(); backend.process.wait(timeout=5)
+        state = backend.state()
+        self.assertFalse(state['ready']); self.assertIn('退出', state['error'])
+        self.assertEqual(state['generation'], last['generation'])
+        self.assertEqual(state['model'], last['model'])
+        backend.close()
+        self.assertFalse(backend.state()['ready'])
+        healthy = self.backend(); healthy_state = healthy.state(); healthy.close()
+        self.assertFalse(healthy.state()['ready'])
+        self.assertIn('已关闭', healthy.state()['error'])
+        self.assertEqual(healthy.state()['generation'], healthy_state['generation'])
+        self.assertEqual(healthy.state()['model'], healthy_state['model'])
+
+    def test_worker_detects_an_idle_child_exit_without_another_user_command(self):
+        from server.app import Worker
+        backend = self.backend()
+        backend.command({'action': 'pause', 'value': True})
+        worker = Worker(); worker.initial_engine_id = 'genesis'
+        with patch.object(Worker, 'create_backend', return_value=backend):
+            worker.thread.start()
+            try:
+                self.assertTrue(worker.ready.wait(5))
+                self.assertTrue(worker.snapshot['ready'])
+                backend.process.kill(); backend.process.wait(timeout=5)
+                worker.thread.join(timeout=5)
+                self.assertFalse(worker.thread.is_alive())
+                self.assertFalse(worker.snapshot['ready'])
+                self.assertIn('退出', worker.snapshot['error'])
+            finally:
+                worker.shutdown.set(); worker.thread.join(timeout=5)
 
     def test_timeout_stops_child_without_replaying_command(self):
         backend = self.backend(command_timeout_s=.1)

@@ -27,15 +27,20 @@ class BackendProcessError(RuntimeError):
     """The child cannot safely accept more physical commands."""
 
 
-def _decode_image(value, image_format):
+def _decode_image(value, image_format, *, decode_rgb=True):
     try:
         raw = base64.b64decode(value, validate=True)
         with Image.open(io.BytesIO(raw)) as image:
             if image.format != image_format:
                 raise ValueError(f'Expected {image_format}, received {image.format}')
             image.load()
-            rgb = np.asarray(image.convert('RGB')).copy()
+            # The browser preview consumes the original JPEG bytes. Only video
+            # samples need an owned RGB array; avoid allocating one to discard it.
+            rgb = np.array(image if image.mode == 'RGB' else image.convert('RGB'), copy=True) if decode_rgb else None
         return raw, rgb
+    except MemoryError as exc:
+        raise BackendProcessError(f'解析仿真子进程的 {image_format} 图像时内存不足（MemoryError）。'
+                                  '请关闭其他仿真进程或降低相机分辨率，再重新加载环境。') from exc
     except Exception as exc:
         raise BackendProcessError(f'仿真子进程返回无效的 {image_format} 图像：{exc}') from exc
 
@@ -226,7 +231,12 @@ class ProcessBackend:
     def generation(self): return self._state['generation']
 
     def state(self):
-        return self._state.copy()
+        state = self._state.copy()
+        if self._closed or self._failure:
+            state.update(ready=False, error=self._failure or f'{self.engine_id} 仿真子进程已关闭。')
+        elif self.process.poll() is not None:
+            state.update(ready=False, error=f'{self.engine_id} 仿真子进程已退出（退出码 {self.process.returncode}）。'+self._diagnostics())
+        return state
 
     def command(self, payload):
         return self._request('command', payload, mutation=True).get('result')
@@ -237,7 +247,7 @@ class ProcessBackend:
     def render(self):
         if self._preview is None:
             result = self._request('render')['result']
-            self._preview, _ = _decode_image(result['jpeg_base64'], 'JPEG')
+            self._preview, _ = _decode_image(result['jpeg_base64'], 'JPEG', decode_rgb=False)
         return self._preview
 
     def render_rgb(self):
@@ -287,9 +297,11 @@ class ProcessBackend:
     def close(self):
         if self._closed:
             return
+        last_state = self._state.copy()
         try:
             self._request('close', timeout=5.)
         except (BackendProcessError, ValueError):
             pass
         finally:
+            self._state = {**last_state, **self._state}
             self._abort()
