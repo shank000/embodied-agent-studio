@@ -17,7 +17,7 @@ from server.composition import CompositionController, CompositionStart, PlannerO
 from server.decision import DecisionResult
 from server.policy import PolicyConfig, PolicyController, PolicyStart, predict_policy
 from server.runlog import CURRENT_LOG, RunLog
-from test_agent_round_limits import DeterministicWorker
+from tests.test_agent_round_limits import DeterministicWorker
 
 
 FEEDBACK = 'Fixture recovery: return the complete structured response.'
