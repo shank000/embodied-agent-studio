@@ -14,7 +14,9 @@
 
 Windows 版本通过**本机已有的 WSL Ubuntu**运行这些独立 SDK，工作台网页与主服务继续运行在 Windows。它不是远程服务器，也没有把 Linux 构建声明为 Windows 原生构建。
 
-前提：已安装 WSL Ubuntu、WSLg 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)。安装工具不会安装操作系统、修改驱动或替换系统 Python。TextWorld 的官方系统支持为 Linux/macOS；AI2-THOR 官方发布的 Unity 构建在本次 Windows 机器上通过 WSLg 实测成功。[TextWorld 安装说明](https://github.com/microsoft/TextWorld#installation)、[AI2-THOR 安装说明](https://ai2thor.allenai.org/ithor/documentation/)。
+前提：已安装 WSL Ubuntu 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)。视觉环境在 WSL 中使用独立 Xvfb 显示，不依赖 Windows 桌面或远程桌面连接；请先在 Ubuntu 安装 `sudo apt-get install xvfb xauth`。独立 Python 的 PyVirtualDisplay 随对应 requirements 安装。安装工具不会安装操作系统、修改驱动或替换系统 Python。[TextWorld 安装说明](https://github.com/microsoft/TextWorld#installation)、[AI2-THOR 安装说明](https://ai2thor.allenai.org/ithor/documentation/)。
+
+WSL 的 `DISPLAY=:0` 即使保留 socket，也可能因桌面会话断开而拒绝 X11 连接。适配器为每个 Unity 子进程启动独立、带认证且不监听 TCP 的后台显示，并在 Unity 关闭后释放；原生相机画面和物理环境仍来自官方 Unity 构建。常规 Linux 桌面继续使用已有显示，Linux 无显示时也需要 Xvfb。
 
 在项目根目录安装 ALFWorld 三维视觉环境：
 

@@ -166,9 +166,13 @@ class ALFWorldVisualContracts(unittest.TestCase):
         sim = self.open()
         constructor = Mock(return_value=self.controller)
         executable = self.root/'isolated-official-build'
-        with patch.object(assets, 'executable_path', return_value=executable), patch.dict('sys.modules', {
+        # This contract checks SDK construction, without starting a native
+        # display. Display ownership is covered by ThorDisplayLifecycleTests.
+        with patch.object(sim, '_start_display') as start_display, \
+                patch.object(assets, 'executable_path', return_value=executable), patch.dict('sys.modules', {
                 'alfworld.env.thor_env': SimpleNamespace(ThorEnv=constructor)}):
             self.assertIs(sim._create_controller(), self.controller)
+        start_display.assert_called_once_with()
         self.assertEqual(constructor.call_args.kwargs['build_path'], str(executable))
 
     def test_checkpoint_replay_preserves_episode_and_rejects_cross_environment(self):

@@ -31,6 +31,9 @@
 .simulator-load{width:100%;font-size:12px;padding:10px;line-height:1.5;min-height:38px}
 .simulator-message,.simulator-lock{font-size:11px;line-height:1.8;color:#7c8a79;overflow-wrap:anywhere;margin:9px 0 0}
 .simulator-message.error{color:#a04f3a}
+.simulator-diagnostic{margin-top:8px;color:#a04f3a;font-size:11px;line-height:1.7}
+.simulator-diagnostic>summary{cursor:pointer}
+.simulator-diagnostic pre{max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:9px;border:1px solid #eadfd5;border-radius:6px;background:#fffaf5;font:inherit}
 .simulator-lock{color:#916e3d}
 .simulator-details{border-top:1px solid #e1eade;margin-top:13px;padding-top:10px}
 .simulator-details>summary{font-size:11px;line-height:1.8;color:#5c7861;cursor:pointer}

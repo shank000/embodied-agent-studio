@@ -1,4 +1,5 @@
 # Python 3.12; official AI2-THOR Linux/macOS Unity build (WSL on Windows).
 ai2thor==5.0.0
+PyVirtualDisplay==3.0; sys_platform == 'linux'
 numpy>=1.26,<3
 Pillow>=11,<14

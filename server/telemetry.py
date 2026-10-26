@@ -26,7 +26,7 @@ def usage_tokens(usage):
         return None
     input_tokens = number('input_tokens', 'prompt_tokens')
     output_tokens = number('output_tokens', 'completion_tokens')
-    reasoning_tokens = number('reasoning_tokens')
+    reasoning_tokens = number('reasoning_tokens', 'reasoning_output_tokens')
     for name in ('output_tokens_details', 'completion_tokens_details'):
         if reasoning_tokens is None:
             details = usage.get(name)
@@ -120,6 +120,7 @@ def track_inference(phase):
             current_phase = 'repair_diagnosis' if kwargs.get('schema_name') == 'workbench_repair' else 'planning' if getattr(kwargs.get('response_type'), '__name__', '') == 'PlannerOutput' else phase
             record = {'call_id': uuid4().hex, 'round': log.current_round, 'phase': current_phase,
                       'provider': settings.get('provider', settings.get('kind')), 'model': settings.get('model'),
+                      'requested_model': settings.get('model'),
                       'reasoning_effort': effort, 'configured_reasoning': settings.get('reasoning'), 'started_at': utc_now(),
                       'status': 'running', 'public_text': None, 'response_returned': False, 'usage': None,
                       'pricing': pricing,
@@ -143,6 +144,10 @@ def track_inference(phase):
                 record.update(inference_s=time.monotonic() - started, ended_at=utc_now())
                 try:
                     record.update(usage_tokens(record['usage']))
+                    if record.get('model') and record['model'] != settings.get('model'):
+                        from .pricing import catalog
+                        pricing = catalog.quote({**settings, 'model': record['model']})
+                        record['pricing'] = pricing
                     record['cost'] = calculate_call_cost(record, pricing)
                     log.end_inference(record)
                 finally: CURRENT_CALL.reset(token)

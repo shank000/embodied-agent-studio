@@ -120,6 +120,15 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(effective_reasoning({'provider': 'compatible', 'base_url': 'https://example.org/v1', 'reasoning': 'high'}), 'provider_default')
         self.assertEqual(effective_reasoning({'provider': 'openai', 'reasoning': 'high'}), 'high')
 
+    def test_codex_reasoning_output_alias_is_a_subset_not_additional_tokens(self):
+        counters = usage_tokens({'input_tokens':15850, 'cached_input_tokens':0,
+                                 'cache_write_input_tokens':0, 'output_tokens':2182,
+                                 'reasoning_output_tokens':2070})
+        self.assertEqual(counters, {'input_tokens':15850, 'output_tokens':2182,
+                                    'reasoning_tokens':2070, 'total_tokens':18032})
+        self.assertIsNone(usage_tokens(None)['reasoning_tokens'])
+        self.assertIsNone(usage_tokens({'reasoning_output_tokens':-1})['reasoning_tokens'])
+
     def test_deepseek_disabled_is_off_and_invalid_usage_does_not_break_output(self):
         log = RunLog('agent', {'task': 'fixture'})
         @track_inference('agent_inference')

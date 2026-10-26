@@ -44,6 +44,8 @@
 .benchmark-empty{padding:25px 0}
 .benchmark-actions{display:flex;gap:10px;flex-wrap:wrap;padding-top:3px}
 .benchmark-actions button{font-size:13px;padding:11px 14px}
+.benchmark-actions a{align-self:center;font-size:13px;line-height:1.8;color:#3c8251;text-decoration:underline}
+.benchmark-readiness>.text-button{display:inline-block;margin:0 0 6px;font-size:13px}
 .benchmark-stop{color:#a2714b;border-color:#e5d5bf}
 .benchmarks-view button:disabled{opacity:.5;cursor:not-allowed}
 .benchmark-job>strong{display:block;font-size:20px;line-height:1.6;color:#76876b;font-weight:550}
@@ -84,6 +86,7 @@
 .benchmark-message{font-size:13px;line-height:1.9;color:#6c8a5b;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 4px}
 .benchmark-message.error{color:#ac6244}
 .benchmark-message:empty{display:none}
+.benchmark-message:not(:empty){position:sticky;top:12px;z-index:3;padding:13px 17px;border:1px solid #d6e5cf;border-radius:9px;background:#f7fbf3;box-shadow:0 4px 16px #294b3410}
 .benchmark-videos{margin-top:15px;border-top:1px solid #e1eada;padding-top:12px}
 .benchmark-videos summary{font-size:12px;line-height:1.8;color:#739862;cursor:pointer}
 .benchmark-video-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px;margin-top:13px}

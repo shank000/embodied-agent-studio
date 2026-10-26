@@ -282,7 +282,8 @@ class RoboDojoController:
             if self.log: self.log.finish({'status':'error','message':str(exc)})
             raise
         self.state={'active':True,'status':'running','message':'正在运行官方 RoboDojo 评测客户端。',
-                    'run_id':self.log.id,'rows':[]}
+                    'run_id':self.log.id,'rows':[], 'current_task':None, 'current_seed':None,
+                    'completed_jobs':0, 'total_jobs':len(specification.task_ids)*len(specification.seeds)}
         self.task=asyncio.create_task(self.run(specification,config))
         return self.snapshot()
 
@@ -302,7 +303,8 @@ class RoboDojoController:
         if self.state.get('status')=='preparing':
             self.state.update(active=False,status='stopped',message='启动检查已取消，未创建原生评测进程。')
         if self.task and not self.task.done():
-            self.task.cancel()
+            # A repeated stop must not cancel the first stop's result archival.
+            if not self.task.cancelling(): self.task.cancel()
             try: await self.task
             except asyncio.CancelledError: pass
         self.task=None
@@ -315,11 +317,35 @@ class RoboDojoController:
                 self.log.finish({'status':'stopped','message':self.state['message'],
                     'rows':self.state.get('rows',[]),'metrics':{'success':None,'inference_count':None,'inference_s':None}})
 
+    async def _archive_trial(self,spec,task,seed,result_path,log):
+        request=ResultImport(task_id=task,seed=seed,policy=spec.policy_name,
+            embodiment=spec.embodiment,payload=json.loads(result_path.read_text(encoding='utf-8')),
+            artifact_dir=str(result_path.parent),copy_videos=spec.copy_videos)
+        pending=asyncio.create_task(asyncio.to_thread(import_result,request))
+        cancelled=None
+        try: imported=await asyncio.shield(pending)
+        except asyncio.CancelledError as exc:
+            # File copying cannot be cancelled by cancelling its asyncio waiter.
+            # Finish the same import and register it before closing the parent.
+            cancelled=exc
+            try: imported=await pending
+            except Exception as archive_error:
+                log.write('archive_error',{'task_id':task,'seed':seed,'message':str(archive_error)})
+                raise cancelled from archive_error
+        self.state['rows'].append(imported)
+        self.state['completed_jobs']=len(self.state['rows'])
+        log.write('benchmark_trial',imported)
+        if cancelled is not None: raise cancelled
+
     async def run(self,spec,config):
         source=Path(config['source_root']);log=self.log;started=time.monotonic()
         try:
             for task in spec.task_ids:
                 for seed in spec.seeds:
+                    remaining=spec.max_wall_time_s-(time.monotonic()-started)
+                    if remaining<=0: raise TimeoutError('没有剩余评测墙钟预算。')
+                    self.state.update(current_task=task,current_seed=seed,
+                        message=f'正在运行 {task} · 种子 {seed}，已归档 {len(self.state["rows"])} / {self.state["total_jobs"]} 个任务/种子结果。')
                     native_id=datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')+'_'+uuid4().hex[:10]
                     additional=f'ckpt_name={spec.checkpoint},action_type={spec.action_type}'
                     host=f'[{spec.policy_host}]' if ':' in spec.policy_host else spec.policy_host
@@ -333,16 +359,30 @@ class RoboDojoController:
                          'ROBODOJO_RUN_ID':native_id,'EVAL_NUM':str(spec.episodes),'CUDA_VISIBLE_DEVICES':'0'}
                     # No license-acceptance variables are introduced here.
                     output=log.folder/'benchmark'/f'{task}-{seed}.log'
-                    with output.open('wb') as stream:
-                        self.process=await asyncio.create_subprocess_exec(*args,cwd=source,env=env,stdout=stream,stderr=subprocess.STDOUT,start_new_session=True)
-                        await asyncio.wait_for(self.process.wait(),max(1,spec.max_wall_time_s-(time.monotonic()-started)))
-                    if self.process.returncode:
-                        raise RuntimeError(f'官方客户端退出 {self.process.returncode}；完整诊断见 benchmark/{output.name}。')
                     result_path=source/'eval_result/RoboDojo'/task/spec.policy_name/spec.embodiment/f'{seed}_{additional}'/native_id/'_result.json'
-                    if not result_path.is_file(): raise RuntimeError('官方客户端未生成本次调用的 _result.json；不能记为成功。')
-                    imported=await asyncio.to_thread(import_result,ResultImport(task_id=task,seed=seed,policy=spec.policy_name,
-                        embodiment=spec.embodiment,payload=json.loads(result_path.read_text(encoding='utf-8')),artifact_dir=str(result_path.parent),copy_videos=spec.copy_videos))
-                    self.state['rows'].append(imported);log.write('benchmark_trial',imported)
+                    execution_error=None
+                    try:
+                        with output.open('wb') as stream:
+                            self.process=await asyncio.create_subprocess_exec(*args,cwd=source,env=env,stdout=stream,stderr=subprocess.STDOUT,start_new_session=True)
+                            await asyncio.wait_for(self.process.wait(),remaining)
+                        if self.process.returncode:
+                            raise RuntimeError(f'官方客户端退出 {self.process.returncode}；完整诊断见 benchmark/{output.name}。')
+                        if not result_path.is_file(): raise RuntimeError('官方客户端未生成本次调用的 _result.json；不能记为成功。')
+                    except BaseException as exc:
+                        execution_error=exc
+                        raise
+                    finally:
+                        try:
+                            await self._terminate()
+                            # Upstream writes terminal results incrementally. A
+                            # failed/stopped invocation can still have valid episodes.
+                            if result_path.is_file():
+                                try: await self._archive_trial(spec,task,seed,result_path,log)
+                                except asyncio.CancelledError: raise
+                                except Exception as exc:
+                                    log.write('archive_error',{'task_id':task,'seed':seed,'message':str(exc)})
+                                    if execution_error is None: raise
+                        finally: self.process=None
             self.state.update(status='complete',message='官方客户端执行结束；策略 SR、过程得分与覆盖率请查看逐任务结果。')
         except asyncio.CancelledError:
             self.state.update(status='stopped',message='评测已停止；已归档结果和原生恢复文件保留。');raise

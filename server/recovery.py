@@ -112,7 +112,17 @@ class RecoveryCoordinator:
                 raise
             except Exception as exc:
                 self._check(owner, observation, run_id)
-                if not self.repair.config.auto_analyze: raise
+                if not self.repair.config.auto_analyze:
+                    skipped = {'failure_id':uuid4().hex, 'owner':log.metadata.get('kind'),
+                        'source_run_id':run_id, 'round':owner.state.get('round', owner.state.get('step', 0)),
+                        'phase':phase, 'status':'skipped', 'reason':'auto_analyze_disabled',
+                        'attempts_used':owner.state.get('recovery_attempts', 0),
+                        'max_attempts':self.repair.config.max_recovery_attempts, 'can_resume':False,
+                        'message':'未启动故障修复：自动分析已关闭。请在“模型故障修复 Agent → 配置、诊断与恢复”中开启自动分析并保存；仅勾选自动重试不会触发诊断。'}
+                    owner.state['recovery'] = deepcopy(skipped)
+                    if self.current is None: self.view = skipped
+                    log.write('recovery_skipped', skipped)
+                    raise
                 if not scope['locked']:
                     await self._mutex.acquire()
                     scope['locked'] = True

@@ -1,3 +1,5 @@
+import './rounds.css';
+import {renderRoundTimeline} from './rounds.js';
 import './style.css';
 import './research.css';
 import {initResearch,renderResearch,renderRunVideo,renderRunTimer,reloadResearchCatalog} from './research.js';
@@ -205,12 +207,7 @@ function renderAgent(){
     $('#agent-action .section-caption').textContent=native?'下一步原生环境动作':'下一步绝对末端位姿 · WORLD';
     if(!native){$('#action-position').textContent=action.position_m.map(x=>x.toFixed(4)).join(' / ');$('#action-quaternion').textContent=action.quaternion_wxyz.map(x=>x.toFixed(3)).join(' / ');$('#action-gripper').textContent=`张开 ${(action.gripper_open*100).toFixed(0)}% · ${action.duration_s.toFixed(1)} s`;}
     $('#action-explanation').textContent=native?`${action.action}\n${action.explanation}`:action.explanation;}
-  const historyKey=JSON.stringify(agent.history);
-  if(historyKey!==lastHistory){lastHistory=historyKey;const root=$('#agent-history');root.replaceChildren();
-    (agent.history||[]).slice(-5).reverse().forEach(record=>{const row=document.createElement('div');row.className='round-record';const title=document.createElement('strong');title.textContent=`第 ${record.round} 轮 · ${record.action.status==='move'?(typeof record.action.action==='string'?'环境动作':'末端动作'):record.action.status==='done'?record.verification?.accepted===true?'完成声明（环境接受）':record.verification?.accepted===false?'完成声明（环境拒绝）':'模型完成声明（未记录验收）':'无法继续'}`;const text=document.createElement('p');
-      const result=record.result;
-      text.textContent=typeof result==='string'?result:result?.message||(typeof record.action.action==='string'&&result?`${record.action.action} · ${result.last_action_success===false?'环境拒绝动作':'环境已返回反馈'}`:(result?`${result.status==='complete'?'实际末端到位':'动作未达到容差'}${result.position_error_m==null?'':` · 位置误差 ${(result.position_error_m*1000).toFixed(2)} mm`}`:'等待执行反馈'));row.append(title,text);root.append(row);});
-  }
+  renderRoundTimeline($('#agent-history'),agent);
   const sourceName=state.policy?.active||($('#policy-tab').getAttribute('aria-selected')==='true'&&state.policy?.observation_time!=null)?'policy':'agent';
   const source=state[sourceName],observationKey=`${sourceName}:${source?.observation_id}:${source?.observation_robot}`;
   if(observationKey!==lastObservation||source?.observation_robot!==state.model){
@@ -345,7 +342,7 @@ initRepair({toast});
 initMultiarm({operate});
 initEnvironment({execute:async payload=>{if(!connected||busy)throw new Error('工作台正在处理其他操作，请稍后重试。');busy=true;enableControls();try{const result=await api(payload);await poll();return result;}finally{busy=false;enableControls();}}});
 initLayout({toast});
-initSimulators({onChanged:async result=>{
+initSimulators({onOpenBenchmark:()=>document.querySelector('[data-page="benchmarks"]').click(),onChanged:async result=>{
   generation=-1;lastObservation=-1;await poll();
   if(state?.session_id!==result.session_id)await poll();
   if(!connected||state?.session_id!==result.session_id)throw new Error(lastPollError||'新环境的状态尚未同步，请重新连接');

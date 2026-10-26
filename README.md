@@ -28,7 +28,7 @@ EmbodiWorks 将机器人操作、家庭文字/视觉任务与实验记录放进�
 | 灵活接入策略 | Codex 本机登录、OpenAI、DeepSeek／兼容 API、Claude、自定义 Agent，以及 SmolVLA 与自定义 VLA/WAM。 |
 | 组合决策 | 主 Agent、决策器和动作策略分别配置；支持单决策、级联复核与加权投票。 |
 | 对照实验 | 冻结方法版本与协议，在同一初态、配对种子下比较，保留验证晋升与回滚记录。 |
-| 结果可追溯 | 可选轨迹视频、逐轮公开输出、服务返回的推理摘要、tokens、耗时、错误和费用估算。 |
+| 结果可追溯 | 可选轨迹视频、完整逐轮输入输出与阶段耗时、恢复记录、费用归因，以及动作前后观察和原生奖励的训练数据导出。 |
 
 ## 快速开始
 
@@ -55,7 +55,7 @@ npm start
 
 三种系统共用源码与 `npm start`。CI 检查三平台的安装、构建与模型运动，另在 Linux 验证原生离屏渲染；完整验证范围见[安装说明](docs/INSTALL.md)。
 
-左侧“仿真环境”选择后端，再加载对应任务。ALFWorld 分为文字与三维视觉两个入口；要看对应官方家庭任务的 Unity 画面，选择“ALFWorld · 视觉”，按[家庭环境指南](docs/household-environments.md)准备独立 SDK 与资产。Windows 通过 WSL/WSLg 运行家庭环境。任务和机器人不会跨引擎自动转换；[安装条件与实际验收范围](docs/simulators.md)分别说明。
+左侧“仿真环境”选择后端，再加载对应任务。ALFWorld 分为文字与三维视觉两个入口；要看对应官方家庭任务的 Unity 画面，选择“ALFWorld · 视觉”，按[家庭环境指南](docs/household-environments.md)准备独立 SDK 与资产。Windows 通过 WSL 运行家庭环境，Unity 使用独立 Xvfb 后台显示。任务和机器人不会跨引擎自动转换；[安装条件与实际验收范围](docs/simulators.md)分别说明。
 
 ## 看见实验过程
 
@@ -71,6 +71,7 @@ npm start
 - [多后端指南](docs/simulators.md) · [家庭环境](docs/household-environments.md) · [LIBERO](docs/libero.md) · [ManiSkill](docs/maniskill.md) · [Isaac](docs/isaac.md)
 - [RoboCasa365 厨房任务](docs/robocasa365.md) · [RoboDojo 基准评测](docs/robodojo.md)
 - [组合方法、评测与自定义 Agent](RSI_WORKBENCH.md) · [VLA / WAM 策略协议](POLICY_PROTOCOL.md)
+- [逐轮记录、成本归因、训练数据与 IDE 接入方案](docs/EXPERIMENTS_AND_TRAINING.md)
 - [机器人模型来源](MODEL_SOURCES.md) · [贡献指南](CONTRIBUTING.md)
 
 欢迎提交新模型适配、场景、策略接口与可复现的问题报告。当前平台用于仿真研究；RSI 模块提供版本与评测机制，尚未自动生成子代或训练权重。GaiaHand 使用公开的 **15 关节版本**，并非 Gaia Hand 20。

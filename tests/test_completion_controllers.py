@@ -115,7 +115,7 @@ class CompletionControllerTests(unittest.IsolatedAsyncioTestCase):
         return CompositionController(worker, lambda _: recipe)
 
     def assert_unverified(self, controller, worker, observations):
-        self.assertEqual(worker.observations, observations)
+        self.assertEqual(worker.observations, observations * 2)  # Each round retains a post-action observation.
         self.assertFalse(controller.state['metrics']['success'], controller.state)
         self.assertFalse(any(command['action'] in ('move_tcp', 'policy_chunk') for command in worker.commands))
         checks = [event['data'] for event in self.events(controller) if event['event'] == 'completion_verification']
@@ -156,7 +156,7 @@ class CompletionControllerTests(unittest.IsolatedAsyncioTestCase):
             await controller.task
         self.assertEqual(controller.state['status'], 'verified', controller.state)
         self.assertTrue(controller.state['metrics']['success'])
-        self.assertEqual(worker.observations, 1)
+        self.assertEqual(worker.observations, 2)  # Input plus post-verification observation.
         check = next(event['data'] for event in self.events(controller) if event['event'] == 'completion_verification')
         self.assertTrue(check['accepted'])
 

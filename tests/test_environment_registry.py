@@ -31,8 +31,12 @@ class EnvironmentRegistryTests(unittest.TestCase):
         before = {name for name in sys.modules if name.split('.')[0] in sdk_modules}
         with patch.object(subprocess, 'Popen', side_effect=AssertionError('Catalog must not launch SDKs')):
             catalog = simulators.catalog()
-            self.assertEqual({row['id'] for row in catalog['backends']}, set(simulators.EVALUATORS))
+            self.assertEqual({row['id'] for row in catalog['backends']}, set(simulators.EVALUATORS)|{'robodojo'})
             for row in catalog['backends']:
+                if row['id']=='robodojo':
+                    self.assertEqual(row['kind'],'benchmark')
+                    self.assertNotIn('load',row['capabilities'])
+                    continue
                 models, scenes, tasks = simulators.supported_catalog(row['id'])
                 self.assertEqual(set(row['models']), set(models))
                 self.assertEqual(set(row['scenes']), set(scenes))

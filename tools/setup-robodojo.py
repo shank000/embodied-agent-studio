@@ -44,9 +44,36 @@ def _checkout_state(path):
         raise ValueError(f'源码目录不是 Git 工作区根目录：{path}')
     # Untracked assets/results are user data. Do not remove them, or treat them
     # as tracked source edits. Each requested submodule is checked separately.
-    if git('-C', path, 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all'):
+    # Compare content rather than stat-only status: Windows may report a
+    # CRLF-to-LF checkout repair as modified even when its Git content is equal.
+    # Check index and working tree separately to preserve staged user changes.
+    if (git('-C', path, 'diff', '--name-only', '--ignore-submodules=all') or
+            git('-C', path, 'diff', '--cached', '--name-only', '--ignore-submodules=all')):
         raise ValueError(f'源码存在未提交修改，请先保存或提交；工具不会重置它们：{path}')
     return git('-C', path, 'rev-parse', 'HEAD')
+
+
+def normalize_shell_scripts(source):
+    """Repair Windows checkout line endings, only for otherwise unchanged scripts."""
+    source = Path(source).resolve()
+    names = git('-C', source, 'ls-files', '-z', '--', '*.sh').split('\0')
+    pending = []
+    for name in filter(None, names):
+        target = source/name
+        if target.is_symlink() or not target.resolve().is_relative_to(source):
+            raise ValueError(f'脚本路径超出源码目录，已保留：{name}')
+        current = target.read_bytes()
+        if b'\r\n' not in current:
+            continue
+        original = subprocess.run(['git', '-C', str(source), 'show', f'HEAD:{name}'],
+                                  check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+        normalized = current.replace(b'\r\n', b'\n')
+        if normalized != original.replace(b'\r\n', b'\n'):
+            raise ValueError(f'脚本包含用户修改，未更改其换行符：{name}')
+        pending.append((target, normalized))
+    for target, content in pending:
+        target.write_bytes(content)
+    return [str(target.relative_to(source)) for target, _ in pending]
 
 
 def prepare_source(source_root, *, dry_run=False):
@@ -69,7 +96,7 @@ def prepare_source(source_root, *, dry_run=False):
         raise ValueError(f'XPolicyLab 目录已有非 Git 内容，已保留：{xpolicy}')
     if current != REVISION:
         if not exists:
-            execute(['clone', '--no-checkout', '--filter=blob:none', '--', SOURCE_URL, source])
+            execute(['clone', '--no-checkout', '--filter=blob:none', '--config', 'core.autocrlf=false', '--', SOURCE_URL, source])
         execute(['-C', source, 'fetch', '--depth', '1', SOURCE_URL, REVISION])
         execute(['-C', source, 'checkout', '--no-overwrite-ignore', '--detach', REVISION])
     if not dry_run or current == REVISION:
@@ -79,7 +106,7 @@ def prepare_source(source_root, *, dry_run=False):
     if xpolicy_current != XPOLICY_REVISION:
         # The official parent gitlink selects the exact commit. Do not use
         # --remote/--recursive: those would track main or prepare other SDKs.
-        execute(['-c', f'submodule.XPolicyLab.url={XPOLICY_URL}', '-C', source,
+        execute(['-c', f'submodule.XPolicyLab.url={XPOLICY_URL}', '-c', 'core.autocrlf=false', '-C', source,
                  'submodule', 'update', '--init', '--depth', '1', '--checkout', '--', 'XPolicyLab'])
     if not dry_run:
         if _checkout_state(source) != REVISION or _checkout_state(xpolicy) != XPOLICY_REVISION:
@@ -88,9 +115,11 @@ def prepare_source(source_root, *, dry_run=False):
                          'XPolicyLab/XPolicyLab.py', 'env_cfg/arx_x5.yml'):
             if not (source/relative).exists():
                 raise ValueError(f'官方源码缺少所需入口：{relative}')
+    normalized = [] if dry_run else normalize_shell_scripts(source) + [
+        'XPolicyLab/'+name for name in normalize_shell_scripts(xpolicy)]
     return {'source_root': str(source), 'revision': REVISION,
             'xpolicy_revision': XPOLICY_REVISION, 'source_prepared': not dry_run,
-            'commands': commands}
+            'commands': commands, 'normalized_shell_scripts': normalized}
 
 
 def runtime_payload(source_root, python):

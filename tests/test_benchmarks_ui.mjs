@@ -64,13 +64,16 @@ test('adds one benchmark page; unready runtime still permits planning and result
   assert.equal(ui.button('停止评测').disabled,true);
   assert.ok(ui.find('benchmark-checks').textContent.includes('通过'));
   assert.ok(ui.main.textContent.includes('不按零费用计算'));
+  assert.match(ui.main.textContent,/demo_policy 是输出零动作的连通样例/);
+  assert.match(ui.main.textContent,/XPolicyLab WebSocket 策略服务/);
+  assert.match(ui.main.textContent,/不能直接填写模型 API 地址或 Codex 模型名/);
   assert.equal(ui.calls.length,1);
 });
 
 test('plan export retains official argv and warnings as text without starting simulation',async()=>{
   const hostile='<img src=x onerror=bad()>',plan={plan_id:'preview/1',ready:false,commands:[{task_id:hostile,seed:0,argv:['bash','scripts/robodojo.sh','client','--task',hostile]}],warnings:[hostile]};
   const ui=setup(catalog(),async()=>plan);await ui.init();await ui.click(ui.button('生成评测计划'));
-  assert.deepEqual(ui.calls[1],{url:'/api/benchmarks/robodojo/plan',method:'POST',body:{task_ids:['stack_bowls'],seeds:[0],embodiment:'arx_x5',policy_name:'demo_policy',policy_host:'127.0.0.1',policy_port:9999,checkpoint:'external',action_type:'ee',episodes:1,mode:'smoke'}});
+  assert.deepEqual(ui.calls[1],{url:'/api/benchmarks/robodojo/plan',method:'POST',body:{task_ids:['stack_bowls'],seeds:[0],embodiment:'arx_x5',policy_name:'demo_policy',policy_host:'127.0.0.1',policy_port:9999,checkpoint:'external',action_type:'ee',episodes:1,mode:'smoke',copy_videos:false,max_wall_time_s:3600}});
   assert.equal(ui.find('benchmark-plan-output').hidden,false);
   assert.equal(ui.find('benchmark-plan-warnings').children[0].textContent,hostile);
   assert.equal(ui.find('benchmark-plan-warnings').children[0].children.length,0);
@@ -93,7 +96,7 @@ test('filters retain selections and official seeds/native episodes are transmitt
 });
 
 test('invalid seeds, episode counts and ports preserve the error and make no plan request',async()=>{
-  for(const [id,value,reason] of [['benchmark-seeds','42','0、1、2'],['benchmark-episodes','51','1–50'],['benchmark-episodes','1.5','1–50'],['benchmark-port','0','1–65535']]){
+  for(const [id,value,reason] of [['benchmark-seeds','42','0、1、2'],['benchmark-episodes','51','1–50'],['benchmark-episodes','1.5','1–50'],['benchmark-port','0','1–65535'],['benchmark-wall-time','9','10–86400'],['benchmark-wall-time','1.5','10–86400']]){
     const ui=setup();await ui.init();ui.id(id).value=value;await ui.click(ui.button('生成评测计划'));
     assert.equal(ui.calls.length,1);assert.ok(ui.find('benchmark-message').textContent.includes(reason));assert.equal(ui.find('benchmark-message').attributes.role,'alert');
   }
@@ -152,7 +155,7 @@ test('history renders all SDK strings as text and plays only archived same-origi
 test('result file loads without implicit import and large/invalid files remain explicit errors',async()=>{
   const ui=setup();await ui.init();const file=ui.id('benchmark-import-file');file.files=[{name:'_result.json',size:100,text:async()=>JSON.stringify(result)}];await file.listeners.change();assert.equal(ui.calls.length,1);assert.deepEqual(JSON.parse(ui.id('benchmark-import-json').value),result);
   assert.ok(ui.find('benchmark-message').textContent.includes('尚未导入'));
-  file.files=[{name:'huge.json',size:11*1024*1024,text:async()=>{throw Error('must not read');}}];await file.listeners.change();assert.ok(ui.find('benchmark-message').textContent.includes('不超过 10 MB'));
+  file.files=[{name:'huge.json',size:11*1024*1024,text:async()=>{throw Error('must not read');}}];await file.listeners.change();assert.ok(ui.find('benchmark-message').textContent.includes('不超过 10 MB'));assert.equal(ui.id('benchmark-import-json').value,'');
   file.files=[{name:'bad.json',size:2,text:async()=>'no'}];await file.listeners.change();assert.ok(ui.find('benchmark-message').textContent.includes('读取结果文件失败'));
 });
 
@@ -167,4 +170,67 @@ test('failed later refresh and import cannot reuse stale ready or successful-imp
   ui.id('benchmark-import-json').value=JSON.stringify(result);await ui.click(ui.button('导入官方结果'));assert.ok(ui.find('benchmark-import-result').textContent.includes('first'));
   fail=true;await ui.click(ui.button('导入官方结果'));assert.equal(ui.find('benchmark-import-result').children.length,0);assert.equal(ui.find('benchmark-message').textContent,'Invalid new result.');
   ui.setInfo(new Error('Connection lost'));await ui.click(ui.button('刷新目录与状态'));assert.equal(ui.button('运行官方评测').disabled,true);assert.ok(ui.find('benchmark-readiness').textContent.includes('上次缓存'));assert.ok(!ui.find('benchmark-readiness').textContent.includes('Runtime passed.'));
+});
+
+test('Linux export uses reviewed plan settings and leaves runtime idle',async()=>{
+  const script='#!/usr/bin/env bash\nprintf "official fixture"\n';
+  const ui=setup(catalog(),async call=>call.url.endsWith('/export')?{filename:'robodojo-plan-fixture.sh',script}:{plan_id:'fixture',commands:[]});await ui.init();
+  ui.id('benchmark-wall-time').value='7200';ui.id('benchmark-record-videos').checked=true;
+  assert.equal(ui.button('生成 Linux 运行脚本').disabled,true);
+  await ui.click(ui.button('生成评测计划'));
+  assert.equal(ui.button('生成 Linux 运行脚本').disabled,false);
+  await ui.click(ui.button('生成 Linux 运行脚本'));
+  const sent=ui.calls.find(call=>call.url.endsWith('/export'));
+  assert.deepEqual(sent.body,ui.calls.find(call=>call.url.endsWith('/plan')).body);
+  assert.equal(sent.body.max_wall_time_s,7200);assert.equal(sent.body.copy_videos,true);
+  const link=ui.all(node=>node.tagName==='a'&&node.textContent==='下载 Linux 脚本')[0];
+  assert.equal(link.hidden,false);assert.equal(link.download,'robodojo-plan-fixture.sh');
+  assert.equal(await ui.blobs.at(-1).text(),script);
+  assert.match(ui.find('benchmark-message').textContent,/--dry-run/);
+  assert.equal(ui.calls.some(call=>call.url.endsWith('/start')),false);
+});
+
+test('changing planned configuration revokes stale JSON and script downloads',async()=>{
+  const ui=setup(catalog(),async call=>call.url.endsWith('/export')?{filename:'plan.sh',script:'#!/bin/bash\n'}:{plan_id:'fixture',commands:[]});await ui.init();
+  await ui.click(ui.button('生成评测计划'));await ui.click(ui.button('生成 Linux 运行脚本'));
+  ui.id('benchmark-policy').value='different_policy';ui.id('benchmark-policy').listeners.input();
+  assert.deepEqual(ui.revoked,['blob:plan-1','blob:plan-2']);
+  for(const label of ['下载计划 JSON','下载 Linux 脚本'])assert.equal(ui.all(node=>node.tagName==='a'&&node.textContent===label)[0].hidden,true);
+  assert.match(ui.find('benchmark-plan-output').textContent,/配置已变化/);
+  assert.match(ui.find('benchmark-message').textContent,/原计划与脚本已失效/);
+  assert.doesNotMatch(ui.find('benchmark-message').textContent,/Linux 脚本已生成/);
+  const before=ui.calls.length;await ui.click(ui.button('生成 Linux 运行脚本'));assert.equal(ui.calls.length,before);
+  await ui.click(ui.button('生成评测计划'));assert.equal(ui.calls.at(-1).body.policy_name,'different_policy');
+  const input=ui.find('benchmark-tasks').querySelectorAll('input')[1];input.checked=true;input.listeners.change();
+  assert.equal(ui.button('生成 Linux 运行脚本').disabled,true);
+});
+
+test('export is single flight and server failure restores controls without claiming a download',async()=>{
+  const pending=Promise.withResolvers();let exports=0;
+  const ui=setup(catalog(),async call=>call.url.endsWith('/export')?(exports++,pending.promise):{plan_id:'fixture',commands:[]});await ui.init();await ui.click(ui.button('生成评测计划'));
+  const exportButton=ui.button('生成 Linux 运行脚本'),first=ui.click(exportButton);await ui.click(exportButton);
+  assert.equal(exports,1);assert.equal(exportButton.disabled,true);assert.equal(ui.id('benchmark-wall-time').disabled,true);
+  pending.resolve({httpError:true,detail:'Export unavailable'});await first;
+  assert.equal(exportButton.disabled,false);assert.equal(ui.id('benchmark-wall-time').disabled,false);
+  assert.equal(ui.find('benchmark-message').textContent,'Export unavailable');
+  assert.equal(ui.all(node=>node.tagName==='a'&&node.textContent==='下载 Linux 脚本')[0].hidden,true);
+  assert.equal(ui.blobs.length,1);
+});
+
+test('manual result edits supersede a pending file read',async()=>{
+  const ui=setup();await ui.init();const pending=Promise.withResolvers();
+  const file=ui.id('benchmark-import-file');file.files=[{name:'_result.json',size:100,text:()=>pending.promise}];
+  const loading=file.listeners.change();ui.id('benchmark-import-json').value='{"manual":true}';ui.id('benchmark-import-json').listeners.input();
+  pending.resolve(JSON.stringify(result));await loading;
+  assert.equal(ui.id('benchmark-import-json').value,'{"manual":true}');assert.equal(ui.calls.length,1);
+});
+
+test('active native job exposes the original result record while it is running',async()=>{
+  const ui=setup(catalog({state:{active:true,status:'running',run_id:'native-run',elapsed_s:12,current_task:'stack_bowls',current_seed:0,completed_jobs:1,total_jobs:3}}));await ui.init();
+  const job=ui.find('benchmark-job-links');assert.match(job.textContent,/查看实验详情/);
+  await ui.click(job.querySelector('button'));assert.equal(ui.events[0].detail.run_id,'native-run');
+  const progress=ui.find('benchmark-job-progress');assert.equal(progress.hidden,false);
+  assert.match(progress.textContent,/已归档任务 × 种子：1 \/ 3/);
+  assert.match(progress.textContent,/单项可能仅含部分回合/);
+  assert.match(progress.textContent,/当前任务：stack_bowls · seed 0/);
 });

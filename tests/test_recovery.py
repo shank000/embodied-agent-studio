@@ -38,7 +38,7 @@ class Handler(BaseHTTPRequestHandler):
                 'debug_echo':getattr(self.server,'secret_echo','')}
         else:
             self.server.agent_calls+=1
-            invalid=self.server.always_bad or self.server.agent_calls==1
+            invalid=self.server.always_bad or (self.server.first_agent_error and self.server.agent_calls==1)
             response={'id':'fixture','object':'chat.completion','created':0,'model':body['model'],
                 'choices':[{'index':0,'finish_reason':'stop','message':{'role':'assistant',
                     'content':'   ' if invalid else json.dumps(ACTION)}}],
@@ -66,7 +66,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
             target=root/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_text('# fixture source\n')
         mock=patch('server.runlog.RUNS',root/'runs');mock.start();self.addCleanup(mock.stop)
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
-        self.server.requests=[];self.server.agent_calls=0;self.server.always_bad=False
+        self.server.requests=[];self.server.agent_calls=0;self.server.always_bad=False;self.server.first_agent_error=True
         self.server.plan={'action':'retry','instruction':'Return the JSON action instance only, without whitespace-only output.', 'settings':None}
         self.thread=Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
         self.addCleanup(self.server.server_close);self.addCleanup(lambda:self.thread.join(2));self.addCleanup(self.server.shutdown)
@@ -142,6 +142,71 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.coordinator.view['status'],'exhausted')
         self.assertIsNone(self.coordinator.current)
         self.log.finish({'status':'error'})
+
+    async def test_disabled_auto_analysis_preserves_timeout_and_records_skip_without_model_calls(self):
+        self.repair.config.auto_analyze=False
+        self.repair.config.auto_recover=True
+        failure=TimeoutError('Codex 请求超过 120 秒，已终止本轮。')
+        attempts=[]
+        async def timed_out(feedback,config):
+            attempts.append((feedback,config))
+            raise failure
+        with self.assertRaises(TimeoutError) as caught:
+            await self.call(timed_out)
+        self.assertIs(caught.exception,failure)
+        self.assertEqual(len(attempts),1)
+        self.assertEqual(self.server.requests,[])
+        self.assertEqual(self.owner.worker.commands,[])
+        self.assertNotIn('recovery_budget',self.owner.state)
+        self.assertNotIn('recovery_attempts',self.owner.state)
+        self.assertNotIn('recovery_assisted',self.log.metadata)
+        self.assertIsNone(self.coordinator.current)
+        skipped=self.events('recovery_skipped')
+        self.assertEqual(len(skipped),1)
+        self.assertEqual(skipped[0]['reason'],'auto_analyze_disabled')
+        self.assertEqual(skipped[0]['status'],'skipped')
+        self.assertEqual(skipped[0]['source_run_id'],self.log.id)
+        self.assertEqual(skipped[0]['round'],7)
+        self.assertEqual(skipped[0]['phase'],'agent_inference')
+        self.assertFalse(skipped[0]['can_resume'])
+        self.assertEqual(self.owner.state['recovery'],skipped[0])
+        self.assertEqual(self.coordinator.snapshot(),skipped[0])
+        self.assertEqual(self.events('recoverable_error'),[])
+        self.assertEqual(self.events('recovery_retry'),[])
+        self.log.finish({'status':'error'})
+
+    async def test_timeout_is_diagnosed_and_retried_in_same_run_and_round(self):
+        self.server.first_agent_error=False
+        self.server.plan={'action':'retry','instruction':'Allow more time for this inference.',
+                          'settings':{'timeout_s':240}}
+        attempts=[]
+        async def timeout_then_success(feedback,config):
+            attempts.append((feedback,config.timeout_s))
+            if len(attempts)==1:
+                raise TimeoutError('Codex 请求超过 120 秒，已终止本轮。')
+            return await self.operation(feedback,config)
+        action,_=await self.call(timeout_then_success)
+        self.assertEqual(action.status,'done')
+        self.assertEqual(len(attempts),2)
+        self.assertEqual(attempts[0],('',120))
+        self.assertEqual(attempts[1][1],240)
+        self.assertIn('超过 120 秒',attempts[1][0])
+        self.assertIn('Allow more time',attempts[1][0])
+        self.assertEqual(self.owner.state['run_id'],self.log.id)
+        self.assertEqual(self.owner.state['round'],7)
+        self.assertTrue(self.owner.state['active'])
+        self.assertFalse(self.log._finished)
+        self.assertEqual(self.owner.state['recovery_attempts'],1)
+        self.assertEqual(self.coordinator.snapshot()['status'],'recovered')
+        self.assertIsNone(self.coordinator.current)
+        self.assertEqual(len([path for path,_ in self.server.requests if path=='/repair']),1)
+        self.assertEqual(self.server.agent_calls,1)
+        self.assertEqual(len(self.events('recoverable_error')),1)
+        self.assertEqual(len(self.events('recovery_retry')),1)
+        self.assertEqual(len(self.events('recovery_complete')),1)
+        self.assertEqual(self.events('recovery_skipped'),[])
+        self.assertEqual(self.owner.worker.commands,[{'action':'pause','value':True}])
+        self.log.finish({'status':'complete'})
 
     async def test_manual_resume_is_single_use_and_picks_up_user_configuration(self):
         self.repair.config.auto_recover=False

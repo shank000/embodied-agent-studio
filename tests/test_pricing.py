@@ -168,5 +168,35 @@ class PriceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         cancelled.finish({'status': 'stopped'})
         self.assertIsNone(analyze_run(cancelled.id)['cost']['amount_usd'])
 
+    async def test_codex_history_reprices_incomplete_cost_from_original_usage_without_losing_timeout(self):
+        prices = self.catalog.quote({'provider':'codex','model':'fixture-model'})
+        prices.update(cache_write_30m_per_million=2.5, cache_write_12h_per_million=5.)
+        record = {'call_id':'codex-complete', 'round':1, 'provider':'codex', 'model':'fixture-model',
+            'status':'complete', 'pricing':prices, 'inference_s':1.,
+            'usage':{'input_tokens':1000, 'output_tokens':200, 'cached_input_tokens':100,
+                     'cache_write_input_tokens':0, 'reasoning_output_tokens':150},
+            'cost':{'status':'partial', 'billing_kind':'reference', 'reference_amount_usd':None,
+                    'known_reference_amount_usd':.0021, 'warnings':['old cache counter missing']}}
+        log = RunLog('agent', {'model':'fixture-model','provider':'codex'})
+        log.end_inference(record)
+        log.end_inference({'call_id':'timeout', 'round':2, 'provider':'codex', 'model':'fixture-model',
+            'status':'error', 'pricing':prices, 'usage':None, 'error':'Timed out', 'inference_s':120.})
+        log.finish({'status':'error'})
+        before = {name:(log.folder/name).read_bytes() for name in ('events.jsonl','summary.json')}
+        self.catalog.providers['openai'] = price(amount=999.)
+        result = analyze_run(log.id)
+        cost = result['cost']
+        self.assertEqual(cost['priced_calls'],1)
+        self.assertEqual(cost['total_calls'],2)
+        self.assertEqual(cost['missing_calls'],1)
+        self.assertAlmostEqual(cost['known_reference_amount_usd'],.0039)
+        self.assertIsNone(cost['reference_amount_usd'])
+        self.assertEqual(cost['basis'],'recorded_snapshot')
+        self.assertEqual(result['total']['known_reasoning_tokens'],150)
+        self.assertIsNone(result['total']['reasoning_tokens'])
+        self.assertEqual(result['rounds'][0]['recorded_cost'],record['cost'])
+        self.assertEqual(result['rounds'][0]['cost']['pricing'],prices)
+        self.assertEqual(before,{name:(log.folder/name).read_bytes() for name in before})
+
 
 if __name__ == '__main__': unittest.main()

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from . import recovery as recovery_module
 from .control import PoseAction
 from .runlog import RunLog, CURRENT_LOG, model_output
+from .rounds import measured_round, round_phase
 from .telemetry import track_inference, controller_timing, enter_recorded_run
 from .task_verification import verify_completion, environment_success
 
@@ -264,64 +265,68 @@ class PolicyController:
                         self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
                     if remaining < config.dt_s:
                         self.state.update(status='limit', message='已达到仿真时间上限。'); return
-                    self.state.update(status='observing', round=number, message='采集三路相机和实际关节状态。')
-                    await self.worker.execute({'action': 'pause', 'value': True})
-                    self.observation = await self.worker.execute({'action': 'observe'}); self.observation_id += 1
-                    obs = self.observation
-                    body = {'protocol': 'embodied-policy-v1', 'model': config.model, 'device': config.device,
-                            'task': policy_task_with_feedback(request.task, self.state['history']),
-                            'observation': obs, 'seed': initial.get('seed',42)+number-1,
-                            'reset': number == 1, 'horizon': min(config.horizon, max(1, int(remaining/config.dt_s))), 'dt_s': config.dt_s}
-                    saved = log.save_observation(obs, number)
-                    log.write('observation', {'round': number, 'request': body, 'observation': saved})
-                    self.state.update(status='thinking', message=f'{config.model} 正在预测动作块。')
-                    async def infer(feedback, effective_config):
-                        attempt_body = {**body, 'model': effective_config.model, 'device': effective_config.device,
-                            'horizon': min(effective_config.horizon, max(1, int(remaining/effective_config.dt_s))),
-                            'dt_s': effective_config.dt_s, **({'recovery_feedback': feedback} if feedback else {})}
-                        inference_start = time.monotonic()
-                        raw = await predict_policy(effective_config, attempt_body, client)
-                        output = PolicyOutput.model_validate(raw)
-                        return raw, output, time.monotonic()-inference_start, effective_config
-                    raw, output, latency, config = await recovery_module.invoke_with_recovery(
-                        self, 'policy_inference', infer, obs, config)
-                    if not self._accepting or asyncio.current_task().cancelling(): raise asyncio.CancelledError
-                    latencies.append(latency)
-                    log.write('model_output', {'round': number, 'response': raw, 'latency_s': latencies[-1]})
-                    self.state.update(status='executing', message=output.summary or '执行策略动作块。', latency_s=round(latencies[-1],3))
-                    if output.action_type == 'tcp_pose':
-                        if output.pose.status == 'done':
-                            if await verify_completion(self, self.worker, log, number,
-                                    output.pose.explanation, obs['generation']): return
-                            self.state['history'].append({'round': number,
-                                'result': {'status': 'completion_rejected', 'message': self.state['message']}})
-                            self.state['history'] = self.state['history'][-30:]
-                            continue
-                        if output.pose.status == 'blocked':
-                            self.state.update(status='blocked', message=output.pose.explanation); return
-                        result = await self.worker.execute({'action': 'move_tcp', 'generation': obs['generation'], 'pose': output.pose.model_dump()})
-                        frames += 1
-                    else:
-                        result = await self.worker.execute({'action': 'policy_chunk', 'generation': obs['generation'],
-                            'actions': output.actions, 'joint_names': output.joint_names, 'dt_s': output.dt_s, 'robot_id': output.robot_id})
-                        frames += result['frames']; limited += result['limited_targets']
-                    deadline = time.monotonic()+60
-                    while time.monotonic() < deadline:
-                        await asyncio.sleep(.04)
-                        with self.worker.lock: current = self.worker.snapshot.copy()
-                        if not current.get('ready'): raise RuntimeError(current.get('error','仿真服务未就绪。'))
-                        if current['generation'] != obs['generation']: raise RuntimeError('场景已切换，策略运行结束。')
-                        if current['time']-initial['time'] >= request.max_sim_time_s or environment_success(current):
-                            await self.worker.execute({'action':'stop'}); break
-                        if current['task']['status'] not in ('running','settling'): break
-                    else: raise TimeoutError('策略动作执行超过 60 秒。')
-                    await self.worker.execute({'action':'pause', 'value':True})
-                    record = {'round': number, 'latency_s': latencies[-1], 'execution': result, 'evaluation': current.get('evaluation')}
-                    log.write('execution', record)
-                    self.state['history'].append({'round':number, 'frames': result.get('frames',1), 'limited_targets':result.get('limited_targets',0), 'latency_s':round(latencies[-1],3)})
-                    self.state['history'] = self.state['history'][-30:]
-                    if environment_success(current):
-                        self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
+                    async with measured_round(log, self.worker, number, self.state):
+                        self.state.update(status='observing', round=number, message='采集三路相机和实际关节状态。')
+                        await self.worker.execute({'action': 'pause', 'value': True})
+                        self.observation = await self.worker.execute({'action': 'observe'}); self.observation_id += 1
+                        obs = self.observation
+                        body = {'protocol': 'embodied-policy-v1', 'model': config.model, 'device': config.device,
+                                'task': policy_task_with_feedback(request.task, self.state['history']),
+                                'observation': obs, 'seed': initial.get('seed',42)+number-1,
+                                'reset': number == 1, 'horizon': min(config.horizon, max(1, int(remaining/config.dt_s))), 'dt_s': config.dt_s}
+                        saved = log.save_observation(obs, number)
+                        log.write('observation', {'round': number, 'request': body, 'observation': saved})
+                        round_phase(log, 'inference')
+                        self.state.update(status='thinking', message=f'{config.model} 正在预测动作块。')
+                        async def infer(feedback, effective_config):
+                            attempt_body = {**body, 'model': effective_config.model, 'device': effective_config.device,
+                                'horizon': min(effective_config.horizon, max(1, int(remaining/effective_config.dt_s))),
+                                'dt_s': effective_config.dt_s, **({'recovery_feedback': feedback} if feedback else {})}
+                            inference_start = time.monotonic()
+                            raw = await predict_policy(effective_config, attempt_body, client)
+                            output = PolicyOutput.model_validate(raw)
+                            return raw, output, time.monotonic()-inference_start, effective_config
+                        raw, output, latency, config = await recovery_module.invoke_with_recovery(
+                            self, 'policy_inference', infer, obs, config)
+                        if not self._accepting or asyncio.current_task().cancelling(): raise asyncio.CancelledError
+                        latencies.append(latency)
+                        log.write('model_output', {'round': number, 'response': raw, 'latency_s': latencies[-1]})
+                        log.write('policy_action', {'round': number, 'output': output.model_dump(exclude={'reasoning_content', 'thinking'})})
+                        round_phase(log, 'execution')
+                        self.state.update(status='executing', message=output.summary or '执行策略动作块。', latency_s=round(latencies[-1],3))
+                        if output.action_type == 'tcp_pose':
+                            if output.pose.status == 'done':
+                                if await verify_completion(self, self.worker, log, number,
+                                        output.pose.explanation, obs['generation']): return
+                                self.state['history'].append({'round': number,
+                                    'result': {'status': 'completion_rejected', 'message': self.state['message']}})
+                                self.state['history'] = self.state['history'][-30:]
+                                continue
+                            if output.pose.status == 'blocked':
+                                self.state.update(status='blocked', message=output.pose.explanation); return
+                            result = await self.worker.execute({'action': 'move_tcp', 'generation': obs['generation'], 'pose': output.pose.model_dump()})
+                            frames += 1
+                        else:
+                            result = await self.worker.execute({'action': 'policy_chunk', 'generation': obs['generation'],
+                                'actions': output.actions, 'joint_names': output.joint_names, 'dt_s': output.dt_s, 'robot_id': output.robot_id})
+                            frames += result['frames']; limited += result['limited_targets']
+                        deadline = time.monotonic()+60
+                        while time.monotonic() < deadline:
+                            await asyncio.sleep(.04)
+                            with self.worker.lock: current = self.worker.snapshot.copy()
+                            if not current.get('ready'): raise RuntimeError(current.get('error','仿真服务未就绪。'))
+                            if current['generation'] != obs['generation']: raise RuntimeError('场景已切换，策略运行结束。')
+                            if current['time']-initial['time'] >= request.max_sim_time_s or environment_success(current):
+                                await self.worker.execute({'action':'stop'}); break
+                            if current['task']['status'] not in ('running','settling'): break
+                        else: raise TimeoutError('策略动作执行超过 60 秒。')
+                        await self.worker.execute({'action':'pause', 'value':True})
+                        record = {'round': number, 'latency_s': latencies[-1], 'execution': result, 'evaluation': current.get('evaluation')}
+                        log.write('execution', record)
+                        self.state['history'].append({'round':number, 'frames': result.get('frames',1), 'limited_targets':result.get('limited_targets',0), 'latency_s':round(latencies[-1],3)})
+                        self.state['history'] = self.state['history'][-30:]
+                        if environment_success(current):
+                            self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
                 self.state.update(status='round_complete' if request.one_chunk else 'limit', message='本次策略运行结束；任务结果以场景评价器为准。')
         except asyncio.CancelledError:
             self.state.update(status='stopped', message='策略已停止，迟到的推理结果不会执行。'); raise

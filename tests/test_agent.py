@@ -268,7 +268,7 @@ class VisualLoopTests(unittest.TestCase):
             self.assertEqual(commands.count('record_start'),1);self.assertEqual(commands.count('record_stop'),1)
             self.assertEqual(agent.state['history'][0]['round'],1)
             self.assertEqual(agent.state['history'][0]['result']['status'],'complete')
-            self.assertEqual(agent.run_log.artifacts['observation_count'],2)
+            self.assertEqual(agent.run_log.artifacts['observation_count'],4)  # Two before/after pairs; retries still share the first input.
             self.assertEqual(agent.run_log._inference_count,4)
             self.assertEqual(agent.state['video']['status'],'saved')
             self.assertGreater(agent.state['video']['frame_count'],1)

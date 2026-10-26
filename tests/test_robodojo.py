@@ -2,9 +2,11 @@
 import asyncio
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -39,6 +41,28 @@ class RoboDojoIntegrationTests(unittest.TestCase):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),base_url='http://127.0.0.1:8000') as client:
                 return await client.request(method,'/api/benchmarks/robodojo'+path,**kwargs)
         return asyncio.run(request())
+
+    def native_fixture(self,mode='complete'):
+        """Small real process emulating only the official CLI/result boundary."""
+        source=self.root/'source'
+        adapter=source/'XPolicyLab/policy/demo_policy/deploy.py'
+        adapter.parent.mkdir(parents=True,exist_ok=True);adapter.write_text('# synthetic policy fixture',encoding='utf-8')
+        entry=source/'src/eval_client/main.py';entry.parent.mkdir(parents=True,exist_ok=True)
+        entry.write_text('''import json, os, sys
+from pathlib import Path
+def arg(name): return sys.argv[sys.argv.index(name)+1]
+root=Path('eval_result/RoboDojo')/arg('--task_name')/arg('--policy_name')/arg('--env_cfg_type')/(arg('--seed')+'_'+arg('--additional_info'))/os.environ['ROBODOJO_RUN_ID']
+root.mkdir(parents=True)
+print('Synthetic CLI fixture, no robotics SDK loaded',flush=True)
+mode=MODE
+if mode != 'missing':
+ (root/'_result.json').write_text('{broken' if mode == 'corrupt_failure' else json.dumps(PAYLOAD),encoding='utf-8')
+sys.exit(7 if mode in ('failed','corrupt_failure') else 0)
+'''.replace('MODE',repr(mode)).replace('PAYLOAD',repr(PAYLOAD)),encoding='utf-8')
+        return {'kind':'native','source_root':str(source),'python':sys.executable}
+
+    def events(self,log,kind):
+        return [r['data'] for r in map(json.loads,log.path.read_text(encoding='utf-8').splitlines()) if r['event']==kind]
 
     def test_unprepared_runtime_allows_catalog_and_plan_but_not_native_execution(self):
         response=self.call('GET','');self.assertEqual(response.status_code,200)
@@ -134,4 +158,85 @@ class RoboDojoIntegrationTests(unittest.TestCase):
             self.assertEqual(record['model'],'demo_policy')
             self.assertEqual(record['rounds'],[])
             self.assertIn('尚未开始',record['message'])
+        asyncio.run(scenario())
+
+    def test_native_exit_error_preserves_valid_partial_results_and_original_status(self):
+        async def scenario():
+            controller=robodojo.RoboDojoController();config=self.native_fixture('failed')
+            with patch.object(robodojo,'plan',return_value={'ready':True,'commands':[]}),patch.object(robodojo,'runtime_config',return_value=config):
+                await controller.start({'episodes':50});await controller.task
+            self.assertEqual(controller.state['status'],'error')
+            self.assertIn('退出 7',controller.state['message'])
+            self.assertEqual(controller.state['current_task'],'stack_bowls')
+            self.assertEqual(controller.state['current_seed'],0)
+            self.assertEqual(controller.state['completed_jobs'],1)
+            self.assertEqual(controller.state['total_jobs'],1)
+            self.assertEqual(len(controller.state['rows']),1)
+            child=analyze_run(controller.state['rows'][0]['run_id'])
+            self.assertEqual(child['benchmark']['summary']['eval_time'],2)
+            self.assertFalse(child['benchmark']['coverage']['task_seed_complete'])
+            parent=analyze_run(controller.log.id)
+            self.assertEqual(parent['status'],'error')
+            self.assertEqual(len(parent['trials']),1)
+            self.assertTrue((controller.log.folder/'benchmark/stack_bowls-0.log').is_file())
+        asyncio.run(scenario())
+
+    def test_bad_partial_result_does_not_replace_original_process_failure(self):
+        async def scenario():
+            controller=robodojo.RoboDojoController();config=self.native_fixture('corrupt_failure')
+            with patch.object(robodojo,'plan',return_value={'ready':True,'commands':[]}),patch.object(robodojo,'runtime_config',return_value=config):
+                await controller.start({});await controller.task
+            self.assertEqual(controller.state['status'],'error')
+            self.assertIn('退出 7',controller.state['message'])
+            self.assertEqual(controller.state['rows'],[])
+            self.assertEqual(len(self.events(controller.log,'archive_error')),1)
+        asyncio.run(scenario())
+
+    def test_native_exit_zero_without_results_is_not_success(self):
+        async def scenario():
+            controller=robodojo.RoboDojoController();config=self.native_fixture('missing')
+            with patch.object(robodojo,'plan',return_value={'ready':True,'commands':[]}),patch.object(robodojo,'runtime_config',return_value=config):
+                await controller.start({});await controller.task
+            self.assertEqual(controller.state['status'],'error')
+            self.assertIn('未生成',controller.state['message'])
+            self.assertEqual(controller.state['rows'],[])
+        asyncio.run(scenario())
+
+    def test_repeated_stop_during_archival_waits_and_keeps_parent_child_link(self):
+        async def scenario():
+            controller=robodojo.RoboDojoController();config=self.native_fixture()
+            entered=Event();release=Event();native_import=robodojo.import_result
+            def delayed_import(request):
+                entered.set()
+                if not release.wait(5): raise AssertionError('Test did not release import')
+                return native_import(request)
+            with patch.object(robodojo,'plan',return_value={'ready':True,'commands':[]}),patch.object(robodojo,'runtime_config',return_value=config),patch.object(robodojo,'import_result',side_effect=delayed_import):
+                await controller.start({})
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait,2))
+                    first=asyncio.create_task(controller.stop());await asyncio.sleep(.03)
+                    second=asyncio.create_task(controller.stop());await asyncio.sleep(.03)
+                    self.assertFalse(first.done());self.assertFalse(second.done())
+                    self.assertTrue(controller.state['active']);self.assertFalse(controller.log._finished)
+                    release.set();await asyncio.gather(first,second)
+                finally:release.set()
+            self.assertEqual(controller.state['status'],'stopped')
+            self.assertFalse(controller.state['active'])
+            self.assertEqual(len(controller.state['rows']),1)
+            self.assertEqual(len(self.events(controller.log,'benchmark_trial')),1)
+            self.assertEqual(len(analyze_run(controller.log.id)['trials']),1)
+            self.assertTrue(controller.log._finished)
+        asyncio.run(scenario())
+
+    def test_exhausted_wall_budget_does_not_spawn_the_next_sdk_job(self):
+        async def scenario():
+            controller=robodojo.RoboDojoController();config=self.native_fixture()
+            times=iter([0.,0.,11.,11.])
+            with patch.object(robodojo,'plan',return_value={'ready':True,'commands':[]}),patch.object(robodojo,'runtime_config',return_value=config),patch.object(robodojo,'time',SimpleNamespace(monotonic=lambda:next(times,11.))):
+                await controller.start({'seeds':[0,1],'max_wall_time_s':10});await controller.task
+            self.assertEqual(controller.state['status'],'error')
+            self.assertIn('墙钟预算',controller.state['message'])
+            self.assertEqual(controller.state['completed_jobs'],1)
+            self.assertEqual(controller.state['total_jobs'],2)
+            self.assertFalse((controller.log.folder/'benchmark/stack_bowls-1.log').exists())
         asyncio.run(scenario())
