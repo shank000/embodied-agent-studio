@@ -1,3 +1,5 @@
+import {renderExperimentCosts} from './experiment_costs.js';
+import {renderRoundTimeline} from './rounds.js';
 import {setTaskDraft,syncTaskDraft} from './task_drafts.js';
 const $=selector=>document.querySelector(selector);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -224,12 +226,7 @@ export function renderResearch(state){
   document.querySelectorAll('#comparison-form input,#comparison-form select').forEach(input=>input.disabled=comparison.active);
   updatePolicyAvailability(state.model,locked);updateComparisonAvailability(locked);
   $('#policy-log-link').hidden=!policy.run_id;if(policy.run_id)$('#policy-log-link').href=`/api/runs/${policy.run_id}/download`;
-  const key=JSON.stringify(policy.history||[]);
-  if(key!==lastPolicy){lastPolicy=key;$('#policy-history').innerHTML=(policy.history||[]).slice(-5).reverse().map(row=>{
-    if(row.result?.status==='completion_rejected')return `<div class="round-record"><strong>第 ${escape(row.round??'?')} 轮 · 完成声明被环境拒绝</strong><p>${escape(row.result.message||'')}</p></div>`;
-    const details=[metric(row.latency_s)==null?'':`推理 ${row.latency_s.toFixed(2)} s`,metric(row.limited_targets)==null?'':`执行目标限幅 ${row.limited_targets} 项`].filter(Boolean);
-    return `<div class="round-record"><strong>动作块 ${escape(row.round??'?')}${metric(row.frames)==null?'':` · ${row.frames} 帧`}</strong>${details.length?`<p>${details.join(' · ')}</p>`:''}</div>`;
-  }).join('');}
+  renderRoundTimeline($('#policy-history'),policy);
   $('#comparison-message').textContent=comparison.message||'尚未运行。';
   const rowsKey=JSON.stringify(comparison.rows||[]);
   if(rowsKey!==lastRows){lastRows=rowsKey;renderComparison(comparison.rows||[]);}
@@ -303,7 +300,7 @@ function clearResult(){
   const benchmark=$('#result-native-benchmark');if(benchmark){benchmark.replaceChildren();benchmark.hidden=true;}
   selectedRun='';selectedResult=null;lastDetailKey='';detailGeneration++;$('#log-detail-title').textContent='选择一条实验结果';$('#log-detail-id').textContent='';$('#log-download').hidden=true;$('#result-actions').hidden=true;$('#result-management-note').hidden=true;
   for(const selector of ['#result-summary','#result-calls','#result-children','#result-task-text'])$(selector).replaceChildren();
-  for(const selector of ['#result-round-charts','#result-chart-note','#result-outcome-message','#result-data-issues','#result-cost-panel','#result-evaluation'])$(selector).hidden=true;
+  for(const selector of ['#result-experiment-costs','#result-round-timeline','#result-round-charts','#result-chart-note','#result-outcome-message','#result-data-issues','#result-cost-panel','#result-evaluation'])$(selector).hidden=true;
   renderRunVideo($('#log-video'),'',null);$('#result-description').textContent='接口未返回的用量与推理文本会标记缺失，不推测补齐。';$('#log-detail').textContent='运行记录将在这里展示。';
 }
 function renderResultActions(run){
@@ -368,9 +365,13 @@ function priceSourceLink(url,label='官方价格页 ↗'){
   return `<a class="text-button" href="${escape(url)}" target="_blank" rel="noopener noreferrer">${escape(label)}</a>`;
 }
 function costAmountMarkup(cost){
-  const amount=metric(cost?.amount_usd),known=metric(cost?.known_amount_usd),reference=metric(cost?.reference_amount_usd),minimum=metric(cost?.amount_min_usd),maximum=metric(cost?.amount_max_usd);
-  const cash=amount!=null?moneyText(amount):minimum!=null&&maximum!=null?`${moneyText(minimum)} ～ ${moneyText(maximum)}`:cost?.status==='partial'&&known>0?`${moneyText(known)}（已知部分）`:'不可完整估算';
-  return `<div><small>API 费用估算</small><strong>${escape(cash)}</strong></div>${reference==null&&!cost?.has_reference&&cost?.status!=='reference'?'':`<div class="cost-reference"><small>Codex 订阅 · API 等价参考</small><strong>${escape(moneyText(reference))}</strong><span>用于对照 API 用量成本，不代表订阅实际扣费。</span></div>`}`;
+  const hasReference=!!cost?.has_reference||cost?.status==='reference'||metric(cost?.reference_amount_usd)!=null;
+  function amountText(prefix=''){
+    const amount=metric(cost?.[prefix+'amount_usd']),known=metric(cost?.['known_'+prefix+'amount_usd']),minimum=metric(cost?.[prefix+'amount_min_usd']),maximum=metric(cost?.[prefix+'amount_max_usd']);
+    return amount!=null?moneyText(amount):minimum!=null&&maximum!=null?`${moneyText(minimum)} ～ ${moneyText(maximum)}`:known>0?`${moneyText(known)}（已知部分）`:'暂无可估算用量或单价';
+  }
+  const showApi=!hasReference||cost?.billable_calls>0||cost?.local_calls>0;
+  return `${showApi?`<div><small>API 费用估算</small><strong>${escape(amountText())}</strong></div>`:''}${hasReference?`<div class="cost-reference"><small>Codex 订阅 · API 等价参考</small><strong>${escape(amountText('reference_'))}</strong><span>按官网 API 单价计算，用于对照用量成本，不代表订阅实际扣费。</span></div>`:''}`;
 }
 function costBreakdownMarkup(rows){
   if(!rows?.length)return '<p class="research-note">没有可展示的计价组成。</p>';
@@ -378,7 +379,7 @@ function costBreakdownMarkup(rows){
   return `<div class="result-table-wrap"><table class="result-table cost-breakdown-table"><thead><tr><th>组成</th><th>Tokens</th><th>USD / 百万 tokens</th><th>估算金额 / USD</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${escape(components[row.component]||row.component||'未记录')}</td><td>${numberText(row.tokens)}</td><td>${escape(metric(row.rate_per_million)==null?'未记录':String(row.rate_per_million))}</td><td>${escape(moneyText(row.amount_usd))}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function costDiagnosisText(cost){
-  if(metric(cost?.amount_min_usd)!=null&&metric(cost?.amount_max_usd)!=null)return '金额上下界来自尚未确定的计价条件，例如未覆盖年份的节假日日历；这不代表接口的 Token 用量一定缺失。';
+  if((metric(cost?.amount_min_usd)!=null&&metric(cost?.amount_max_usd)!=null)||(metric(cost?.reference_amount_min_usd)!=null&&metric(cost?.reference_amount_max_usd)!=null))return '金额上下界来自尚未确定的计价条件，例如未覆盖年份的节假日日历；这不代表接口的 Token 用量一定缺失。';
   if(cost?.status==='partial'||cost?.status==='unavailable')return '费用未完整估算的具体原因见下方：可能缺少接口实际用量、缓存明细或适用单价。取消前未返回的 usage 不会按 0 补算。';
   if(cost?.calendar_sources?.length)return '已按有来源、限定年份的国务院全国放假安排核对峰谷条件；周末即使调休上班，也不作为周一至周五的高峰时段。';
   return '';
@@ -416,6 +417,11 @@ async function refreshPricingStatus(manual=false){
   }catch(error){if(generation===pricingGeneration){if(manual||!pricingErrorIsManual){pricingError=`价格状态更新失败：${error.message}${pricingState?'；仍显示上次取得的来源状态。':''}`;pricingErrorIsManual=manual;}if(manual)context.toast(pricingError);}}
   finally{if(generation===pricingGeneration){pricingLoading=false;pricingRefreshing=false;renderPricingStatus();}}
 }
+function tokenTotalText(total,field){
+  if(metric(total[field])!=null)return numberText(total[field]);
+  const known=metric(total['known_'+field]);
+  return known>0?`${numberText(known)}（已知）`:'—';
+}
 function renderResultAnalysis(analysis,run,events=[]){
   const total=analysis.total||{},rounds=analysis.rounds||[],wall=metric(analysis.elapsed_s)??metric(run.metrics?.wall_time_s),state=statuses[analysis.status]||analysis.status;
   $('#result-description').textContent=`${runKinds(analysis.kind||run.kind)} · ${analysis.model||resultModel(run)||'模型未记录'} · 推理强度 ${analysis.reasoning||'未记录'} · ${state||'状态未记录'}${analysis.started_at?` · 开始 ${analysis.started_at}`:''}${analysis.recovery_assisted?` · 恢复辅助 · ${numberText(analysis.recovery_attempts)} 次（调用总量含修复诊断与重试）`:''}`;
@@ -423,10 +429,13 @@ function renderResultAnalysis(analysis,run,events=[]){
   $('#result-data-issues').textContent=(analysis.issues||[]).length?`记录读取提示：${analysis.issues.join('；')}`:'';$('#result-data-issues').hidden=!analysis.issues?.length;
   const environmentSteps=metric((analysis.metrics??run.metrics)?.environment_steps);
   const usageLabel=total.calls===0&&total.input_tokens===0&&total.output_tokens===0?'无模型调用':total.usage_complete?'完整':'存在缺失';
-  $('#result-summary').innerHTML=[[analysis.record_origin==='external_import'?'本次归档耗时':'完整墙钟',secondsText(wall)],['模型调用次数',numberText(total.calls)],['总 tokens',numberText(total.total_tokens)],['输出 tokens',numberText(total.output_tokens)],['累计调用耗时',secondsText(total.inference_s)],['用量记录',usageLabel],...(environmentSteps==null?[]:[['环境动作步数',numberText(environmentSteps)]])].map(([label,value])=>`<div><small>${escape(label)}</small><strong>${escape(value)}</strong></div>`).join('');
+  $('#result-summary').innerHTML=[[analysis.record_origin==='external_import'?'本次归档耗时':'完整墙钟',secondsText(wall)],['模型调用次数',numberText(total.calls)],['总 tokens',tokenTotalText(total,'total_tokens')],['输出 tokens',tokenTotalText(total,'output_tokens')],['累计调用耗时',secondsText(total.inference_s)],['用量记录',usageLabel],...(environmentSteps==null?[]:[['环境动作步数',numberText(environmentSteps)]])].map(([label,value])=>`<div><small>${escape(label)}</small><strong>${escape(value)}</strong></div>`).join('');
   renderResultCompletion(analysis,run,events);
   renderNativeBenchmark(analysis);
+  $('#result-round-timeline').hidden=false;
   renderResultCost(analysis.cost);
+  renderExperimentCosts($('#result-experiment-costs'),analysis);
+  renderRoundTimeline($('#result-round-timeline'),{run_id:analysis.run_id,status:analysis.status,active:analysis.status==='running'});
   const points=rounds.map((row,index)=>({label:`第 ${row.round??'?'} 轮 / 调用 ${row.call_id??index+1}`,shortLabel:`${row.round??'?'} / ${index+1}`,value:row.output_tokens}));
   $('#result-round-charts').hidden=false;$('#result-chart-note').hidden=false;$('#result-token-chart').innerHTML=metricChartMarkup(points,'每轮接口输出 tokens');$('#result-time-chart').innerHTML=metricChartMarkup(points.map((point,index)=>({...point,value:rounds[index].inference_s})),'每轮模型调用耗时');
   const calls=$('#result-calls'),previous=new Map([...calls.querySelectorAll('details.result-call')].map(detail=>[detail.dataset.call,detail]));
@@ -502,7 +511,7 @@ async function runAnalysis(){
     const groups=(response.groups||[]).filter(group=>analysisContextKey(group)===selectedContext&&group.model===model&&group.task===task&&group.kind===kind).sort((a,b)=>(order[a.reasoning]??99)-(order[b.reasoning]??99)||String(a.reasoning).localeCompare(String(b.reasoning)));
     const points=groups.map(group=>({label:group.reasoning||'未记录',shortLabel:group.reasoning||'未记录',value:group.mean_output_tokens}));
     $('#analysis-token-chart').innerHTML=metricChartMarkup(points,'按推理强度比较单次实验累计输出 tokens 均值','推理强度');$('#analysis-time-chart').innerHTML=metricChartMarkup(points.map((point,index)=>({...point,value:groups[index].mean_inference_s})),'按推理强度比较单次实验调用总耗时均值','推理强度');
-    $('#analysis-rows').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${escape(group.reasoning||'未记录')}</strong><small>${escape(group.model)}</small><small>${escape(analysisContextLabel(group))}</small></td><td>${numberText(group.runs)}<small>输出样本 ${numberText(group.output_samples)} / 时间样本 ${numberText(group.inference_samples)}</small></td><td>${numberText(group.output_tokens)}<small>均值 ${numberText(group.mean_output_tokens)}</small></td><td>${secondsText(group.inference_s)}<small>均值 ${secondsText(group.mean_inference_s)}</small></td><td>${numberText(group.total_tokens)}<small>完整样本 ${numberText(group.token_samples)}</small></td><td>输出 ${numberText(group.missing_output_runs)}<small>调用耗时 ${numberText(group.missing_inference_runs)}</small></td></tr>`).join(''):'<tr><td colspan="6" class="empty-state">筛选范围内没有可比较的运行。</td></tr>';
+    $('#analysis-rows').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${escape(group.reasoning||'未记录')}</strong><small>${escape(group.model)}</small><small>${escape(analysisContextLabel(group))}</small></td><td>${numberText(group.runs)}<small>成功 ${numberText(group.succeeded)} · 成功率 ${metric(group.success_rate)==null?"未记录":(group.success_rate*100).toFixed(1)+"%"}</small><small>恢复 ${numberText(group.recovery_runs)} 次实验 · 已知成本 ${moneyText(group.known_cost_usd)}</small><small>输出样本 ${numberText(group.output_samples)} / 时间样本 ${numberText(group.inference_samples)}</small></td><td>${numberText(group.output_tokens)}<small>均值 ${numberText(group.mean_output_tokens)}</small></td><td>${secondsText(group.inference_s)}<small>均值 ${secondsText(group.mean_inference_s)}</small></td><td>${numberText(group.total_tokens)}<small>完整样本 ${numberText(group.token_samples)}</small></td><td>输出 ${numberText(group.missing_output_runs)}<small>调用耗时 ${numberText(group.missing_inference_runs)}</small></td></tr>`).join(''):'<tr><td colspan="6" class="empty-state">筛选范围内没有可比较的运行。</td></tr>';
     $('#analysis-message').textContent=`当前物理环境内 ${groups.reduce((sum,group)=>sum+group.runs,0)} 条已结束实验，${groups.length} 个推理强度组。${groups.length?analysisContextLabel(groups[0])+'。':''}不同后端与评价契约分别统计；未知历史字段显示“未记录”。${response.aggregation_scope==='leaf_runs_only'?'统计仅累计实际执行的子试验，排除父实验重复汇总。':''}缺失用量不作为 0，均值仅使用对应字段完整的实验。`;
     $('#analysis-issues').hidden=!response.issues?.length;$('#analysis-issues-text').textContent=(response.issues||[]).map(issue=>typeof issue==='string'?issue:JSON.stringify(issue)).join('\n');
   }catch(error){if(generation===analysisGeneration){resultError(error);$('#analysis-message').textContent=error.message;}}finally{if(generation===analysisGeneration)$('#refresh-analysis').disabled=false;}

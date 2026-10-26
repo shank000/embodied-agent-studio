@@ -51,7 +51,7 @@ def _components(call, quote):
     outgoing = _counter(usage, 'output_tokens', 'completion_tokens')
     output_details = _mapping(usage.get('output_tokens_details') or usage.get('completion_tokens_details'))
     reasoning = _counter(output_details, 'reasoning_tokens')
-    top_reasoning = _counter(usage, 'reasoning_tokens')
+    top_reasoning = _counter(usage, 'reasoning_tokens', 'reasoning_output_tokens')
     if reasoning is None: reasoning = top_reasoning
     elif top_reasoning is not None and reasoning != top_reasoning: raise ValueError('推理 Token 明细不一致。')
     if reasoning is not None and outgoing is not None and reasoning > outgoing:
@@ -89,6 +89,10 @@ def _components(call, quote):
     if read is not None and top_read is not None and read != top_read: raise ValueError('缓存读取 Token 明细不一致。')
     if read is None: read = top_read
     written = _counter(details, 'cache_write_tokens')
+    top_written = _counter(usage, 'cache_write_input_tokens')
+    if written is not None and top_written is not None and written != top_written:
+        raise ValueError('缓存写入 Token 明细不一致。')
+    if written is None: written = top_written
     write_details = _mapping(details.get('cache_write_tokens_details'))
     has_write_rates = any(rates.get(key) is not None
                           for rates in (quote, _mapping(quote.get('long_context_rates')), _mapping(quote.get('peak')), _mapping(quote.get('off_peak')))

@@ -303,7 +303,7 @@ class CompositionPhysicsTests(unittest.TestCase):
             self.assertEqual(len(controller.state['history']), 2)
             self.assertTrue(all(row['result']['status'] == 'complete' for row in controller.state['history']))
             folder, events = self.events(controller)
-            self.assertEqual(len(list((folder/'observations').glob('*/*.jpg'))), 6)
+            self.assertEqual(len(list((folder/'observations').glob('*/*.jpg'))), 12)  # Three cameras, before and after each of two rounds.
             self.assertTrue((folder/'checkpoints'/'initial.json').exists())
             frames = [json.loads(line) for line in (folder/'trajectory.jsonl').read_text(encoding='utf-8').splitlines()]
             self.assertGreater(len(frames), 20)

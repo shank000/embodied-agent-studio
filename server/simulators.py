@@ -61,6 +61,12 @@ def runtime_info(engine_id):
     package = RUNTIMES[engine_id][0]
     pattern = f'Lib/site-packages/{package}-*.dist-info' if sys.platform == 'win32' else f'lib/python*/site-packages/{package}-*.dist-info'
     distributions = sorted(folder.glob(pattern))
+    config = folder/'pyvenv.cfg'
+    if sys.platform == 'win32' and python.is_file() and config.is_file():
+        settings = dict(line.split('=', 1) for line in config.read_text(encoding='utf-8-sig').splitlines() if '=' in line)
+        home = next((value.strip() for key, value in settings.items() if key.strip() == 'home'), '')
+        if home and not (Path(home)/'python.exe').is_file():
+            raise ValueError(f'{engine_id} 的 Python 基础解释器已失效：{home}。请修复 {config} 中的 home 或按安装文档重建独立环境；现有包目录不代表解释器可运行。')
     return {'kind': 'native', 'python': str(python), 'installed': python.is_file() and bool(distributions),
             'version': distributions[-1].name.removeprefix(package+'-').removesuffix('.dist-info') if distributions else None}
 
@@ -142,8 +148,8 @@ def catalog(active='mujoco', session_id=None):
         'maniskill': ('官方 PickCube / PushCube；SAPIEN/PhysX、原生图像和官方成功判据。', '独立 .venv-maniskill；Windows CPU 物理 + Vulkan，Linux 可用 GPU。'),
         'libero': ('官方五套任务、Panda、robosuite 控制器与 BDDL 成功谓词。', '独立 .venv-libero，准备官方任务、初态与场景资产，无需演示训练集。'),
         'alfworld': ('官方 ALFWorld / TextWorld 家务任务；文字观察与可执行命令。', 'Linux/macOS；本机 Windows 通过已配置的 Ubuntu WSL 运行。文字画面不冒充三维相机。'),
-        'alfworld_thor': ('官方 ALFWorld 视觉任务；THOR 三维房间、第一人称画面与原生任务判据。', '独立 Python 3.11 与官方 AI2-THOR 2.1；Windows 使用 WSLg。相同种子对应文字模式的同一官方回合。'),
-        'ai2thor': ('官方 Unity 房间、视觉导航与物体交互，依据 Unity 元数据验收。', '本机通过 Ubuntu WSLg 运行官方 Linux Unity；首次加载需下载官方构建。'),
+        'alfworld_thor': ('官方 ALFWorld 视觉任务；THOR 三维房间、第一人称画面与原生任务判据。', '独立 Python 3.11 与官方 AI2-THOR 2.1；WSL 使用独立 Xvfb 后台显示。相同种子对应文字模式的同一官方回合。'),
+        'ai2thor': ('官方 Unity 房间、视觉导航与物体交互，依据 Unity 元数据验收。', 'Ubuntu WSL 使用独立 Xvfb 后台显示运行官方 Linux Unity；首次加载需下载官方构建。'),
         'isaac': ('Isaac Lab / Newton 机器人场景、原生控制与相机；独立运行无需完整 Isaac Sim。', '独立 Python 3.12 .venv-isaac；CUDA 与显卡驱动须匹配所选物理和相机。'),
         'isaacsim': ('Isaac Lab 的 Isaac Sim 物理与渲染路径；与 Newton 单独记录。', '独立 .venv-isaacsim；完整 Isaac Sim 需满足官方硬件条件并手动完成 EULA。'),
     }
@@ -156,7 +162,7 @@ def catalog(active='mujoco', session_id=None):
         description, requirement = descriptions[engine_id]
         values.append({'id': engine_id, 'name': name, 'version': info.get('version'),
                        'implemented': implemented, 'installed': installed,
-                       'status': 'available' if implemented and installed else 'not_installed',
+                       'status': 'unavailable' if error else 'available' if implemented and installed else 'not_installed',
                        'description': description, 'requirements': requirement, 'docs': docs,
                        'runtime_kind': info.get('kind'), 'error': error})
     for item in values:
@@ -165,4 +171,12 @@ def catalog(active='mujoco', session_id=None):
             item.update(models=list(models), scenes=list(scenes), capabilities=backend_identity(item['id'])['capabilities'])
         else:
             item.update(models=[], scenes=[], capabilities=[])
+    # A benchmark owns a separate rollout lifecycle. Expose its entry beside
+    # simulators without registering it as a switchable interactive backend.
+    values.append({'id': 'robodojo', 'name': 'RoboDojo', 'kind': 'benchmark',
+                   'status': 'external_runtime', 'implemented': True, 'installed': None,
+                   'description': '使用 Isaac Sim 5.1 的双臂任务基准，独立评测流程；打开后配置任务、检查运行环境和查看结果。',
+                   'requirements': '原生运行需要独立 Linux GPU、Isaac Sim 5.1 和 XPolicyLab；本机可准备计划和导入结果。打开入口不会切换当前仿真。',
+                   'docs': 'https://robodojo-benchmark.com/doc/usage/quick-evaluation/',
+                   'models': [], 'scenes': [], 'capabilities': ['plan', 'import_results']})
     return {'active': active, 'session_id': session_id, 'backends': values}

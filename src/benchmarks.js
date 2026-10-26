@@ -6,6 +6,7 @@ const DIMENSIONS={generalization:'泛化',memory:'记忆',precision:'精密操�
 const RUN_STATES={idle:'等待评测',not_ready:'待运行环境',preparing:'正在检查运行环境',starting:'正在启动',running:'官方评测运行中',stopping:'正在停止',stopped:'已停止',completed:'执行结束',complete:'执行结束',failed:'执行失败',error:'执行错误',imported:'已导入官方结果'};
 let context={},nodes=null,platformState=null,snapshot=null,initialized=false,reachable=false,refreshing=false,busy='',stopPending=false,lastFetch=0,planUrl='',lastCatalog='',lastHistory='',lastReadiness='',initialSelection=false;
 let fileVersion=0,actionVersion=0;
+let planPayload=null,scriptUrl='';
 const selected=new Set();
 
 const idOf=value=>typeof value==='string'?value:String(value?.id??value?.name??'');
@@ -42,7 +43,7 @@ function renderTaskList(){
   const visible=filteredTasks();nodes.tasks.replaceChildren();
   for(const task of visible){
     const row=element('label','benchmark-task-option'),input=element('input');input.type='checkbox';input.value=task.id;input.checked=selected.has(task.id);
-    input.addEventListener('change',()=>{if(input.checked)selected.add(task.id);else selected.delete(task.id);updateControls();});
+    input.addEventListener('change',()=>{if(input.checked)selected.add(task.id);else selected.delete(task.id);invalidatePlan();updateControls();});
     const text=element('span'),name=element('strong','',task.name&&task.name!==task.id?task.name:task.id),meta=element('small','',`${DIMENSIONS[task.dimension]||task.dimension||'未分类'}${task.variant==='random'?' · 随机变体':''}${name.textContent!==task.id?` · ${task.id}`:''}`);
     text.append(name,meta);row.append(input,text);nodes.tasks.append(row);
   }
@@ -58,6 +59,7 @@ function renderCatalog(){
   options(nodes.importTask,items.map(item=>({id:item.id,name:item.name||item.id})),'stack_bowls');
   nodes.revision.textContent=`${value.benchmark_id||'RoboDojo'} · ${value.version||'版本未记录'} · ${value.revision?String(value.revision).slice(0,12):'提交未记录'}`;
   nodes.catalogCount.textContent=`${items.length} 个任务配置 · ${dimensions.length} 个能力维度`;
+  if(planPayload){try{if(JSON.stringify(planInput())!==JSON.stringify(planPayload))invalidatePlan();}catch{invalidatePlan();}}
   renderTaskList();
 }
 function renderReadiness(){
@@ -79,7 +81,11 @@ function renderJob(){
   nodes.jobMessage.textContent=job.message||(active?'正在执行官方 RoboDojo 流程。':'生成计划与导入结果都不会启动仿真。');
   const elapsed=finite(job.timing?.elapsed_wall_s)??finite(job.timing?.elapsed_s)??finite(job.elapsed_s);
   nodes.jobTime.textContent=elapsed==null?'墙钟时间：未运行':`运行墙钟：${elapsed.toFixed(1)} s`;
+  const completed=finite(job.completed_jobs),total=finite(job.total_jobs);
+  nodes.jobProgress.hidden=total==null&&!job.current_task;
+  nodes.jobProgress.textContent=[total==null?'':`已归档任务 × 种子：${completed??'—'} / ${total}（单项可能仅含部分回合）`,job.current_task?`${active?'当前':'最后'}任务：${job.current_task} · seed ${job.current_seed??'—'}`:''].filter(Boolean).join('\n');
   nodes.jobRun.textContent=job.run_id?`运行记录：${job.run_id}`:'';
+  if(nodes.jobLinks.dataset.run!==(job.run_id||'')){nodes.jobLinks.dataset.run=job.run_id||'';nodes.jobLinks.replaceChildren();if(job.run_id)nodes.jobLinks.append(runLinks(job.run_id));}
 }
 function ownArtifactUrl(value){
   if(typeof value!=='string'||!value)return null;
@@ -119,10 +125,12 @@ function updateControls(){
   nodes.start.disabled=!reachable||pending||refreshing||!hasTasks||snapshot?.readiness?.ready!==true||active||controllerBusy();
   nodes.stop.disabled=stopPending||(!active&&busy!=='start');nodes.refresh.disabled=pending||refreshing;
   nodes.importSubmit.disabled=!reachable||pending||refreshing||!tasks().length;
+  nodes.exportScript.disabled=!reachable||pending||refreshing||!planPayload;
   for(const input of nodes.editable)input.disabled=pending;
   for(const input of nodes.tasks.querySelectorAll('input'))input.disabled=pending;
   nodes.selectedCount.textContent=`已选择 ${selected.size} 项 · 当前显示 ${filteredTasks().length} 项`;
   nodes.plan.textContent=busy==='plan'?'正在生成…':'生成评测计划';nodes.start.textContent=busy==='start'?'正在启动…':'运行官方评测';nodes.stop.textContent=stopPending?'正在停止…':'停止评测';nodes.importSubmit.textContent=busy==='import'?'正在导入…':'导入官方结果';
+  nodes.exportScript.textContent=busy==='export'?'正在生成 Linux 脚本…':'生成 Linux 运行脚本';
   nodes.startReason.textContent=controllerBusy()?'工作台有自动任务运行，请先停止后再启动基准。':snapshot?.readiness?.ready!==true?'当前可生成计划和导入结果；运行按钮等待官方运行环境就绪。':active?'官方评测正在运行，可在此停止。':'运行使用外部 XPolicyLab WebSocket 策略，不会自动调用工作台 HTTP 模型或 Codex。';
   nodes.root.setAttribute('aria-busy',String(pending||refreshing));
 }
@@ -145,24 +153,49 @@ function planInput(){
   const episodeText=nodes.episodes.value.trim(),episodes=episodeText==='native'?'native':/^\d+$/.test(episodeText)?Number(episodeText):null;
   if(episodes!=='native'&&(!Number.isSafeInteger(episodes)||episodes<1||episodes>50))throw new Error('回合数须为 1–50 的整数或 native。');
   const port=Number(nodes.port.value);if(!Number.isInteger(port)||port<1||port>65535)throw new Error('策略服务端口须为 1–65535。');
+  const timeText=nodes.wallTime.value.trim(),wallTime=Number(timeText);if(!/^\d+$/.test(timeText)||!Number.isSafeInteger(wallTime)||wallTime<10||wallTime>86400)throw new Error('整次评测墙钟上限须为 10–86400 秒的整数。');
   const policy=nodes.policy.value.trim(),host=nodes.host.value.trim(),checkpoint=nodes.checkpoint.value.trim();
   if(!policy||!host||!checkpoint||!nodes.embodiment.value)throw new Error('请填写策略、本体配置、服务地址和检查点标签。');
   return{task_ids:tasks().filter(task=>selected.has(task.id)).map(task=>task.id),seeds:seeds(nodes.seeds.value),embodiment:nodes.embodiment.value,
-    policy_name:policy,policy_host:host,policy_port:port,checkpoint,action_type:nodes.actionType.value,episodes,mode:nodes.mode.value};
+    policy_name:policy,policy_host:host,policy_port:port,checkpoint,action_type:nodes.actionType.value,episodes,mode:nodes.mode.value,copy_videos:nodes.recordVideos.checked,max_wall_time_s:wallTime};
 }
-function showPlan(plan){
+function invalidatePlan(){
+  const hadPlan=planPayload!==null;
+  planPayload=null;
+  if(planUrl){URL.revokeObjectURL(planUrl);planUrl='';}
+  if(scriptUrl){URL.revokeObjectURL(scriptUrl);scriptUrl='';}
+  nodes.planDownload.hidden=true;nodes.scriptDownload.hidden=true;
+  if(!nodes.planOutput.hidden)nodes.planTitle.textContent='配置已变化 · 请重新生成计划';
+  if(hadPlan)note('配置已变化，原计划与脚本已失效，请重新生成评测计划。');
+  updateControls();
+}
+function showPlan(plan,payload){
+  invalidatePlan();planPayload=JSON.parse(JSON.stringify(payload));
   nodes.planOutput.hidden=false;nodes.planCommands.replaceChildren();nodes.planWarnings.replaceChildren();
   nodes.planTitle.textContent=`计划 ${plan.plan_id||''} · 尚未执行`;
   for(const warning of Array.isArray(plan.warnings)?plan.warnings:[])nodes.planWarnings.append(element('li','',asText(warning)));
   for(const command of Array.isArray(plan.commands)?plan.commands:[]){const item=element('details','benchmark-command'),heading=element('summary','',`${command.task_id||'任务'} · seed ${command.seed??'—'}`),pre=element('pre','',JSON.stringify(command.argv??command,null,2));item.append(heading,pre);nodes.planCommands.append(item);}
-  if(planUrl)URL.revokeObjectURL(planUrl);planUrl=URL.createObjectURL(new Blob([JSON.stringify(plan,null,2)],{type:'application/json;charset=utf-8'}));
+  planUrl=URL.createObjectURL(new Blob([JSON.stringify(plan,null,2)],{type:'application/json;charset=utf-8'}));nodes.planDownload.hidden=false;
   nodes.planDownload.href=planUrl;nodes.planDownload.download=`robodojo-plan-${String(plan.plan_id||'preview').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,80)}.json`;
 }
 async function createPlan(){
   if(busy||stopPending||refreshing||!reachable)return;
   let payload;try{payload=planInput();}catch(error){report(error);return;}
   busy='plan';updateControls();note('正在读取官方入口并生成参数计划；不会启动仿真。');
-  try{showPlan(await request('/plan',payload));note('计划已生成，尚未执行。可下载 JSON 核对官方命令与警告。');}catch(error){report(error);}
+  try{showPlan(await request('/plan',payload),payload);note('计划已生成，尚未执行。可下载 JSON，或生成在 Linux 服务器执行的脚本。');}catch(error){report(error);}
+  finally{busy='';updateControls();}
+}
+async function exportScript(){
+  if(busy||stopPending||refreshing||!reachable||!planPayload)return;
+  try{if(JSON.stringify(planInput())!==JSON.stringify(planPayload)){invalidatePlan();note('配置已变化，请重新生成计划后导出脚本。',true);return;}}catch(error){invalidatePlan();report(error);return;}
+  const payload=planPayload;busy='export';updateControls();note('正在生成 Linux 运行脚本，不会连接服务器或启动评测。');
+  try{
+    const exported=await request('/export',payload);if(payload!==planPayload)return;
+    if(typeof exported.script!=='string'||!exported.script.trim())throw new Error('服务未返回有效的 Linux 运行脚本。');
+    if(scriptUrl)URL.revokeObjectURL(scriptUrl);scriptUrl=URL.createObjectURL(new Blob([exported.script],{type:'text/x-shellscript;charset=utf-8'}));
+    nodes.scriptDownload.href=scriptUrl;nodes.scriptDownload.download=String(exported.filename||'robodojo-plan.sh').replace(/[^A-Za-z0-9_.-]/g,'_');nodes.scriptDownload.hidden=false;
+    note('Linux 脚本已生成。先在已准备好的官方源码根目录运行 bash 文件名.sh --dry-run；核对后去掉 --dry-run 执行。');
+  }catch(error){report(error);}
   finally{busy='';updateControls();}
 }
 async function start(){
@@ -199,6 +232,7 @@ async function importResult(){
 }
 async function loadFile(){
   const version=++fileVersion,file=nodes.importFile.files?.[0];if(!file)return;
+  nodes.importJson.value='';nodes.importResult.replaceChildren();
   if(file.size>10*1024*1024){note('请选择单任务官方 _result.json（不超过 10 MB），不要选择数据集或视频。',true);return;}
   try{const value=await file.text();if(version!==fileVersion)return;JSON.parse(value);nodes.importJson.value=value;note(`已读取 ${file.name}，尚未导入。请核对任务、种子和策略。`);}
   catch(error){if(version===fileVersion)note(`读取结果文件失败：${error.message}`,true);}
@@ -211,32 +245,36 @@ export function initBenchmarks(callbacks={}){
   const root=element('section','benchmarks-view');root.id='benchmarks-view';root.hidden=true;root.setAttribute('aria-label','RoboDojo 官方基准');
   const heading=element('div','benchmark-page-heading'),headingText=element('div');headingText.append(element('div','eyebrow','OFFICIAL BENCHMARK / ROBODOJO'),element('h2','','RoboDojo 评测'),element('p','','配置官方任务、连接外部策略、归档可追溯结果。'));
   const refreshButton=button('刷新目录与状态');heading.append(headingText,refreshButton);root.append(heading);
-  const boundary=element('div','benchmark-boundary');boundary.append(element('strong','','准备计划 ≠ 执行验证 ≠ 策略成功'),element('p','','Smoke 检查评测链路；任务结果取官方环境判据。完整基准需要全部任务、规定回合数和种子；此页不将部分结果绘成官方总榜。'));root.append(boundary);
-  const readiness=element('section','panel benchmark-readiness'),readinessTitle=element('h3','','运行环境待接入'),readinessMessage=element('p',''),checks=element('ul','benchmark-checks');readiness.append(readinessTitle,readinessMessage,checks);root.append(readiness);
+  const boundary=element('div','benchmark-boundary');boundary.append(element('strong','','选择任务 → 生成计划 → 运行或导入结果'),element('p','','本机可以准备评测计划与导入结果。原生仿真需要独立 Linux GPU、Isaac Sim 5.1 和 XPolicyLab 策略服务；可导出 Linux 脚本到准备好的服务器执行。Smoke 检查链路，任务结果取官方环境判据；部分任务不计作官方完整基准分数。'));root.append(boundary);
+  const message=element('p','benchmark-message');message.setAttribute('role','status');root.append(message);
+  const readiness=element('section','panel benchmark-readiness'),readinessTitle=element('h3','','运行环境待接入'),readinessMessage=element('p',''),checks=element('ul','benchmark-checks');const setupGuide=element('a','text-button','查看运行环境与策略接入指南 ↗');setupGuide.href='https://github.com/shank000/embodied-agent-studio/blob/main/docs/robodojo.md';setupGuide.target='_blank';setupGuide.rel='noopener noreferrer';readiness.append(readinessTitle,readinessMessage,setupGuide,checks);root.append(readiness);
   const layout=element('div','benchmark-layout'),setup=element('section','panel benchmark-setup'),form=element('form','benchmark-form');
   const setupHeading=element('div','benchmark-section-heading'),catalogCount=element('span','','正在读取官方目录'),revision=element('p','benchmark-revision');setupHeading.append(element('h3','','评测计划'),catalogCount);setup.append(setupHeading,revision);
   const filters=element('div','benchmark-filters'),dimension=field('能力维度','benchmark-dimension','select'),search=field('筛选任务','benchmark-search');search.input.placeholder='任务名称';filters.append(dimension.root,search.root);form.append(filters);
   const selection=element('div','benchmark-selection'),selectVisible=button('选择当前显示'),clear=button('清空选择'),selectedCount=element('span','');selection.append(selectVisible,clear,selectedCount);form.append(selection);
   const taskList=element('div','benchmark-tasks'),emptyTasks=element('p','benchmark-muted','没有符合筛选条件的官方任务。');taskList.setAttribute('aria-label','选择官方评测任务');form.append(taskList,emptyTasks);
-  const fields=element('div','benchmark-fields'),embodiment=field('本体配置','benchmark-embodiment','select'),seedField=field('种子（逗号分隔）','benchmark-seeds','text','0'),policy=field('XPolicyLab 策略目录名','benchmark-policy','text','demo_policy'),host=field('外部策略服务地址','benchmark-host','text','127.0.0.1'),port=field('WebSocket 端口','benchmark-port','number','9999'),checkpoint=field('检查点 / 标签','benchmark-checkpoint','text','external'),actionType=field('动作类型标签','benchmark-action-type','select'),mode=field('评测类型','benchmark-mode','select'),episodes=field('每任务回合数','benchmark-episodes','text','1');
+  const fields=element('div','benchmark-fields'),embodiment=field('本体配置','benchmark-embodiment','select'),seedField=field('种子（逗号分隔）','benchmark-seeds','text','0'),policy=field('XPolicyLab 策略目录名','benchmark-policy','text','demo_policy'),host=field('XPolicyLab 策略主机 / IP','benchmark-host','text','127.0.0.1'),port=field('WebSocket 端口','benchmark-port','number','9999'),checkpoint=field('检查点 / 标签','benchmark-checkpoint','text','external'),actionType=field('动作类型标签','benchmark-action-type','select'),mode=field('评测类型','benchmark-mode','select'),episodes=field('每任务回合数','benchmark-episodes','text','1'),wallTime=field('整次评测墙钟上限 / 秒','benchmark-wall-time','number','3600');wallTime.input.min='10';wallTime.input.max='86400';wallTime.input.step='1';
   options(actionType.input,[{id:'ee',name:'ee · 绝对末端目标'},{id:'joint',name:'joint · 关节目标'}],'ee');options(mode.input,[{id:'smoke',name:'Smoke · 连接与执行检查'},{id:'benchmark',name:'Benchmark · 正式协议候选'}],'smoke');episodes.input.placeholder='正整数或 native';port.input.min='1';port.input.max='65535';
-  for(const item of [embodiment,seedField,policy,host,port,checkpoint,actionType,mode,episodes])fields.append(item.root);form.append(fields,element('p','benchmark-muted','本体/策略名对应官方配置。native 使用任务规定回合数；整数会受任务原生数量限制。动作标签须与外部策略输出一致，不会自动转换动作。示例策略仅用于接线。'));
+  for(const item of [embodiment,seedField,policy,host,port,checkpoint,actionType,mode,episodes,wallTime])fields.append(item.root);form.append(fields,element('p','benchmark-muted','本体/策略名对应官方配置。native 使用任务规定回合数；整数会受任务原生数量限制。动作标签须与外部策略输出一致，不会自动转换动作。demo_policy 是输出零动作的连通样例，不具备任务策略能力。主机/IP 和端口应指向 XPolicyLab WebSocket 策略服务；工作台主控制模型须先通过 XPolicyLab 部署适配，不能直接填写模型 API 地址或 Codex 模型名。'));
+  const recordingLabel=element('label','benchmark-copy-videos'),recordVideos=element('input');recordVideos.type='checkbox';recordVideos.id='benchmark-record-videos';recordingLabel.append(recordVideos,element('span','','将运行产生的原生视频复制到实验归档'));form.append(recordingLabel,element('p','benchmark-muted','墙钟预算覆盖所选全部任务与种子，超时后停止并保留已完成记录。Linux 导出脚本将视频留在官方结果目录，可在下方导入。'));
   const actions=element('div','benchmark-actions'),plan=button('生成评测计划'),startButton=button('运行官方评测','primary-button'),stopButton=button('停止评测','secondary benchmark-stop');actions.append(plan,startButton,stopButton);form.append(actions);const startReason=element('p','benchmark-muted');form.append(startReason);setup.append(form);
-  const side=element('div','benchmark-side'),job=element('section','panel benchmark-job'),jobStatus=element('strong','','尚未运行'),jobMessage=element('p',''),jobTime=element('span',''),jobRun=element('p','benchmark-revision');job.append(element('h3','','当前评测'),jobStatus,jobMessage,jobTime,jobRun);side.append(job);
-  const planOutput=element('section','panel benchmark-plan-output'),planHeading=element('div','benchmark-section-heading'),planTitle=element('h3','','计划预览'),planDownload=element('a','','下载计划 JSON');planOutput.hidden=true;planHeading.append(planTitle,planDownload);const planWarnings=element('ul','benchmark-plan-warnings'),planCommands=element('div','benchmark-plan-commands');planOutput.append(planHeading,element('p','benchmark-muted','以下是官方命令的参数数组；生成与下载不会执行它们。'),planWarnings,planCommands);side.append(planOutput);layout.append(setup,side);root.append(layout);
+  const side=element('div','benchmark-side'),job=element('section','panel benchmark-job'),jobStatus=element('strong','','尚未运行'),jobMessage=element('p',''),jobTime=element('span',''),jobProgress=element('p','benchmark-job-progress'),jobRun=element('p','benchmark-revision'),jobLinks=element('div','benchmark-job-links');job.append(element('h3','','当前评测'),jobStatus,jobMessage,jobTime,jobProgress,jobRun,jobLinks);side.append(job);
+  const planOutput=element('section','panel benchmark-plan-output'),planHeading=element('div','benchmark-section-heading'),planTitle=element('h3','','计划预览'),planDownload=element('a','','下载计划 JSON'),scriptButton=button('生成 Linux 运行脚本'),scriptDownload=element('a','','下载 Linux 脚本');scriptDownload.hidden=true;planOutput.hidden=true;planHeading.append(planTitle,planDownload);const planWarnings=element('ul','benchmark-plan-warnings'),planCommands=element('div','benchmark-plan-commands');const exports=element('div','benchmark-actions');exports.append(scriptButton,scriptDownload);planOutput.append(planHeading,element('p','benchmark-muted','参数数组使用本机路径；在 Linux 服务器运行请下载脚本。生成和下载都不会执行命令，修改配置后需重新生成。'),exports,planWarnings,planCommands);side.append(planOutput);layout.append(setup,side);root.append(layout);
   const importer=element('section','panel benchmark-import'),importForm=element('form','benchmark-import-form');importer.append(element('h3','','导入官方结果'),element('p','benchmark-muted','可在没有仿真服务器时归档已有 _result.json。eval_time 表示有效回合数，不是秒；SR 与过程得分独立保存。'));
   const importFields=element('div','benchmark-import-fields'),importTask=field('结果任务','benchmark-import-task','select'),importSeed=field('结果种子','benchmark-import-seed','number','0'),importPolicy=field('策略名称','benchmark-import-policy','text','demo_policy'),importEmbodiment=field('结果本体','benchmark-import-embodiment','select');for(const item of [importTask,importSeed,importPolicy,importEmbodiment])importFields.append(item.root);importForm.append(importFields);
   const file=field('读取官方 _result.json','benchmark-import-file','file');file.input.accept='.json,application/json';const jsonLabel=element('label','benchmark-field','或粘贴完整官方结果 JSON'),importJson=element('textarea','benchmark-json');importJson.id='benchmark-import-json';importJson.rows=7;importJson.spellcheck=false;jsonLabel.append(importJson);importForm.append(file.root,jsonLabel);
   const artifactDir=field('本机官方结果目录（可选）','benchmark-artifact-dir');artifactDir.input.placeholder='目录用于关联原生视频，不会执行其中的文件';const copyLabel=element('label','benchmark-copy-videos'),copyVideos=element('input');copyVideos.type='checkbox';copyVideos.id='benchmark-copy-videos';copyVideos.checked=false;copyLabel.append(copyVideos,element('span','','复制原生视频到实验归档（默认不复制）'));const importSubmit=button('导入官方结果','primary-button'),importResultContainer=element('div','benchmark-import-result');importForm.append(artifactDir.root,copyLabel,importSubmit);importer.append(importForm,importResultContainer);root.append(importer);
   const historySection=element('section','panel benchmark-history');historySection.append(element('h3','','RoboDojo 实验记录'),element('p','benchmark-muted','每条记录可进入现有实验管理或下载原始归档。部分任务结果不会汇总成官方完整分数。'),element('p','benchmark-muted','外部策略未上报的 token、推理耗时和费用记为未知，不按零费用计算。'));const history=element('div','benchmark-history-list'),historyEmpty=element('p','benchmark-empty','尚无 RoboDojo 记录。可先生成计划，或导入已有官方结果。');historySection.append(history,historyEmpty);root.append(historySection);
-  const message=element('p','benchmark-message');message.setAttribute('role','status');root.append(message);main.insertBefore(root,main.querySelector('footer'));
-  nodes={root,readiness,readinessTitle,readinessMessage,checks,revision,catalogCount,dimension:dimension.input,search:search.input,tasks:taskList,emptyTasks,selectedCount,embodiment:embodiment.input,seeds:seedField.input,policy:policy.input,host:host.input,port:port.input,checkpoint:checkpoint.input,actionType:actionType.input,mode:mode.input,episodes:episodes.input,plan,start:startButton,stop:stopButton,refresh:refreshButton,startReason,jobStatus,jobMessage,jobTime,jobRun,planOutput,planTitle,planDownload,planWarnings,planCommands,importTask:importTask.input,importSeed:importSeed.input,importPolicy:importPolicy.input,importEmbodiment:importEmbodiment.input,importFile:file.input,importJson,artifactDir:artifactDir.input,copyVideos,importSubmit,importResult:importResultContainer,history,historyEmpty,message,
-    editable:[dimension.input,search.input,embodiment.input,seedField.input,policy.input,host.input,port.input,checkpoint.input,actionType.input,mode.input,episodes.input,importTask.input,importSeed.input,importPolicy.input,importEmbodiment.input,file.input,importJson,artifactDir.input,copyVideos,selectVisible,clear]};
-  dimension.input.addEventListener('change',renderTaskList);search.input.addEventListener('input',renderTaskList);selectVisible.addEventListener('click',()=>{for(const task of filteredTasks())selected.add(task.id);renderTaskList();});clear.addEventListener('click',()=>{selected.clear();renderTaskList();});
+  main.insertBefore(root,main.querySelector('footer'));
+  nodes={root,readiness,readinessTitle,readinessMessage,checks,revision,catalogCount,dimension:dimension.input,search:search.input,tasks:taskList,emptyTasks,selectedCount,embodiment:embodiment.input,seeds:seedField.input,policy:policy.input,host:host.input,port:port.input,checkpoint:checkpoint.input,actionType:actionType.input,mode:mode.input,episodes:episodes.input,wallTime:wallTime.input,recordVideos,plan,start:startButton,stop:stopButton,refresh:refreshButton,startReason,jobStatus,jobMessage,jobTime,jobProgress,jobRun,jobLinks,planOutput,planTitle,planDownload,exportScript:scriptButton,scriptDownload,planWarnings,planCommands,importTask:importTask.input,importSeed:importSeed.input,importPolicy:importPolicy.input,importEmbodiment:importEmbodiment.input,importFile:file.input,importJson,artifactDir:artifactDir.input,copyVideos,importSubmit,importResult:importResultContainer,history,historyEmpty,message,
+    editable:[dimension.input,search.input,embodiment.input,seedField.input,policy.input,host.input,port.input,checkpoint.input,actionType.input,mode.input,episodes.input,wallTime.input,recordVideos,importTask.input,importSeed.input,importPolicy.input,importEmbodiment.input,file.input,importJson,artifactDir.input,copyVideos,selectVisible,clear]};
+  dimension.input.addEventListener('change',renderTaskList);search.input.addEventListener('input',renderTaskList);selectVisible.addEventListener('click',()=>{for(const task of filteredTasks())selected.add(task.id);invalidatePlan();renderTaskList();});clear.addEventListener('click',()=>{selected.clear();invalidatePlan();renderTaskList();});
+  for(const input of [embodiment.input,seedField.input,policy.input,host.input,port.input,checkpoint.input,actionType.input,mode.input,episodes.input,wallTime.input,recordVideos]){input.addEventListener('input',invalidatePlan);input.addEventListener('change',invalidatePlan);}
+  scriptButton.addEventListener('click',exportScript);
   form.addEventListener('submit',event=>{event.preventDefault();return createPlan();});plan.addEventListener('click',createPlan);startButton.addEventListener('click',start);stopButton.addEventListener('click',stop);refreshButton.addEventListener('click',()=>refresh({announce:true}));navigation.addEventListener('click',()=>refresh());
   importForm.addEventListener('submit',event=>{event.preventDefault();return importResult();});
   // The result container and action handler deliberately have different names.
-  importSubmit.addEventListener('click',importResult);file.input.addEventListener('change',loadFile);
+  importSubmit.addEventListener('click',importResult);file.input.addEventListener('change',loadFile);importJson.addEventListener('input',()=>{fileVersion++;});
   updateControls();return refresh();
 }
 

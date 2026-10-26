@@ -98,7 +98,7 @@ class RecoveryProviderOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.state['status'], 'round_complete', controller.state)
         self.assertEqual(controller.state['round'], 1)
         self.assertEqual(worker.moves, 1)
-        self.assertEqual(worker.commands.count('observe'), 1)
+        self.assertEqual(worker.commands.count('observe'), 2)  # Retry shares input; one additional post-execution capture.
         self.assertEqual(worker.commands.count('record_start'), 1)
         self.assertEqual(worker.commands.count('record_stop'), 1)
         first, second = self.server.requests
@@ -277,7 +277,7 @@ class RecoveryProviderOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([len(calls[index]) for index in ('0', '1')], [1, 2])
         self.assertEqual(failures, ['decision:1'])
         self.assertEqual(len(planner_calls), 1)
-        self.assertEqual(worker.commands.count('observe'), 1)
+        self.assertEqual(worker.commands.count('observe'), 2)  # Retry shares input; one additional post-execution capture.
         self.assertEqual(worker.moves, 1)
         self.assertEqual({phase for phase, _ in observed}, {'decision:0', 'decision:1'})
         self.assertTrue(all(observation is controller.observation for _, observation in observed))

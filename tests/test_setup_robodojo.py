@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -48,7 +49,8 @@ class RoboDojoSetupTests(unittest.TestCase):
             (source/'XPolicyLab/.git').write_text('gitdir: fixture', encoding='utf-8')
             states = lambda path: setup.XPOLICY_REVISION if path.name == 'XPolicyLab' else setup.REVISION
             gitlink = f'160000 commit {setup.XPOLICY_REVISION}\tXPolicyLab'
-            with patch.object(setup, '_checkout_state', side_effect=states), patch.object(setup, 'git', return_value=gitlink) as git:
+            with patch.object(setup, '_checkout_state', side_effect=states), patch.object(setup, 'git', return_value=gitlink) as git, \
+                    patch.object(setup, 'normalize_shell_scripts', return_value=[]):
                 result = setup.prepare_source(source)
             self.assertTrue(result['source_prepared'])
             self.assertEqual(result['commands'], [])
@@ -56,6 +58,32 @@ class RoboDojoSetupTests(unittest.TestCase):
             # The installer intentionally validates and uses the real root.
             self.assertEqual(result['source_root'], str(source.resolve()))
             git.assert_called_once_with('-C', source.resolve(), 'ls-tree', setup.REVISION, '--', 'XPolicyLab')
+
+    def test_windows_checkout_scripts_get_lf_without_overwriting_user_edits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            def git(*args):
+                subprocess.run(['git', '-C', str(source), *args], check=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            git('init')
+            git('config', 'core.autocrlf', 'true')
+            script = source/'entry.sh'
+            original = b'#!/usr/bin/env bash\nset -euo pipefail\n'
+            script.write_bytes(original)
+            git('add', 'entry.sh')
+            git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'fixture')
+            script.write_bytes(original.replace(b'\n', b'\r\n'))
+            self.assertEqual(setup.normalize_shell_scripts(source), ['entry.sh'])
+            self.assertEqual(script.read_bytes(), original)
+            self.assertEqual(setup.normalize_shell_scripts(source), [])
+            self.assertEqual(setup._checkout_state(source), setup.git('-C', source, 'rev-parse', 'HEAD'))
+            edited = original.replace(b'\n', b'\r\n') + b'echo user change\r\n'
+            script.write_bytes(edited)
+            with self.assertRaisesRegex(ValueError, '用户修改'):
+                setup.normalize_shell_scripts(source)
+            self.assertEqual(script.read_bytes(), edited)
+            with self.assertRaisesRegex(ValueError, '未提交修改'):
+                setup._checkout_state(source)
 
     def test_tracked_source_edits_stop_without_reset_or_checkout(self):
         with tempfile.TemporaryDirectory() as directory:

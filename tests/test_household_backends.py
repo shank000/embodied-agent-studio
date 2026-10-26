@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -11,6 +12,36 @@ import zipfile
 
 from server.backends.alfworld_backend import ALFWorldSimulation
 from server.backends.thor_backend import ThorSimulation, decode_action
+
+
+class ThorDisplayLifecycleTests(unittest.TestCase):
+    def test_wsl_owns_display_restores_allocator_setting_and_closes_after_unity(self):
+        from server.backends import thor_backend
+        sim=object.__new__(ThorSimulation);sim._display=None;sim.backend={};sim.model_note=''
+        display=Mock(); order=[]
+        display.stop.side_effect=lambda:order.append('display')
+        sim.controller=Mock();sim._owns_controller=True
+        sim.controller.stop.side_effect=lambda:order.append('unity')
+        def create(**kwargs):
+            self.assertEqual(os.environ['PYVIRTUALDISPLAY_DISPLAYFD'],'0')
+            self.assertTrue(kwargs['use_xauth'])
+            return display
+        with patch.object(thor_backend.sys,'platform','linux'), patch.dict(os.environ,{'WSL_INTEROP':'test','DISPLAY':':0','PYVIRTUALDISPLAY_DISPLAYFD':'1'}), \
+                patch.object(thor_backend.shutil,'which',return_value='/usr/bin/Xvfb'), \
+                patch.dict(sys.modules,{'pyvirtualdisplay':SimpleNamespace(Display=create)}):
+            sim._start_display();sim._start_display()
+            self.assertEqual(os.environ['PYVIRTUALDISPLAY_DISPLAYFD'],'1')
+            display.start.assert_called_once()
+            self.assertEqual(sim.backend['display_mode'],'isolated_xvfb')
+            sim.close();sim.close()
+        self.assertEqual(order,['unity','display'])
+
+    def test_display_is_released_even_when_unity_stop_fails(self):
+        sim=object.__new__(ThorSimulation);sim._display=Mock();display=sim._display
+        sim.controller=Mock();sim._owns_controller=True
+        sim.controller.stop.side_effect=RuntimeError('native stop failed')
+        with self.assertRaisesRegex(RuntimeError,'native stop failed'):sim.close()
+        display.stop.assert_called_once();self.assertIsNone(sim._display)
 
 
 class HouseholdActionContracts(unittest.TestCase):

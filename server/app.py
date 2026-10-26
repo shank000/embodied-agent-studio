@@ -35,7 +35,11 @@ from .comparison import ComparisonController, ComparisonStart
 from .scenes import SCENES, TASKS
 from .runlog import list_runs, run_folder
 from .analysis import analyze_run, analyze_experiments
+from .rounds import timeline
+from .training_data import export_transitions
+from .experiment_costs import Expense, append_expense, void_expense
 from .robodojo import RoboDojoController, EvaluationPlan, ResultImport, plan as benchmark_plan, import_result
+from .robodojo_plan_export import export_plan as export_benchmark_plan
 from .run_management import rename_run, delete_run, restore_run, batch_delete_runs, RunInUseError
 from .model_capabilities import discover_model_capabilities
 from .pricing import catalog as price_catalog
@@ -860,6 +864,37 @@ async def run_analysis(run_id: str):
     except (ValueError, FileNotFoundError, KeyError) as exc: raise HTTPException(404, str(exc)) from exc
 
 
+@app.get('/api/runs/{run_id}/rounds')
+async def run_rounds(run_id: str, limit: int = Query(20, ge=1, le=200), offset: int = Query(0, ge=0)):
+    try: result = timeline(run_id)
+    except (ValueError, FileNotFoundError) as exc: raise HTTPException(404, str(exc)) from exc
+    rows = sorted(result['rounds'], key=lambda row: row['round'], reverse=True)
+    return {**result, 'total': len(rows), 'rounds': rows[offset:offset+limit]}
+
+
+@app.get('/api/runs/{run_id}/training')
+async def training_export(run_id: str):
+    try: data = export_transitions(run_id)
+    except FileNotFoundError as exc: raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc: raise HTTPException(409, str(exc)) from exc
+    return Response(json.dumps(data, ensure_ascii=False, allow_nan=False), media_type='application/json',
+                    headers={'Content-Disposition': f'attachment; filename="{run_id}-transitions.json"'})
+
+
+@app.post('/api/runs/{run_id}/expenses')
+async def add_run_expense(run_id: str, body: Expense, request: Request):
+    local_request(request)
+    try: return append_expense(run_id, body)
+    except (ValueError, FileNotFoundError) as exc: raise HTTPException(404, str(exc)) from exc
+
+
+@app.post('/api/runs/{run_id}/expenses/{expense_id}/void')
+async def cancel_run_expense(run_id: str, expense_id: str, request: Request):
+    local_request(request)
+    try: return void_expense(run_id, expense_id)
+    except (ValueError, FileNotFoundError) as exc: raise HTTPException(404, str(exc)) from exc
+
+
 @app.get('/api/experiments/analysis')
 async def experiments_analysis(task: str | None = None, model: str | None = None,
                                reasoning: str | None = None, kind: str | None = None,
@@ -928,6 +963,12 @@ async def benchmark_info():
 async def prepare_benchmark(body: EvaluationPlan, request: Request):
     local_request(request)
     return await asyncio.to_thread(benchmark_plan, body)
+
+
+@app.post('/api/benchmarks/robodojo/export')
+async def export_benchmark(body: EvaluationPlan, request: Request):
+    local_request(request)
+    return await asyncio.to_thread(export_benchmark_plan, body)
 
 
 @app.post('/api/benchmarks/robodojo/start')

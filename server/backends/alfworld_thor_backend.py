@@ -43,6 +43,7 @@ class ALFWorldThorSimulation(ThorSimulation):
         self.data_path = Path(data_path or CONFIGURED_DATA or ROOT/'vendor/alfworld_data')
         self.controller = controller
         self._owns_controller = controller is None
+        self._display = None
         self._id_to_handle, self._handle_to_id = {}, {}
         try:
             self._initialize(model_id, scene_id, seed, task_id)
@@ -97,6 +98,7 @@ class ALFWorldThorSimulation(ThorSimulation):
             raise RuntimeError('ALFWorld 0.4.2 视觉任务需要独立 ai2thor==2.1.0 环境，不能使用 AI2-THOR 5.x 房间替代。')
         from .alfworld_thor_assets import executable_path
         build_path = executable_path()
+        self._start_display()
         from alfworld.env.thor_env import ThorEnv
         return ThorEnv(player_screen_height=480, player_screen_width=640,
                        smooth_nav=False, save_frames_to_disk=False, build_path=str(build_path))

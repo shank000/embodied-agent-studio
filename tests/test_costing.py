@@ -39,6 +39,44 @@ class CostingTests(unittest.TestCase):
         self.assertEqual(result['amount_usd'], .01515)
         self.assertEqual(sum(row['tokens'] for row in result['breakdown']), 12000)
 
+    def test_codex_explicit_zero_cache_writes_prices_returned_usage_once(self):
+        request = {'provider':'codex', 'usage':{'input_tokens':15850, 'cached_input_tokens':0,
+                   'cache_write_input_tokens':0, 'output_tokens':2182, 'reasoning_output_tokens':2070}}
+        prices = quote(billing_kind='reference', input_per_million=10., output_per_million=50.,
+                       cached_input_per_million=1., cache_write_30m_per_million=12.5,
+                       cache_write_12h_per_million=25.)
+        result = calculate_call_cost(request, prices)
+        self.assertEqual(result['status'], 'reference')
+        self.assertAlmostEqual(result['reference_amount_usd'], .2676)
+        self.assertEqual(result['priced_calls'], 1)
+        self.assertEqual({row['component']:row['tokens'] for row in result['breakdown']},
+                         {'input':15850, 'output':2182})
+        self.assertIsNone(result['amount_usd'])
+        request['usage']['cached_input_tokens'] = 10000
+        self.assertAlmostEqual(calculate_call_cost(request, prices)['reference_amount_usd'], .1776)
+        unknown = calculate_call_cost({'provider':'codex', 'usage':None, 'status':'error'}, prices)
+        combined = aggregate_costs([result, unknown])
+        self.assertEqual(combined['status'], 'partial')
+        self.assertEqual(combined['known_reference_amount_usd'], .2676)
+        self.assertEqual(combined['missing_calls'], 1)
+        self.assertIsNone(combined['reference_amount_usd'])
+
+    def test_codex_write_alias_keeps_nonzero_ttl_unknown_and_rejects_conflicting_details(self):
+        prices = quote(cache_write_30m_per_million=1.25, cache_write_12h_per_million=2.5)
+        request = {'usage':{'input_tokens':1000, 'cached_input_tokens':400,
+                           'cache_write_input_tokens':100, 'output_tokens':200}}
+        result = calculate_call_cost(request, prices)
+        self.assertEqual(result['status'], 'partial')
+        self.assertAlmostEqual(result['known_amount_usd'], .00134)
+        self.assertIsNone(result['amount_usd'])
+        request['usage']['input_tokens_details'] = {'cache_write_tokens':0}
+        result = calculate_call_cost(request, prices)
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertTrue(any('缓存写入' in warning for warning in result['warnings']))
+        request['usage'].pop('input_tokens_details')
+        request['usage']['reasoning_output_tokens'] = 201
+        self.assertEqual(calculate_call_cost(request, prices)['status'], 'unavailable')
+
     def test_anthropic_input_excludes_reads_and_writes(self):
         request = {'usage': {'input_tokens': 1000, 'output_tokens': 200, 'cache_read_input_tokens': 4000,
                             'cache_creation_input_tokens': 7000,

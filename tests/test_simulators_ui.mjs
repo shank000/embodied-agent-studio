@@ -47,6 +47,38 @@ test('simulator availability comes from catalog; unsafe descriptions remain text
   assert.equal(future.children.some(node=>node.tagName==='a'),false);
 });
 
+test('RoboDojo opens its independent benchmark from the environment selector without switching physics',async()=>{
+  const value=catalog();value.backends.push({id:'robodojo',name:'RoboDojo',kind:'benchmark',status:'external_runtime',installed:null,implemented:true,description:'Isaac Sim 5.1 independent rollout'});
+  let opened=0;
+  const {element,calls,run,scope}=setup([{body:value}]);scope.callbacks.onOpenBenchmark=()=>opened++;
+  await run('initSimulators(callbacks)');
+  const option=element('simulator-select').children.find(item=>item.value==='robodojo');
+  assert.equal(option.disabled,false);assert.ok(option.textContent.includes('独立评测入口'));
+  element('simulator-select').value='robodojo';element('simulator-select').listeners.change();
+  assert.equal(element('simulator-load').textContent,'打开 RoboDojo');assert.equal(element('simulator-load').disabled,false);
+  await element('simulator-load').listeners.click();
+  assert.equal(opened,1);assert.equal(calls.length,1);assert.ok(element('simulator-current').textContent.startsWith('MuJoCo'));
+  assert.ok(element('simulator-message').textContent.includes('当前仿真环境保持不变'));
+  run("renderSimulator({backend:{engine_id:'mujoco'}})");
+  assert.equal(element('simulator-select').value,'robodojo');
+});
+
+test('broken interpreter is unavailable with an actionable diagnostic instead of claiming loadable',async()=>{
+  const value=catalog('unavailable');value.backends[1].error='Python home missing; repair pyvenv.cfg <literal>';
+  const {element,run}=setup([{body:value}]);await run('initSimulators(callbacks)');
+  const option=element('simulator-select').children.find(item=>item.value==='genesis');
+  assert.equal(option.disabled,true);assert.ok(option.textContent.includes('运行环境异常'));
+  assert.ok(element('simulator-catalog').textContent.includes(value.backends[1].error));
+});
+
+test('RoboDojo cannot be posted as an interactive backend when navigation is unavailable',async()=>{
+  const value=catalog();value.backends.push({id:'robodojo',name:'RoboDojo',kind:'benchmark',status:'external_runtime'});
+  const {element,calls,run}=setup([{body:value}]);await run('initSimulators(callbacks)');
+  element('simulator-select').value='robodojo';element('simulator-select').listeners.change();
+  assert.equal(element('simulator-load').disabled,true);
+  await element('simulator-load').listeners.click();assert.equal(calls.length,1);
+});
+
 test('active experiment locks selection and prevents even a queued load handler from making a request',async()=>{
   const {element,calls,run}=setup([{body:catalog()}]);
   await run('initSimulators(callbacks)');
@@ -111,6 +143,21 @@ test('a rejected switch preserves active engine and exposes the server reason',a
   assert.ok(element('simulator-message').textContent.includes('An experiment started in another tab'));
   assert.equal(element('simulator-message').attributes.role,'alert');
   assert.equal(element('simulator-refresh').disabled,false);
+});
+
+test('long switch failures show a bounded summary and retain exact diagnostics as text',async()=>{
+  const raw='切换失败，当前仿真保持不变：ai2thor ConnectionClosedError: Display connection closed by server: [Errno 104] Connection reset by peer\nTraceback (most recent call last):\n  File "/runtime.py", line 1\n'+('stack details\n'.repeat(100))+'<img src=x onerror=bad()>\nXlib.error.ConnectionClosedError: Display connection closed';
+  const {element,run}=setup([{body:catalog()},{status:500,body:{detail:raw}},{body:catalog()}]);
+  await run('initSimulators(callbacks)');element('simulator-select').value='genesis';
+  await element('simulator-load').listeners.click();
+  assert.ok(element('simulator-message').textContent.includes('ConnectionClosedError'));
+  assert.equal(element('simulator-message').textContent.includes('Traceback'),false);
+  assert.ok(element('simulator-message').textContent.length<400);
+  assert.equal(element('simulator-diagnostic').hidden,false);assert.equal(element('simulator-diagnostic').open,false);
+  assert.equal(element('simulator-diagnostic-text').textContent,raw);assert.equal(element('simulator-diagnostic-text').children.length,0);
+  assert.equal(element('simulator-select').value,'mujoco');
+  await element('simulator-refresh').listeners.click();
+  assert.equal(element('simulator-diagnostic').hidden,true);assert.equal(element('simulator-diagnostic-text').textContent,'');
 });
 
 test('a failed engine can be explicitly reloaded while healthy same-engine loads stay disabled',async()=>{

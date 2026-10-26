@@ -95,10 +95,12 @@ class RunLog:
                                'current_inference_s': max((time.monotonic() - started for started in self._active_inference.values()), default=0.),
                                'active_calls': len(self._active_inference)}}
 
-    def save_observation(self, observation, step):
+    def save_observation(self, observation, step, *, phase='before'):
         """Persist actual native cameras and text; return metadata and relative references."""
         if isinstance(step, bool) or not isinstance(step, int) or not 0 <= step <= 999999999:
             raise ValueError('观察步骤必须为非负整数。')
+        if phase not in ('before', 'after'): raise ValueError('观察阶段须为 before 或 after。')
+        step_name = f'{step:06d}' + ('-after' if phase == 'after' else '')
         cameras = observation.get('cameras', [])
         mode = observation.get('backend', {}).get('action_mode')
         names = [camera.get('name') for camera in cameras]
@@ -118,12 +120,12 @@ class RunLog:
         saved = self.clean(observation)
         for camera in saved['cameras']:
             name = camera['name']
-            camera['image_ref'] = f'observations/{step:06d}/{name}.jpg'
+            camera['image_ref'] = f'observations/{step_name}/{name}.jpg'
             camera['image_sha256'] = hashlib.sha256(blobs[name]).hexdigest()
         with self._lock:
             root = self.folder / 'observations'
             root.mkdir(exist_ok=True)
-            destination = root / f'{step:06d}'
+            destination = root / step_name
             if destination.exists(): raise FileExistsError('该步骤的观察已保存，不能覆盖。')
             staging = Path(tempfile.mkdtemp(prefix='.observation-', dir=root))
             try:
@@ -133,7 +135,7 @@ class RunLog:
                 if staging.exists():
                     if not staging.resolve().is_relative_to(root.resolve()): raise ValueError('临时观察路径超出运行目录。')
                     shutil.rmtree(staging)
-            record = {'step': step, 'time': saved.get('time'), 'robot': saved.get('robot'),
+            record = {'step': step, 'phase': phase, 'time': saved.get('time'), 'robot': saved.get('robot'),
                       'generation': saved.get('generation'), 'cameras': saved['cameras']}
             for key in ('backend', 'environment'):
                 if saved.get(key) is not None: record[key] = saved[key]

@@ -18,6 +18,7 @@ from .control import PoseAction
 from .decision import DecisionConfig, choose_candidate, choose_decisions
 from .policy import PolicyConfig, PolicyOutput, predict_policy, warmup_policy, release_local_service, policy_task_with_feedback
 from .runlog import RunLog, CURRENT_LOG
+from .rounds import measured_round, round_phase
 from .telemetry import controller_timing, enter_recorded_run
 from .task_verification import verify_completion, environment_success
 
@@ -261,6 +262,7 @@ class CompositionController:
 
     async def _timed(self, phase, operation):
         start = time.monotonic()
+        round_phase(self.log, phase)
         self.state.update(status=phase, message={'planning': '主 Agent 正在生成子目标。',
             'decision': '决策模型正在选择候选。', 'agent_inference': 'Agent 正在预测绝对 TCP。',
             'policy_inference': '策略模型正在预测动作块。'}.get(phase, phase))
@@ -420,110 +422,111 @@ class CompositionController:
                     remaining = request.max_sim_time_s - (current['time'] - self.initial_state['time'])
                     if remaining <= 1e-8 or remaining + 1e-8 < current.get('timestep', 0):
                         self.state.update(status='limit', message='已达到仿真时间上限。'); return
-                    step_start = time.monotonic()
-                    observation = await self._timed('observation', self._capture(number))
-                    if number == 1: self.initial_tcp = deepcopy(observation['tcp'])
-                    if recipe['mode'] == 'agent':
-                        action = await self._agent(agent_config, observation)
-                        if action.status == 'done':
-                            if await self._verify_done(action.explanation, observation): return
-                            continue
-                        if action.status == 'blocked':
-                            self.state.update(status='blocked', message=action.explanation); return
-                        candidates = [{'id': 'agent_pose', 'description': action.explanation,
-                            'action_type': 'tcp_pose', 'pose': action.model_dump()}]
-                        selected = candidates[0]
-                    elif recipe['mode'] == 'policy':
-                        output = await self._policy(policy_config, observation, request, number)
-                        if output.action_type == 'tcp_pose' and output.pose.status == 'done':
-                            if await self._verify_done(output.pose.explanation, observation): return
-                            continue
-                        if output.action_type == 'tcp_pose' and output.pose.status == 'blocked':
-                            self.state.update(status='blocked', message=output.pose.explanation); return
-                        candidates = self._policy_candidates(output); selected = candidates[0]
-                    else:
-                        if plan is None:
-                            plan = await self._agent(agent_config, observation, planner=True, reason=reason)
-                            plan_age = 0; plan_observation = {'observation_id': self.observation_id, 'time': observation['time']}
-                            self.state['subgoal'] = plan.subgoal
-                            if plan.status == 'done':
-                                if await self._verify_done(plan.explanation, observation): return
-                                plan = None; reason = 'completion_rejected'
+                    async with measured_round(self.log, self.worker, number, self.state):
+                        step_start = time.monotonic()
+                        observation = await self._timed('observation', self._capture(number))
+                        if number == 1: self.initial_tcp = deepcopy(observation['tcp'])
+                        if recipe['mode'] == 'agent':
+                            action = await self._agent(agent_config, observation)
+                            if action.status == 'done':
+                                if await self._verify_done(action.explanation, observation): return
                                 continue
-                            if plan.status == 'blocked':
-                                self.state.update(status='blocked', message=plan.explanation); return
-                        generation_start = time.monotonic()
-                        policy_source = recipe.get('skills', {}).get('candidate_source') == 'policy' or plan.skill == 'policy'
-                        if policy_source:
-                            if policy_config is None:
-                                self.state.update(status='blocked', message='子目标要求策略候选，但该方法未配置策略。'); return
+                            if action.status == 'blocked':
+                                self.state.update(status='blocked', message=action.explanation); return
+                            candidates = [{'id': 'agent_pose', 'description': action.explanation,
+                                'action_type': 'tcp_pose', 'pose': action.model_dump()}]
+                            selected = candidates[0]
+                        elif recipe['mode'] == 'policy':
                             output = await self._policy(policy_config, observation, request, number)
                             if output.action_type == 'tcp_pose' and output.pose.status == 'done':
                                 if await self._verify_done(output.pose.explanation, observation): return
-                                plan = None; reason = 'completion_rejected'
                                 continue
                             if output.action_type == 'tcp_pose' and output.pose.status == 'blocked':
                                 self.state.update(status='blocked', message=output.pose.explanation); return
-                            candidates = self._policy_candidates(output)
+                            candidates = self._policy_candidates(output); selected = candidates[0]
                         else:
-                            candidates = skill_candidates(observation, plan, recipe.get('skills'))
-                        generation_s = time.monotonic()-generation_start
-                        self._record_timing('candidate_generation', generation_s)
-                        self.log.write('candidates', {'step': number, 'observation_id': self.observation_id,
-                            'subgoal': plan.model_dump(), 'source': 'policy' if policy_source else 'local_skills',
-                            'duration_s': generation_s, 'candidates': candidates})
-                        if not candidates:
-                            self.state.update(status='blocked', message='没有满足当前技能约束的候选；未调用决策或执行。'); return
-                        decision_context = {'episode_id': self.state['episode_id'], 'observation_id': self.observation_id,
-                            'scene_generation': observation['generation'], 'sim_time': observation['time'],
-                            'task': request.task, 'subgoal': plan.subgoal, 'visual_summary': plan.visual_summary,
-                            'visual_summary_observation': plan_observation,
-                            'robot_state': {key: value for key, value in observation.items() if key != 'cameras'}}
-                        threshold = float(recipe.get('controller', {}).get('decision_min_confidence', 0.))
-                        if not 0 <= threshold <= 1: raise ValueError('决策置信度阈值须在 0 至 1 之间。')
-                        async def recovering_chooser(config, context, offered, *, api_key='', cameras=()):
-                            async def infer(feedback, effective_config):
-                                attempt_context = {**context, **({'recovery_feedback': feedback} if feedback else {})}
-                                return await choose_candidate(effective_config, attempt_context, offered,
-                                    api_key=api_key, cameras=cameras)
-                            return await recovery_module.invoke_with_recovery(self,
-                                'decision:' + context['decision_id'], infer, observation, config)
-                        result = await self._timed('decision_aggregation', choose_decisions(decision_configs,
-                            recipe.get('decision_strategy', 'single'), decision_context, candidates,
-                            api_keys=credentials.get('decision_api_keys', {}), cameras=observation['cameras'],
-                            min_confidence=threshold, on_result=self._decision_record, chooser=recovering_chooser))
-                        self._assert_current(observation)
-                        self.log.write('decision', {'step': number, 'input': decision_context, 'result': result.model_dump()})
-                        self.state['decision_aggregation'] = result.aggregation
-                        if result.status == 'blocked':
-                            self.state.update(status='blocked', message=result.explanation or '决策模型无法选择可执行动作。'); return
-                        if result.status == 'replan':
-                            plan = None; reason = 'decision_requested_replan'
-                            self.state.update(status='replan', message=result.explanation or '决策组合请求重新规划。')
-                            self.log.write('replan_trigger', {'step': number, 'reason': reason})
-                            continue
-                        selected = next(candidate for candidate in candidates if candidate['id'] == result.candidate_id)
-                        self.state['selected_candidate'] = selected['id']
-                    self.log.write('selection', {'step': number, 'observation_id': self.observation_id, 'candidate': selected})
-                    result = await self._timed('execution', self._execute(selected, observation))
-                    record = {'step': number, 'observation_id': self.observation_id, 'observed_time': observation['time'],
-                        'candidate_id': selected['id'], 'action': selected, 'result': result, 'step_wall_s': time.monotonic()-step_start}
-                    self.log.write('transition', record)
-                    self.state['history'].append(record); self.state['history'] = self.state['history'][-30:]
-                    if environment_success(self._snapshot()) or result['status'] == 'verified':
-                        self.state.update(status='verified', message='场景评价器确认任务成功。'); return
-                    if result['status'] == 'limit':
-                        self.state.update(status='limit', message='已达到仿真时间上限。'); return
-                    if result['status'] != 'complete':
-                        plan = None; reason = 'execution_failed'
-                        self.log.write('replan_trigger', {'step': number, 'reason': reason, 'execution': result})
-                    elif plan is not None:
-                        plan_age += 1
-                        expiry = min(plan.expires_after_steps, int(recipe.get('skills', {}).get('max_subgoal_steps', 20)))
-                        if expiry < 1: raise ValueError('子目标缓存步数须为正数。')
-                        if plan_age >= expiry:
-                            plan = None; reason = 'subgoal_expired'
-                            self.log.write('replan_trigger', {'step': number, 'reason': reason})
+                            if plan is None:
+                                plan = await self._agent(agent_config, observation, planner=True, reason=reason)
+                                plan_age = 0; plan_observation = {'observation_id': self.observation_id, 'time': observation['time']}
+                                self.state['subgoal'] = plan.subgoal
+                                if plan.status == 'done':
+                                    if await self._verify_done(plan.explanation, observation): return
+                                    plan = None; reason = 'completion_rejected'
+                                    continue
+                                if plan.status == 'blocked':
+                                    self.state.update(status='blocked', message=plan.explanation); return
+                            generation_start = time.monotonic()
+                            policy_source = recipe.get('skills', {}).get('candidate_source') == 'policy' or plan.skill == 'policy'
+                            if policy_source:
+                                if policy_config is None:
+                                    self.state.update(status='blocked', message='子目标要求策略候选，但该方法未配置策略。'); return
+                                output = await self._policy(policy_config, observation, request, number)
+                                if output.action_type == 'tcp_pose' and output.pose.status == 'done':
+                                    if await self._verify_done(output.pose.explanation, observation): return
+                                    plan = None; reason = 'completion_rejected'
+                                    continue
+                                if output.action_type == 'tcp_pose' and output.pose.status == 'blocked':
+                                    self.state.update(status='blocked', message=output.pose.explanation); return
+                                candidates = self._policy_candidates(output)
+                            else:
+                                candidates = skill_candidates(observation, plan, recipe.get('skills'))
+                            generation_s = time.monotonic()-generation_start
+                            self._record_timing('candidate_generation', generation_s)
+                            self.log.write('candidates', {'step': number, 'observation_id': self.observation_id,
+                                'subgoal': plan.model_dump(), 'source': 'policy' if policy_source else 'local_skills',
+                                'duration_s': generation_s, 'candidates': candidates})
+                            if not candidates:
+                                self.state.update(status='blocked', message='没有满足当前技能约束的候选；未调用决策或执行。'); return
+                            decision_context = {'episode_id': self.state['episode_id'], 'observation_id': self.observation_id,
+                                'scene_generation': observation['generation'], 'sim_time': observation['time'],
+                                'task': request.task, 'subgoal': plan.subgoal, 'visual_summary': plan.visual_summary,
+                                'visual_summary_observation': plan_observation,
+                                'robot_state': {key: value for key, value in observation.items() if key != 'cameras'}}
+                            threshold = float(recipe.get('controller', {}).get('decision_min_confidence', 0.))
+                            if not 0 <= threshold <= 1: raise ValueError('决策置信度阈值须在 0 至 1 之间。')
+                            async def recovering_chooser(config, context, offered, *, api_key='', cameras=()):
+                                async def infer(feedback, effective_config):
+                                    attempt_context = {**context, **({'recovery_feedback': feedback} if feedback else {})}
+                                    return await choose_candidate(effective_config, attempt_context, offered,
+                                        api_key=api_key, cameras=cameras)
+                                return await recovery_module.invoke_with_recovery(self,
+                                    'decision:' + context['decision_id'], infer, observation, config)
+                            result = await self._timed('decision_aggregation', choose_decisions(decision_configs,
+                                recipe.get('decision_strategy', 'single'), decision_context, candidates,
+                                api_keys=credentials.get('decision_api_keys', {}), cameras=observation['cameras'],
+                                min_confidence=threshold, on_result=self._decision_record, chooser=recovering_chooser))
+                            self._assert_current(observation)
+                            self.log.write('decision', {'step': number, 'input': decision_context, 'result': result.model_dump()})
+                            self.state['decision_aggregation'] = result.aggregation
+                            if result.status == 'blocked':
+                                self.state.update(status='blocked', message=result.explanation or '决策模型无法选择可执行动作。'); return
+                            if result.status == 'replan':
+                                plan = None; reason = 'decision_requested_replan'
+                                self.state.update(status='replan', message=result.explanation or '决策组合请求重新规划。')
+                                self.log.write('replan_trigger', {'step': number, 'reason': reason})
+                                continue
+                            selected = next(candidate for candidate in candidates if candidate['id'] == result.candidate_id)
+                            self.state['selected_candidate'] = selected['id']
+                        self.log.write('selection', {'step': number, 'observation_id': self.observation_id, 'candidate': selected})
+                        result = await self._timed('execution', self._execute(selected, observation))
+                        record = {'step': number, 'observation_id': self.observation_id, 'observed_time': observation['time'],
+                            'candidate_id': selected['id'], 'action': selected, 'result': result, 'step_wall_s': time.monotonic()-step_start}
+                        self.log.write('transition', record)
+                        self.state['history'].append(record); self.state['history'] = self.state['history'][-30:]
+                        if environment_success(self._snapshot()) or result['status'] == 'verified':
+                            self.state.update(status='verified', message='场景评价器确认任务成功。'); return
+                        if result['status'] == 'limit':
+                            self.state.update(status='limit', message='已达到仿真时间上限。'); return
+                        if result['status'] != 'complete':
+                            plan = None; reason = 'execution_failed'
+                            self.log.write('replan_trigger', {'step': number, 'reason': reason, 'execution': result})
+                        elif plan is not None:
+                            plan_age += 1
+                            expiry = min(plan.expires_after_steps, int(recipe.get('skills', {}).get('max_subgoal_steps', 20)))
+                            if expiry < 1: raise ValueError('子目标缓存步数须为正数。')
+                            if plan_age >= expiry:
+                                plan = None; reason = 'subgoal_expired'
+                                self.log.write('replan_trigger', {'step': number, 'reason': reason})
                 if self.state['status'] == 'replan':
                     self.state.update(status='limit', message=self.state['message'] + ' 已达到本次决策步数上限，未执行该步动作。')
                     return

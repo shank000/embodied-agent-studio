@@ -3,6 +3,7 @@
 alfworld==0.4.2
 textworld[pddl]==1.7.0
 ai2thor==2.1.0
+PyVirtualDisplay==3.0; sys_platform == 'linux'
 Flask==2.0.3
 Werkzeug==2.0.3
 Jinja2==3.0.3

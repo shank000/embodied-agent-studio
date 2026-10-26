@@ -10,7 +10,10 @@ import base64
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
+import sys
 
 from .alfworld_backend import DiscreteEnvironment
 
@@ -54,6 +57,7 @@ class ThorSimulation(DiscreteEnvironment):
                  task_id='thor_open_object', controller=None):
         self.controller = controller
         self._owns_controller = controller is None
+        self._display = None
         self._id_to_handle, self._handle_to_id = {}, {}
         try:
             self._initialize(model_id, scene_id, seed, task_id)
@@ -64,9 +68,8 @@ class ThorSimulation(DiscreteEnvironment):
 
     def reset(self):
         if self.controller is None:
+            self._start_display()
             from ai2thor.controller import Controller
-            # Linux/WSLg uses the official Linux64 build and existing display.
-            # No system driver, X server, platform spoofing, or SDK patch.
             self.controller = Controller(scene=self.scene_id, agentMode='default',
                                          width=640, height=480, gridSize=.25,
                                          rotateStepDegrees=90, visibilityDistance=1.5,
@@ -95,6 +98,34 @@ class ThorSimulation(DiscreteEnvironment):
         self.task = self.task_status(self.task_name)
         self._update_observation()
         self.event('已加载 AI2-THOR 官方 Unity 房间：'+self.scene_id)
+
+    def _start_display(self):
+        # WSLg is tied to the desktop/RDP session and can leave a live socket
+        # which rejects X11 handshakes. Each Unity worker owns its display so
+        # disconnecting the Windows desktop cannot interrupt a rollout.
+        if sys.platform != 'linux' or not (os.getenv('WSL_INTEROP') or not os.getenv('DISPLAY')):
+            return
+        if self._display is not None:
+            return
+        if not shutil.which('Xvfb'):
+            raise RuntimeError('Unity 后台显示缺少 Xvfb。请在运行仿真的 Linux/WSL 中安装 xvfb xauth，再加载环境。')
+        try:
+            from pyvirtualdisplay import Display
+        except ImportError as exc:
+            raise RuntimeError('独立仿真 Python 缺少 PyVirtualDisplay，请重新安装对应 requirements-thor.txt 或 requirements-alfworld-thor.txt。') from exc
+        # WSLg's :0 socket is shared across namespaces. Xvfb -displayfd can
+        # claim that number and hang; the library's numbered allocator starts
+        # above desktop displays and retries occupied numbers itself.
+        previous = os.environ.get('PYVIRTUALDISPLAY_DISPLAYFD')
+        if os.getenv('WSL_INTEROP'): os.environ['PYVIRTUALDISPLAY_DISPLAYFD'] = '0'
+        try:
+            self._display = Display(backend='xvfb', size=(1280, 720), color_depth=24, use_xauth=True)
+        finally:
+            if previous is None: os.environ.pop('PYVIRTUALDISPLAY_DISPLAYFD', None)
+            else: os.environ['PYVIRTUALDISPLAY_DISPLAYFD'] = previous
+        self._display.start()
+        self.backend['display_mode'] = 'isolated_xvfb'
+        self.model_note += ' 使用独立后台显示，生命周期随此仿真进程管理。'
 
     def _register_object_handles(self):
         metadata = self.native_event.metadata
@@ -194,5 +225,11 @@ class ThorSimulation(DiscreteEnvironment):
                  'source': 'ai2thor.Event.frame'}]
 
     def close(self):
-        if self.controller is not None and self._owns_controller:
-            self.controller.stop(); self.controller = None
+        try:
+            if self.controller is not None and self._owns_controller:
+                controller, self.controller = self.controller, None
+                controller.stop()
+        finally:
+            if getattr(self, '_display', None) is not None:
+                display, self._display = self._display, None
+                display.stop()

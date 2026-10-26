@@ -34,7 +34,7 @@ class Element {
 
 function moduleContext(file,extra={}) {
   const nodes=new Map(),element=id=>{if(!nodes.has(id))nodes.set(id,new Element('div',id));return nodes.get(id);};
-  const scope=vm.createContext({console,URLSearchParams,setTaskDraft,syncTaskDraft,window:{addEventListener(){}},...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
+  const scope=vm.createContext({renderRoundTimeline(){},renderExperimentCosts(){},console,URLSearchParams,setTaskDraft,syncTaskDraft,window:{addEventListener(){}},...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
   const code=readFileSync(new URL('../src/'+file,import.meta.url),'utf8').replace(/^import .*;\s*$/gm,'').replace(/\bexport /g,'');
   vm.runInContext(code,scope);
   return {scope,element,run:code=>vm.runInContext(code,scope)};
@@ -182,6 +182,57 @@ test('Codex repair mode ignores stale invalid API fields in validation and paylo
   assert.equal(element('repair-tokens').disabled,false);
 });
 
+test('automatic retry alone is visibly inactive until automatic diagnosis is enabled',()=>{
+  const {element,run}=moduleContext('repair.js');
+  run('config={auto_analyze:false,auto_recover:true,max_recovery_attempts:2};renderRecovery();');
+  assert.match(element('repair-automatic-status').textContent,/自动分析：关闭/);
+  element('repair-auto').checked=false; element('repair-auto-recover').checked=true;
+  run('automaticFields()');
+  assert.equal(element('repair-auto-recover').disabled,true);
+  assert.match(element('repair-auto-note').textContent,/不会启动修复 Agent/);
+  element('repair-auto').checked=true;
+  run('automaticFields()');
+  assert.equal(element('repair-auto-recover').disabled,false);
+  assert.equal(element('repair-auto-recover').checked,true);
+  run('current.automatic={auto_analyze:true,auto_recover:true,max_recovery_attempts:2};renderRecovery();');
+  assert.match(element('repair-automatic-status').textContent,/自动诊断并重试/);
+  run('current.automatic.auto_recover=false;renderRecovery();');
+  assert.match(element('repair-automatic-status').textContent,/重试需手动确认/);
+});
+
+test('skipped recovery shows its reason and cannot resume a finished round',()=>{
+  const {element,run}=moduleContext('repair.js');
+  run("current={recovery:{failure_id:'failure',source_run_id:'run',status:'skipped',phase:'agent_inference',owner:'agent',round:2,message:'自动分析已关闭',can_resume:false}};renderRecovery();");
+  assert.equal(element('repair-recovery').hidden,false);
+  assert.equal(element('repair-resume').disabled,true);
+  assert.equal(element('repair-card-status').textContent,'未启动故障修复');
+  assert.match(element('repair-card-message').textContent,/第 2 轮/);
+  assert.match(element('repair-recovery-message').textContent,/自动分析已关闭/);
+});
+
+test('Codex partial cost displays the known reference amount without an empty API bill',()=>{
+  const {scope,run}=resultsContext();
+  scope.cost={status:'partial',has_reference:true,reference_calls:33,billable_calls:0,local_calls:0,
+    reference_amount_usd:null,known_reference_amount_usd:9.12345,amount_usd:null,known_amount_usd:0};
+  const markup=run('costAmountMarkup(cost)');
+  assert.match(markup,/9\.12345/);
+  assert.match(markup,/已知部分/);
+  assert.match(markup,/API 等价参考/);
+  assert.doesNotMatch(markup,/API 费用估算|不可估算/);
+  scope.cost.reference_amount_min_usd=9;scope.cost.reference_amount_max_usd=10;
+  assert.match(run('costAmountMarkup(cost)'),/～/);
+  assert.match(run('costDiagnosisText(cost)'),/金额上下界/);
+  scope.cost.billable_calls=1;scope.cost.known_amount_usd=.123;
+  assert.match(run('costAmountMarkup(cost)'),/API 费用估算/);
+});
+
+test('partial token totals retain known usage without claiming a complete total',()=>{
+  const {run}=resultsContext();
+  assert.equal(run("tokenTotalText({total_tokens:null,known_total_tokens:698356},'total_tokens')"),'698,356（已知）');
+  assert.equal(run("tokenTotalText({total_tokens:0,known_total_tokens:0},'total_tokens')"),'0');
+  assert.equal(run("tokenTotalText({total_tokens:null,known_total_tokens:0},'total_tokens')"),'—');
+});
+
 test('Agent provider fields disable hidden token inputs and restore API validation',()=>{
   const {element,run}=moduleContext('repair.js',{URL});
   const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
@@ -267,19 +318,14 @@ test('task shortcut uses the selected environment instruction without changing t
   assert.equal(run('state.evaluation.task_id'),'open_drawer');
 });
 
-test('live policy rejection history renders without action-block fields or fabricated metrics',()=>{
-  const {scope,element,run}=resultsContext();
-  scope.fixtureState={policy:{active:true,status:'replan',round:2,history:[{round:2,result:{status:'completion_rejected',message:'环境尚未验收，请继续尝试 <retry>。'}}]},comparison:{}};
+test('live policy delegates full round records while retaining completion rejection status',()=>{
+  const {scope,element,run}=resultsContext();const forwarded=[];
+  scope.renderRoundTimeline=(root,controller)=>forwarded.push({root,controller});
+  scope.fixtureState={policy:{run_id:'run',active:true,status:'replan',round:2},comparison:{}};
   run('renderResearch(fixtureState)');
-  const html=element('policy-history').innerHTML;
-  assert.match(html,/第 2 轮 · 完成声明被环境拒绝/);
-  assert.match(html,/环境尚未验收，请继续尝试 &lt;retry&gt;。/);
-  assert.doesNotMatch(html,/undefined|NaN|推理|帧|执行目标限幅/);
+  assert.equal(forwarded[0].root,element('policy-history'));
+  assert.equal(forwarded[0].controller,scope.fixtureState.policy);
   assert.equal(element('policy-status').textContent,'未通过核验 · 重新决策');
-  scope.fixtureState.policy.history.push({round:3,frames:12,latency_s:1.25,limited_targets:0});
-  run('renderResearch(fixtureState)');
-  assert.match(element('policy-history').innerHTML,/动作块 3 · 12 帧/);
-  assert.match(element('policy-history').innerHTML,/推理 1.25 s · 执行目标限幅 0 项/);
 });
 
 test('a newly loaded native environment remains connected while its old scene catalog is replaced',()=>{

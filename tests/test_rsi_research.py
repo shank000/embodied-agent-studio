@@ -241,7 +241,7 @@ class ResearchIntegrationTests(IsolatedResearchCase):
             folder = runlog.run_folder(row['run_id'])
             summary = json.loads((folder / 'summary.json').read_text(encoding='utf-8'))
             self.assertGreater(summary['artifacts']['trajectory_frames'], 10)
-            self.assertEqual(len(list((folder / 'observations').glob('*/*.jpg'))), 3)
+            self.assertEqual(len(list((folder / 'observations').glob('*/*.jpg'))), 6)  # Before and after images for training transitions.
             frames = [json.loads(line) for line in (folder / 'trajectory.jsonl').read_text(encoding='utf-8').splitlines()]
             self.assertGreater(abs(frames[-1]['qpos'][0] - frames[0]['qpos'][0]), .001)
             with self.app_components(runner, controller):

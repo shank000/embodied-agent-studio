@@ -256,6 +256,9 @@ class RepairController:
 
     def snapshot(self):
         state = deepcopy(self.state)
+        state['automatic'] = {'auto_analyze':self.config.auto_analyze,
+                              'auto_recover':self.config.auto_recover,
+                              'max_recovery_attempts':self.config.max_recovery_attempts}
         if self._clock is not None: state['elapsed_s'] = time.monotonic()-self._clock
         if getattr(self, 'recovery_snapshot', None): state['recovery'] = self.recovery_snapshot()
         return state

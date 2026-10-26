@@ -352,6 +352,33 @@ class WorkerSelectionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FrozenBackendContractTests(unittest.TestCase):
+    def test_windows_venv_with_missing_base_python_is_not_advertised_as_loadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); python=root/'Scripts/python.exe'
+            python.parent.mkdir();python.write_bytes(b'launcher fixture')
+            (root/'Lib/site-packages/genesis_world-1.4.5.dist-info').mkdir(parents=True)
+            base=root/'removed-base'
+            (root/'pyvenv.cfg').write_text('home = '+str(base)+'\n',encoding='utf-8')
+            with patch.object(simulators,'runtime_python',return_value=python), patch.object(simulators.sys,'platform','win32'):
+                entry=next(row for row in simulators.catalog()['backends'] if row['id']=='genesis')
+                self.assertEqual(entry['status'],'unavailable');self.assertFalse(entry['installed'])
+                self.assertIn(str(base),entry['error']);self.assertIn('pyvenv.cfg',entry['error'])
+                base.mkdir();(base/'python.exe').write_bytes(b'base fixture')
+                self.assertTrue(simulators.runtime_info('genesis')['installed'])
+
+    def test_robodojo_is_discoverable_without_becoming_an_interactive_backend(self):
+        with patch.object(simulators, 'runtime_info', return_value={'installed':False, 'kind':'native', 'version':None}):
+            directory = simulators.catalog('mujoco')
+        entry = next(item for item in directory['backends'] if item['id']=='robodojo')
+        self.assertEqual(directory['active'],'mujoco')
+        self.assertEqual(entry['kind'],'benchmark')
+        self.assertEqual(entry['status'],'external_runtime')
+        self.assertIsNone(entry['installed'])
+        self.assertNotIn('robodojo',simulators.RUNTIMES)
+        self.assertNotIn('robodojo',simulators.EVALUATORS)
+        self.assertIn('Isaac Sim 5.1',entry['description'])
+        self.assertNotIn('load',entry['capabilities'])
+
     def test_posix_install_detection_uses_independent_environment_python_version(self):
         with tempfile.TemporaryDirectory(prefix='backend-install-') as folder:
             venv = Path(folder)

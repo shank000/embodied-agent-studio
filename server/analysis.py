@@ -154,30 +154,30 @@ def analyze_run(run_id, *, _ancestors=()):
     fallback_config = recipe.get('agent') or recipe.get('policy') or result.get('settings') or {}
     for call in ordered:
         for field in (*TOKEN_FIELDS, 'inference_s'): call[field] = _number(call.get(field))
+        returned_tokens = usage_tokens(call.get('usage'))
+        for field in TOKEN_FIELDS:
+            if call[field] is None: call[field] = returned_tokens[field]
         call.setdefault('reasoning', {'availability': 'unavailable', 'text': None, 'source': None})
         saved_price = call.get('pricing')
-        # Re-evaluate only the previously unresolved calendar using the original
-        # price snapshot and actual usage. Preserve the recorded cost verbatim.
-        if (isinstance(call.get('cost'), dict) and call['cost'].get('status') == 'partial' and
-                isinstance(saved_price, dict) and saved_price.get('holiday_region') and
-                saved_price.get('status') in ('ready', 'stale')):
-            resolved = calculate_call_cost(call, saved_price)
-            if (resolved.get('calendar_resolution') or {}).get('known'):
-                call['recorded_cost'] = call['cost']
-                call['cost'] = resolved
-                call['calendar_resolution'] = {**resolved['calendar_resolution'], 'recalculated_from_recorded_price': True,
-                    'original_log_unchanged': True}
-                call['cost']['warnings'].append('按原调用价格与原始用量补齐官方节假日条件重新估算；旧费用保留在 recorded_cost，未改写原日志。')
-        if not isinstance(call.get('cost'), dict) or call['cost'].get('status') == 'unavailable':
-            recorded_cost = call.get('cost')
-            saved_price = call.get('pricing')
+        # Recalculate incomplete derived amounts from the original usage and
+        # quote. Calculation fixes must also reach history without rewriting it.
+        recorded_cost = call.get('cost')
+        if not isinstance(recorded_cost, dict) or recorded_cost.get('status') in ('partial', 'unavailable'):
             quote = saved_price if isinstance(saved_price, dict) and saved_price.get('status') in ('ready', 'stale') else estimate_quote(
                 {**fallback_config, 'provider': call.get('provider') or result.get('provider') or fallback_config.get('provider', fallback_config.get('kind')),
                  'model': call.get('model') or result.get('model') or fallback_config.get('model')})
-            call['cost'] = calculate_call_cost(call, quote)
-            if isinstance(recorded_cost, dict) and quote.get('basis') == 'current_price_estimate':
+            resolved = calculate_call_cost(call, quote)
+            call['cost'] = resolved
+            if isinstance(recorded_cost, dict) and resolved != recorded_cost:
                 call['recorded_cost'] = recorded_cost
-                call['cost']['warnings'].append('调用时未获得可用报价；此处按当前官方价格补估，原费用记录仍保留在 recorded_cost 和原始日志中。')
+                if quote.get('basis') == 'current_price_estimate':
+                    resolved['warnings'].append('调用时未获得可用报价；此处按当前官方价格补估，原费用记录仍保留在 recorded_cost 和原始日志中。')
+                elif (resolved.get('calendar_resolution') or {}).get('known'):
+                    call['calendar_resolution'] = {**resolved['calendar_resolution'], 'recalculated_from_recorded_price': True,
+                        'original_log_unchanged': True}
+                    resolved['warnings'].append('按原调用价格与原始用量补齐官方节假日条件重新估算；旧费用保留在 recorded_cost，未改写原日志。')
+                else:
+                    resolved['warnings'].append('按原调用价格快照与原始用量重新计算；旧费用保留在 recorded_cost，未改写原日志。')
     rows = result.get('rows') or [event['data'] for event in events if event.get('event') == 'trial_result']
     children = []; child_analyses = []; seen = set()
     for row in rows:
@@ -237,6 +237,8 @@ def analyze_run(run_id, *, _ancestors=()):
     else:
         cost = aggregate_costs(costs)
     environment = _environment_identity(result, events, folder, issues)
+    from .experiment_costs import attribution
+    cost_attribution = attribution(run_id, ordered, cost, child_analyses if result.get('kind') in BATCH_KINDS else ())
     return {'run_id': run_id, **record_labels({**result, 'run_id': run_id, 'started_at': started_at}),
         **environment,
         'kind': result.get('kind'), 'status': result.get('status', 'interrupted'),
@@ -250,6 +252,7 @@ def analyze_run(run_id, *, _ancestors=()):
         'recovery_assisted':bool(result.get('recovery_assisted') or any(event.get('event')=='recoverable_error' for event in events)),
         'recovery_attempts':sum(event.get('event')=='recoverable_error' for event in events),
         'total': totals, 'rounds': ordered, 'children': children, 'trials': rows, 'cost': cost,
+        'cost_attribution': cost_attribution,
         'issues': issues, 'aggregation_scope': 'children_once' if result.get('kind') in BATCH_KINDS else 'actual_provider_calls',
         'inference_semantics': '端到端服务调用耗时，含网络与排队；并行调用逐请求累计，可能超过墙钟时间。',
         'usage_complete_semantics': '每次调用均返回有效 input_tokens 与 output_tokens；reasoning_tokens 可独立缺失。'}
@@ -284,6 +287,10 @@ def analyze_experiments(*, task=None, model=None, reasoning=None, kind=None, lim
             group[field] = sum(values) if values else None
             group['mean_' + field] = sum(values) / len(values) if values else None
             group[sample] = len(values); group[missing] = len(members) - len(values)
+        group['success_rate'] = group['succeeded']/len(members)
+        group['recovery_runs'] = sum(run.get('recovery_assisted', False) for run in members)
+        group['known_cost_usd'] = sum((run.get('cost_attribution') or {}).get('known_total_usd', 0) for run in members)
+        group['success_rate_semantics'] = '成功次数 / 已结束尝试数；取消、错误和中断均保留在分母。'
         grouped.append(group)
     return {'runs': runs[:limit], 'groups': grouped, 'matched_runs': len(runs), 'returned_runs': min(limit, len(runs)),
             'aggregation_scope': 'leaf_runs_only', 'excluded_active_runs': excluded_active, 'issues': issues,

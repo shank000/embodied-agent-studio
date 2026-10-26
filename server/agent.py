@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from .control import PoseAction
 from .actions import EnvironmentAction
 from .runlog import RunLog, CURRENT_LOG, model_output
+from .rounds import measured_round, round_phase
 from .telemetry import track_inference, controller_timing, enter_recorded_run
 from .recovery import invoke_with_recovery
 from .task_verification import public_feedback, verify_completion, environment_success
@@ -343,7 +344,7 @@ async def api_action(config, prompt, cameras, *, response_type=PoseAction,
                 tool_choice={'type': 'auto', 'disable_parallel_tool_use': True},
                 messages=[{'role': 'user', 'content': content}], **options)
         actions = [item for item in response.content if item.type == 'tool_use' and item.name == tool_name]
-        model_output({'provider': 'anthropic', 'model': config.model, 'stop_reason': response.stop_reason,
+        model_output({'provider': 'anthropic', 'model': getattr(response, 'model', None) or config.model, 'stop_reason': response.stop_reason,
                       'text': [item.text for item in response.content if item.type == 'text'],
                       'returned_reasoning': '\n\n'.join(item.thinking for item in response.content if item.type == 'thinking'),
                       'actions': [item.input for item in actions], 'usage': response.usage.model_dump()})
@@ -362,7 +363,7 @@ async def api_action(config, prompt, cameras, *, response_type=PoseAction,
                 **({'reasoning': {'effort': config.reasoning}} if config.reasoning is not None else {}),
                 text={'format': {'type': 'json_schema', 'name': schema_name, 'strict': True, 'schema': schema}})
             usage = response.usage.model_dump() if response.usage else None
-            model_output({'provider': 'openai', 'model': config.model, 'status': response.status, 'content': response.output_text, 'usage': usage,
+            model_output({'provider': 'openai', 'model': getattr(response, 'model', None) or config.model, 'status': response.status, 'content': response.output_text, 'usage': usage,
                           'reasoning': [{'summary': [part.model_dump() for part in (item.summary or [])]} for item in (response.output or []) if item.type == 'reasoning']})
             if response.status != 'completed' or not response.output_text:
                 raise ModelResponseError(f'模型未返回完整动作：{response.status}，{response.incomplete_details}。', usage)
@@ -382,7 +383,7 @@ async def api_action(config, prompt, cameras, *, response_type=PoseAction,
         response = await client.chat.completions.create(model=config.model, max_tokens=config.max_output_tokens,
             response_format={'type': 'json_object'},
             messages=[{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': content}], **options)
-        model_output({'provider': 'compatible', 'model': config.model,
+        model_output({'provider': 'compatible', 'model': getattr(response, 'model', None) or config.model,
                       'choices': [{'finish_reason': choice.finish_reason, 'content': choice.message.content,
                                    'returned_reasoning': choice.message.model_dump().get('reasoning_content') or choice.message.model_dump().get('reasoning')}
                                   for choice in response.choices],
@@ -497,99 +498,102 @@ class AgentController:
                 remaining = budget - (current['time'] - initial_state['time'])
                 if remaining <= 1e-8 or remaining + 1e-8 < current.get('timestep', 0):
                     self.state.update(status='limit', message='已达到本次任务的环境步数上限。' if turn_based else '已达到本次任务的仿真时间上限。'); return
-                discrete = current.get('backend', {}).get('action_mode') in ('text','discrete')
-                self.state.update(status='observing', round=number,
-                                  message='读取原生环境观察与可执行动作。' if discrete else '采集同步相机画面与机器人状态。')
-                await self.worker.execute({'action': 'pause', 'value': True})
-                await self.capture()
-                obs = self.observation
-                if initial is None: initial = obs.get('tcp')
-                self.state.update(status='thinking', message=f'{config.model} 正在读取当前观察并选择下一步。')
-                start = time.monotonic()
-                prompt = observation_text(self.state['task'], obs, self.state['history'], initial)
-                saved = log.save_observation(obs, number)
-                log.write('observation', {'round': number, 'input': json.loads(prompt), 'observation': saved})
-                async def infer(feedback, effective_config):
-                    function = codex_action if effective_config.provider == 'codex' else api_action
-                    request_prompt = prompt
-                    if feedback:
-                        payload = json.loads(prompt)
-                        payload['recovery_feedback'] = feedback
-                        request_prompt = json.dumps(payload,ensure_ascii=False)
-                    options = ({'response_type':EnvironmentAction, 'system_prompt':ENVIRONMENT_PROMPT,
-                                'schema_name':'environment_action'} if discrete else {})
-                    return await function(effective_config, request_prompt, obs['cameras'], **options)
-                action, usage = await invoke_with_recovery(self, 'agent_inference', infer, obs, config)
-                if not self._accepting or asyncio.current_task().cancelling(): raise asyncio.CancelledError
-                self.state.update(action=action.model_dump(), latency_s=round(time.monotonic()-start, 2), usage=usage)
-                latencies.append(time.monotonic()-start)
-                log.write('action', {'round': number, 'action': action.model_dump(), 'latency_s': latencies[-1], 'usage': usage})
-                record = {'round': number, 'observed_time': obs['time'], 'action': action.model_dump()}
-                self.state['history'].append(record)
-                if action.status == 'done':
-                    accepted = await verify_completion(self, self.worker, log, number,
-                                                       action.explanation, obs['generation'])
-                    record['verification'] = self.state['verification']
-                    record['result'] = self.state['message']
-                    if accepted: return
-                    continue
-                if action.status == 'blocked':
-                    record['result'] = action.explanation
-                    self.state.update(status='blocked', message='模型无法继续：' + action.explanation)
-                    return
-                if discrete:
-                    self.state.update(status='executing', message='执行环境原生命令。')
+                async with measured_round(log, self.worker, number, self.state):
+                    discrete = current.get('backend', {}).get('action_mode') in ('text','discrete')
+                    self.state.update(status='observing', round=number,
+                                      message='读取原生环境观察与可执行动作。' if discrete else '采集同步相机画面与机器人状态。')
+                    await self.worker.execute({'action': 'pause', 'value': True})
+                    await self.capture()
+                    obs = self.observation
+                    if initial is None: initial = obs.get('tcp')
+                    round_phase(log, 'inference')
+                    self.state.update(status='thinking', message=f'{config.model} 正在读取当前观察并选择下一步。')
+                    start = time.monotonic()
+                    prompt = observation_text(self.state['task'], obs, self.state['history'], initial)
+                    saved = log.save_observation(obs, number)
+                    log.write('observation', {'round': number, 'input': json.loads(prompt), 'observation': saved})
+                    async def infer(feedback, effective_config):
+                        function = codex_action if effective_config.provider == 'codex' else api_action
+                        request_prompt = prompt
+                        if feedback:
+                            payload = json.loads(prompt)
+                            payload['recovery_feedback'] = feedback
+                            request_prompt = json.dumps(payload,ensure_ascii=False)
+                        options = ({'response_type':EnvironmentAction, 'system_prompt':ENVIRONMENT_PROMPT,
+                                    'schema_name':'environment_action'} if discrete else {})
+                        return await function(effective_config, request_prompt, obs['cameras'], **options)
+                    action, usage = await invoke_with_recovery(self, 'agent_inference', infer, obs, config)
+                    if not self._accepting or asyncio.current_task().cancelling(): raise asyncio.CancelledError
+                    self.state.update(action=action.model_dump(), latency_s=round(time.monotonic()-start, 2), usage=usage)
+                    latencies.append(time.monotonic()-start)
+                    log.write('action', {'round': number, 'action': action.model_dump(), 'latency_s': latencies[-1], 'usage': usage})
+                    record = {'round': number, 'observed_time': obs['time'], 'action': action.model_dump()}
+                    self.state['history'].append(record)
+                    round_phase(log, 'execution')
+                    if action.status == 'done':
+                        accepted = await verify_completion(self, self.worker, log, number,
+                                                           action.explanation, obs['generation'])
+                        record['verification'] = self.state['verification']
+                        record['result'] = self.state['message']
+                        if accepted: return
+                        continue
+                    if action.status == 'blocked':
+                        record['result'] = action.explanation
+                        self.state.update(status='blocked', message='模型无法继续：' + action.explanation)
+                        return
+                    if discrete:
+                        self.state.update(status='executing', message='执行环境原生命令。')
+                        try:
+                            result = await self.worker.execute({'action':'environment_action',
+                                'generation':obs['generation'], 'environment_action':action.action})
+                            record['result'] = result
+                        except Exception as exc:
+                            if getattr(exc, 'status_code', None) != 400: raise
+                            record['result'] = '环境动作被拒绝：'+str(exc.detail)
+                        log.write('execution', record)
+                        with self.worker.lock: executed = self.worker.snapshot.copy()
+                        if self.state['evaluator_stop'] and environment_success(executed):
+                            self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
+                        continue
+                    self.state.update(status='executing', message='通过当前环境的末端控制器执行目标位姿。')
                     try:
-                        result = await self.worker.execute({'action':'environment_action',
-                            'generation':obs['generation'], 'environment_action':action.action})
-                        record['result'] = result
+                        result = await self.worker.execute({'action': 'move_tcp', 'generation': obs['generation'], 'pose': action.model_dump()})
+                        if 'joint_targets_rad' in result:
+                            record['ik'] = result['joint_targets_rad']
+                        if 'controller' in result:
+                            record['controller'] = result['controller']
                     except Exception as exc:
+                        # Rejecting a physical target is feedback for replanning, not successful motion.
                         if getattr(exc, 'status_code', None) != 400: raise
-                        record['result'] = '环境动作被拒绝：'+str(exc.detail)
-                    log.write('execution', record)
-                    with self.worker.lock: executed = self.worker.snapshot.copy()
-                    if self.state['evaluator_stop'] and environment_success(executed):
-                        self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
-                    continue
-                self.state.update(status='executing', message='通过当前环境的末端控制器执行目标位姿。')
-                try:
-                    result = await self.worker.execute({'action': 'move_tcp', 'generation': obs['generation'], 'pose': action.model_dump()})
-                    if 'joint_targets_rad' in result:
-                        record['ik'] = result['joint_targets_rad']
-                    if 'controller' in result:
-                        record['controller'] = result['controller']
-                except Exception as exc:
-                    # Rejecting a physical target is feedback for replanning, not successful motion.
-                    if getattr(exc, 'status_code', None) != 400: raise
-                    record['result'] = 'IK/动作被拒绝：' + str(exc.detail)
-                    log.write('execution', record)
-                    self.state['message'] = record['result']
-                    continue
-                deadline = time.monotonic() + 45
-                while time.monotonic() < deadline:
-                    await asyncio.sleep(.08)
-                    with self.worker.lock: snapshot = self.worker.snapshot
-                    if not snapshot.get('ready'): raise RuntimeError(snapshot.get('error', '仿真服务异常。'))
-                    if snapshot['generation'] != obs['generation']: raise RuntimeError('机械臂已切换，当前任务停止。')
-                    if self.state['evaluator_stop'] and environment_success(snapshot):
-                        record['result'] = {'status': 'verified', 'actual_tcp': snapshot['tcp_pose']}
+                        record['result'] = 'IK/动作被拒绝：' + str(exc.detail)
                         log.write('execution', record)
-                        self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
-                    if snapshot['time'] - initial_state['time'] >= self.state['max_sim_time_s'] - 1e-8:
-                        record['result'] = {'status': 'limit', 'actual_tcp': snapshot['tcp_pose']}
-                        log.write('execution', record)
-                        self.state.update(status='limit', message='已达到本次任务的仿真时间上限。'); return
-                    status = snapshot['task']['status']
-                    if status not in ('running', 'settling'):
-                        record['result'] = {'status': status, 'actual_tcp': snapshot['tcp_pose'],
-                            'message': snapshot['task'].get('message'),
-                            'joint_errors_rad': snapshot['task'].get('joint_errors_rad'),
-                            'contacts': snapshot['task'].get('contacts'),
-                            'position_error_m': snapshot['task'].get('position_error_m'),
-                            'orientation_error_rad': snapshot['task'].get('orientation_error_rad')}
-                        log.write('execution', record)
-                        break
-                else: raise TimeoutError('动作在 45 秒内没有完成，请检查仿真速度与接触。')
+                        self.state['message'] = record['result']
+                        continue
+                    deadline = time.monotonic() + 45
+                    while time.monotonic() < deadline:
+                        await asyncio.sleep(.08)
+                        with self.worker.lock: snapshot = self.worker.snapshot
+                        if not snapshot.get('ready'): raise RuntimeError(snapshot.get('error', '仿真服务异常。'))
+                        if snapshot['generation'] != obs['generation']: raise RuntimeError('机械臂已切换，当前任务停止。')
+                        if self.state['evaluator_stop'] and environment_success(snapshot):
+                            record['result'] = {'status': 'verified', 'actual_tcp': snapshot['tcp_pose']}
+                            log.write('execution', record)
+                            self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
+                        if snapshot['time'] - initial_state['time'] >= self.state['max_sim_time_s'] - 1e-8:
+                            record['result'] = {'status': 'limit', 'actual_tcp': snapshot['tcp_pose']}
+                            log.write('execution', record)
+                            self.state.update(status='limit', message='已达到本次任务的仿真时间上限。'); return
+                        status = snapshot['task']['status']
+                        if status not in ('running', 'settling'):
+                            record['result'] = {'status': status, 'actual_tcp': snapshot['tcp_pose'],
+                                'message': snapshot['task'].get('message'),
+                                'joint_errors_rad': snapshot['task'].get('joint_errors_rad'),
+                                'contacts': snapshot['task'].get('contacts'),
+                                'position_error_m': snapshot['task'].get('position_error_m'),
+                                'orientation_error_rad': snapshot['task'].get('orientation_error_rad')}
+                            log.write('execution', record)
+                            break
+                    else: raise TimeoutError('动作在 45 秒内没有完成，请检查仿真速度与接触。')
             self.state.update(status='round_complete' if one_round else 'limit',
                 message='本轮已结束；任务结果以环境验收为准。' if one_round else '已达到轮数上限，环境未确认任务完成。')
         except asyncio.CancelledError:

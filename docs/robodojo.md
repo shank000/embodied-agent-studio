@@ -9,7 +9,7 @@ RoboDojo 使用自己的 **Isaac Sim 5.1 + 官方定制 IsaacLab / CuRobo** 运�
 | 功能 | 行为与条件 |
 | --- | --- |
 | 官方目录 | 固定版本的 54 个可运行任务配置、5 个能力维度、双 ARX X5 本体 |
-| 评测计划 | 选择任务、种子、外部策略和回合数，下载含参数数组的 JSON；不会启动 SDK 或模型 |
+| 评测计划 | 选择任务、种子、外部策略和回合数，下载 JSON 或可移植 Linux 脚本；不会启动 SDK 或模型 |
 | 原生执行入口 | Linux 上完成独立依赖和资产配置、静态检查通过后，启动官方评测客户端，保留日志和终局结果 |
 | 结果导入 | 无需仿真运行环境；校验并保存官方 `_result.json`，进入现有实验结果与分析 |
 | 视频 | 可选复制与该结果一致的本机目录中的官方回合视频；默认不复制 |
@@ -36,6 +36,8 @@ python tools/setup-robodojo.py
 ```
 
 默认放在 `vendor/robodojo`，可用 `--source-root` 指定其他目录。工具保留用户源码修改和已有资产；它不会安装 SDK、下载仿真资产、接受 NVIDIA 许可、修改系统驱动或安装训练模型。固定 gitlink 的子模块使用 `--checkout`，不会追踪 `--remote` 的最新分支。
+
+源码准备会为未修改的官方 Shell 脚本恢复 LF 换行，解决 Windows 检出后在 Linux / WSL 中出现 `pipefail\r` 的问题。存在实际内容修改时会停止并保留文件。
 
 在独立 Linux GPU 机器上，按[官方安装说明](https://robodojo-benchmark.com/doc/usage/install-and-download/)配置 Python 3.11、Torch 2.7.0 / CUDA 12.8、Isaac Sim 5.1.0，以及上表两个官方 fork。官方建议 Ubuntu 22.04、32 GB 内存、16 GB 显存和匹配 NVIDIA 驱动；以固定版本文档及实际兼容检查为准。官方安装脚本包含系统安装、环境初始化和许可相关操作，应先阅读再按该机器条件执行。
 
@@ -90,6 +92,10 @@ bash scripts/robodojo.sh client --task stack_bowls \
 `doctor` 的跳过选项只检查相应源码 / 配置，不能当作完整依赖验收。去掉 `--dry-run` 前应完成 SDK、资产和策略服务准备。`demo_policy` 是接线示例，不保证任务成功。官方另有 `server`、`eval`、`smoke`、`benchmark` 和 `summarize` 入口；完整协议以[官方快速评测说明](https://robodojo-benchmark.com/doc/usage/quick-evaluation/)及本次固定版本源码为准。
 
 工作台“生成计划”输出官方 `client` 命令的参数数组及源码目录，生成与下载不执行其中内容。运行按钮使用配置的独立 Python 启动同一版本 `src/eval_client/main.py`，单环境顺序执行选定任务和种子；每次调用有独立运行 ID、墙钟超时和日志。策略服务由用户在外部启动，工作台不会隐式启动或付费调用一个普通模型。
+
+在“官方基准 → RoboDojo”选择任务并配置策略后，点击“生成计划”，再点击“生成 Linux 运行脚本”。脚本在已准备好的官方源码根目录运行（或用 `ROBODOJO_ROOT` 指定），支持 `--dry-run` 检查命令，不含本机 Windows 绝对路径。实际运行前需激活官方依赖环境并启动 XPolicyLab 策略服务。脚本核对固定提交、覆盖继承的回合数、为每个任务生成独立运行 ID，并执行整份计划的墙钟上限；产物保留在官方 `eval_result/RoboDojo` 下，可在工作台导入。
+
+修改任务或参数会作废之前的计划和下载链接，须重新生成。界面可设置整次评测墙钟上限和视频复制选项；原生作业显示当前任务、种子和已归档数量。停止、超时或异常退出后仍归档已经生成的有效终局，父作业保留实际停止／错误状态。已归档数量不代表所有回合完成，也不代表机器人任务成功。
 
 ## 策略接入边界
 
