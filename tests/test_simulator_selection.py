@@ -79,7 +79,7 @@ class SelectionApiTests(unittest.IsolatedAsyncioTestCase):
         self.worker.execute.assert_not_awaited()
 
     async def test_out_of_scope_engine_and_arbitrary_command_are_not_executable(self):
-        for engine in ('omnigibson', 'habitat', 'cmd.exe'):
+        for engine in ('habitat', 'cmd.exe'):
             self.assertEqual((await self.request(engine)).status_code, 422)
         self.worker.execute.assert_not_awaited()
 
@@ -366,18 +366,23 @@ class FrozenBackendContractTests(unittest.TestCase):
                 base.mkdir();(base/'python.exe').write_bytes(b'base fixture')
                 self.assertTrue(simulators.runtime_info('genesis')['installed'])
 
-    def test_robodojo_is_discoverable_without_becoming_an_interactive_backend(self):
+    def test_robodojo_interactive_adapter_is_discoverable_without_claiming_a_runtime(self):
         with patch.object(simulators, 'runtime_info', return_value={'installed':False, 'kind':'native', 'version':None}):
             directory = simulators.catalog('mujoco')
         entry = next(item for item in directory['backends'] if item['id']=='robodojo')
         self.assertEqual(directory['active'],'mujoco')
-        self.assertEqual(entry['kind'],'benchmark')
-        self.assertEqual(entry['status'],'external_runtime')
-        self.assertIsNone(entry['installed'])
-        self.assertNotIn('robodojo',simulators.RUNTIMES)
-        self.assertNotIn('robodojo',simulators.EVALUATORS)
-        self.assertIn('Isaac Sim 5.1',entry['description'])
-        self.assertNotIn('load',entry['capabilities'])
+        self.assertEqual(entry['status'],'not_installed')
+        self.assertFalse(entry['installed'])
+        self.assertTrue(entry['implemented'])
+        self.assertTrue(entry['benchmark_entry'])
+        self.assertIn('robodojo',simulators.RUNTIMES)
+        self.assertIn('robodojo',simulators.EVALUATORS)
+        self.assertIn('Isaac Sim 5.1',entry['requirements'])
+        self.assertIn('load',entry['capabilities'])
+        self.assertNotIn('restore',entry['capabilities'])
+        self.assertNotIn('camera',entry['capabilities'])
+        self.assertEqual(len(entry['scenes']),54)
+        self.assertEqual(entry['integration']['native_validation'],'not_recorded')
 
     def test_posix_install_detection_uses_independent_environment_python_version(self):
         with tempfile.TemporaryDirectory(prefix='backend-install-') as folder:

@@ -194,7 +194,21 @@ def calculate_call_cost(call, quote):
               'reference_calls': int(kind == 'reference'), 'local_calls': int(kind == 'local'),
               'basis': quote.get('basis', 'recorded_snapshot'), 'warnings': [], 'breakdown': [],
               'price_sources': [], 'has_reference': kind == 'reference', 'pricing': quote}
+    result.update(evidence_type={'api': 'price_estimate', 'reference': 'subscription_reference',
+                                 'local': 'local_no_api_fee'}.get(kind, 'unknown'))
+    for field in ('call_id', 'parent_call_id', 'trace_id', 'decision_id', 'billing_scope'):
+        if call.get(field) is not None: result[field] = call[field]
     warnings = result['warnings']
+    if call.get('harness') == 'dsh' and call.get('dsh_assistant_messages', 0) > 1:
+        warnings.append('dsh 本轮包含多次模型请求；汇总用量缺少逐请求价格档位与缓存明细，无法完整估算。')
+        return result
+    if call.get('harness') == 'claude_code':
+        reported = call.get('cli_total_cost_usd')
+        if isinstance(reported, (float, int)) and not isinstance(reported, bool) and 0 <= reported < float('inf'):
+            result['cli_reported_cost_usd'] = reported
+            warnings.append(f'Claude Code 自报本轮汇总费用参考 USD {reported:.6f}，不是实际账单，也未按本平台价格快照复算。')
+        warnings.append('Claude Code 返回的是多次内部请求的汇总用量，缺少逐请求价格档位与缓存明细；不将其当作单次请求估算 API 总额。')
+        return result
     for key in ('message', 'refresh_error'):
         if quote.get(key): warnings.append(str(quote[key]))
     warnings.extend(str(value) for key, value in _mapping(quote.get('unsupported')).items()
@@ -250,8 +264,61 @@ def calculate_call_cost(call, quote):
     return result
 
 
+def account_billing_scopes(costs):
+    """Exclude children only under an explicitly inclusive ancestor in this trace.
+
+    An absent inclusive bill remains unknown, never a zero-priced child. The
+    original component estimate remains in each call; this is an aggregation view.
+    """
+    costs = list(costs)
+    by_id = {(cost.get('trace_id'), cost['call_id']): cost for cost in costs if cost.get('call_id')}
+    result = []
+    seen = set()
+    for original in costs:
+        identity = (original.get('trace_id'), original.get('call_id'))
+        if original.get('call_id'):
+            if identity in seen: continue
+            seen.add(identity)
+        cost = deepcopy(original)
+        ancestor = cost.get('parent_call_id'); covered_by = None; chain = {cost.get('call_id')}
+        cycle = False
+        while ancestor:
+            if ancestor in chain:
+                cycle = True; break
+            chain.add(ancestor)
+            parent = by_id.get((cost.get('trace_id'), ancestor))
+            if parent is None: break
+            if parent.get('billing_scope') == 'inclusive': covered_by = ancestor
+            ancestor = parent.get('parent_call_id')
+        invalid = cycle or cost.get('billing_scope') == 'unknown' or (cost.get('billing_scope') == 'included' and not covered_by)
+        if invalid:
+            cost.update(status='unavailable', amount_usd=None, reference_amount_usd=None,
+                        known_amount_usd=0., known_reference_amount_usd=0., priced_calls=0,
+                        missing_calls=cost.get('total_calls', 1))
+            cost.pop('amount_min_usd', None); cost.pop('amount_max_usd', None)
+            cost.pop('reference_amount_min_usd', None); cost.pop('reference_amount_max_usd', None)
+            cost.setdefault('warnings', []).append('计费范围无法核对：父调用缺失、非含子项总价或关联循环；不将此项按免费处理。')
+        elif covered_by:
+            cost.update(status='reference' if cost.get('has_reference') else 'complete',
+                        amount_usd=None if cost.get('has_reference') else 0., known_amount_usd=0.,
+                        reference_amount_usd=0. if cost.get('has_reference') else None,
+                        known_reference_amount_usd=0., priced_calls=cost.get('total_calls', 1), missing_calls=0,
+                        excluded_from_total=True, covered_by_call_id=covered_by, breakdown=[])
+            for key in ('amount_min_usd', 'amount_max_usd', 'reference_amount_min_usd', 'reference_amount_max_usd'):
+                cost.pop(key, None)
+            cost['warnings'] = [f'此调用金额已包含于父调用 {covered_by}，合计不重复计入。']
+        result.append(cost)
+    return result
+
+
 def aggregate_costs(costs, *, basis=None):
     costs = list(costs)
+    # Retain only cost records when a tree crosses aggregation groups. Ordinary
+    # flat historical summaries keep their existing compact representation.
+    scoped = any(cost.get('billing_entries') or cost.get('parent_call_id') or
+                 cost.get('billing_scope') in ('inclusive', 'included', 'unknown') for cost in costs)
+    originals = [entry for cost in costs for entry in (cost.get('billing_entries') or [cost])] if scoped else costs
+    costs = account_billing_scopes(originals)
     bases = {cost.get('basis') for cost in costs if cost.get('basis')}
     result = {'status': 'unavailable', 'currency': 'USD', 'amount_usd': None, 'known_amount_usd': 0.,
               'reference_amount_usd': None, 'known_reference_amount_usd': 0.,
@@ -260,6 +327,17 @@ def aggregate_costs(costs, *, basis=None):
     for key in ('total_calls', 'priced_calls', 'missing_calls', 'billable_calls', 'reference_calls', 'local_calls'):
         result[key] = sum(cost.get(key, 0) for cost in costs)
     result['call_count_incomplete'] = any(cost.get('call_count_incomplete') for cost in costs)
+    if scoped:
+        result['billing_entries'] = deepcopy(originals)
+        result['excluded_calls'] = sum(bool(cost.get('excluded_from_total')) for cost in costs)
+    result['evidence_totals'] = {}
+    for cost in costs:
+        groups = cost.get('evidence_totals') or {cost.get('evidence_type', 'unknown'):
+            {'known_amount_usd': cost.get('known_amount_usd', 0),
+             'known_reference_amount_usd': cost.get('known_reference_amount_usd', 0)}}
+        for kind, amounts in groups.items():
+            target = result['evidence_totals'].setdefault(kind, {'known_amount_usd': 0., 'known_reference_amount_usd': 0.})
+            for field in target: target[field] = float(_sum((target[field], amounts.get(field, 0))))
     result['known_amount_usd'] = float(_sum(cost.get('known_amount_usd', 0) for cost in costs))
     result['known_reference_amount_usd'] = float(_sum(cost.get('known_reference_amount_usd', 0) for cost in costs))
     result['has_reference'] = any(cost.get('has_reference') for cost in costs)

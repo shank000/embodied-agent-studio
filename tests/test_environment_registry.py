@@ -19,24 +19,23 @@ class _WindowsWorkspace(PureWindowsPath):
 
 class EnvironmentRegistryTests(unittest.TestCase):
     def test_only_requested_and_previously_integrated_engines_are_registered(self):
-        expected = {'mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'alfworld_thor', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365'}
+        expected = {'mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'alfworld_thor', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365', 'robodojo', 'omnigibson'}
         self.assertEqual(set(simulators.EVALUATORS), expected)
         self.assertEqual(set(simulators.RUNTIMES), expected-{'mujoco'})
-        for unsupported in ('omnigibson', 'habitat', 'pybullet'):
+        for unsupported in ('habitat', 'pybullet'):
             with self.subTest(engine=unsupported), self.assertRaises(ValueError):
                 simulators.runtime_python(unsupported)
 
     def test_catalog_has_real_task_metadata_without_starting_optional_sdks(self):
         sdk_modules = {'genesis', 'mani_skill', 'sapien', 'libero', 'alfworld', 'ai2thor', 'isaaclab', 'isaacsim', 'newton'}
         before = {name for name in sys.modules if name.split('.')[0] in sdk_modules}
-        with patch.object(subprocess, 'Popen', side_effect=AssertionError('Catalog must not launch SDKs')):
+        # Readiness uses Git/version probes, tested separately; catalog adapters
+        # must never construct native SDKs just to return task metadata.
+        with patch('server.robodojo.readiness', return_value={'ready': False, 'checks': []}), \
+             patch.object(subprocess, 'Popen', side_effect=AssertionError('Catalog must not launch SDKs')):
             catalog = simulators.catalog()
-            self.assertEqual({row['id'] for row in catalog['backends']}, set(simulators.EVALUATORS)|{'robodojo'})
+            self.assertEqual({row['id'] for row in catalog['backends']}, set(simulators.EVALUATORS))
             for row in catalog['backends']:
-                if row['id']=='robodojo':
-                    self.assertEqual(row['kind'],'benchmark')
-                    self.assertNotIn('load',row['capabilities'])
-                    continue
                 models, scenes, tasks = simulators.supported_catalog(row['id'])
                 self.assertEqual(set(row['models']), set(models))
                 self.assertEqual(set(row['scenes']), set(scenes))

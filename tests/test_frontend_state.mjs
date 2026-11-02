@@ -4,6 +4,8 @@ import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import {setTaskDraft,syncTaskDraft} from '../src/task_drafts.js';
+import {taskGraphMarkup} from '../src/task_graph.js';
+import {effectiveHarness,harnessCompatibility,harnessReasoningError} from '../src/agent_harness.js';
 
 class Element {
   constructor(tag='div', id='') { this.tagName=tag;this.id=id;this.children=[];this.dataset={};this.value='';this.hidden=false;this.disabled=false;this.open=false;this.scrollTop=0;this.scrollLeft=0;this.classList={toggle(){}}; }
@@ -20,6 +22,7 @@ class Element {
   append(...nodes) { for(const node of nodes)this.insertBefore(node,null);if(this.tagName==='select'&&!this.options.some(option=>option.value===this.value))this.value=this.options[0]?.value||''; }
   insertBefore(node,before) { node.remove();const index=before?this.children.indexOf(before):this.children.length;this.children.splice(index,0,node);node.parentElement=this; }
   remove() { if(this.parentElement){const list=this.parentElement.children;list.splice(list.indexOf(this),1);this.parentElement=null;} }
+  get nextElementSibling() { const list=this.parentElement?.children||[];return list[list.indexOf(this)+1]||null; }
   querySelectorAll(selector) {
     const matches=node=>selector.split(',').some(part=>{const [tag,cls]=part.split('.');return (!tag||node.tagName===tag)&&(!cls||(node.className||'').split(' ').includes(cls));});
     return this.children.flatMap(node=>[...(matches(node)?[node]:[]),...node.querySelectorAll(selector)]);
@@ -27,6 +30,7 @@ class Element {
   querySelector(selector) { return this.querySelectorAll(selector)[0]||null; }
   insertAdjacentHTML(_,value) { this.html=(this.html||'')+value; }
   setAttribute() {}
+  removeAttribute(name) { delete this[name]; }
   addEventListener(type,listener) { (this.listeners??={})[type]=listener; }
   focus() { this.focused=true; }
   after() {}
@@ -34,7 +38,7 @@ class Element {
 
 function moduleContext(file,extra={}) {
   const nodes=new Map(),element=id=>{if(!nodes.has(id))nodes.set(id,new Element('div',id));return nodes.get(id);};
-  const scope=vm.createContext({renderRoundTimeline(){},renderExperimentCosts(){},console,URLSearchParams,setTaskDraft,syncTaskDraft,window:{addEventListener(){}},...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
+  const scope=vm.createContext({renderRoundTimeline(){},renderExperimentCosts(){},renderProgramAnalysis(){},taskGraphMarkup,console,URLSearchParams,setTaskDraft,syncTaskDraft,window:{addEventListener(){}},...extra,document:{querySelector:selector=>element(selector.slice(1)),querySelectorAll:()=>[],createElement:tag=>new Element(tag)},Option:function(name,value){const option=new Element('option');option.textContent=name;option.value=value;return option;}});
   const code=readFileSync(new URL('../src/'+file,import.meta.url),'utf8').replace(/^import .*;\s*$/gm,'').replace(/\bexport /g,'');
   vm.runInContext(code,scope);
   return {scope,element,run:code=>vm.runInContext(code,scope)};
@@ -105,6 +109,25 @@ test('historical experiment timer is not overwritten by a different live run',()
   assert.equal(timers.get('rsi-experiment-time').run_id,'B');
 });
 
+test('run timer distinguishes no requests, completed requests and an active request',()=>{
+  const {scope,element,run}=moduleContext('research.js');
+  scope.timerRun={active:false,timing:{elapsed_wall_s:0,inference_elapsed_s:0,current_inference_s:0,active_calls:0,inference_calls:0}};
+  run("renderRunTimer(document.querySelector('#timer'),timerRun)");
+  assert.match(element('timer').innerHTML,/暂无推理请求/);
+  Object.assign(scope.timerRun.timing,{elapsed_wall_s:23.55,inference_elapsed_s:22.09,inference_calls:1});
+  run("renderRunTimer(document.querySelector('#timer'),timerRun)");
+  assert.match(element('timer').innerHTML,/22\.09 s/);
+  assert.match(element('timer').innerHTML,/当前无进行中的推理请求/);
+  assert.doesNotMatch(element('timer').innerHTML,/暂无推理请求/);
+  Object.assign(scope.timerRun.timing,{inference_elapsed_s:0,inference_calls:1});
+  run("renderRunTimer(document.querySelector('#timer'),timerRun)");
+  assert.match(element('timer').innerHTML,/当前无进行中的推理请求/);
+  Object.assign(scope.timerRun.timing,{active_calls:1,current_inference_s:3.5});
+  run("renderRunTimer(document.querySelector('#timer'),timerRun)");
+  assert.match(element('timer').innerHTML,/当前请求等待 <strong>3\.50 s/);
+  assert.doesNotMatch(element('timer').innerHTML,/暂无推理请求|当前无进行中的推理请求/);
+});
+
 test('inactive configuration controls are disabled and regain their entered values when visible',()=>{
   const {element,run}=moduleContext('rsi.js');
   for(const [parent,children] of Object.entries({
@@ -130,6 +153,104 @@ test('inactive configuration controls are disabled and regain their entered valu
   assert.equal(element('rsi-agent-url').disabled,true);
 });
 
+test('RSI legacy provider shortcut clears the previous harness and keeps custom URL migratable',()=>{
+  const {element,run}=moduleContext('rsi.js');
+  element('rsi-mode').value='agent';element('rsi-decision-strategy').value='single';
+  for(const [provider,harness] of [['codex','codex_cli'],['openai','workbench'],['compatible','workbench'],['anthropic','workbench'],['custom','http']]){
+    element('rsi-agent-json').value=JSON.stringify({provider:'openai',harness:'http',harness_url:'https://old.example/agent',forward_model_key:true,model:'kept-model',base_url:'https://model.example/v1',timeout_s:180});
+    run('updateMode();');element('rsi-agent-source').value=provider;run('updateAgentJson(true);');
+    const agent=JSON.parse(element('rsi-agent-json').value);
+    assert.equal(agent.provider,provider);assert.equal(effectiveHarness(agent),harness);
+    for(const key of ['harness','harness_url','forward_model_key'])assert.equal(Object.hasOwn(agent,key),false);
+    assert.equal(agent.model,'kept-model');assert.equal(agent.timeout_s,180);
+  }
+  element('rsi-agent-url').value='https://new.example/agent';run('updateAgentJson();');
+  const custom=JSON.parse(element('rsi-agent-json').value);
+  assert.equal(custom.provider,'custom');assert.equal(custom.base_url,'https://new.example/agent');
+  assert.equal(Object.hasOwn(custom,'harness_url'),false);
+});
+
+test('RSI model edits preserve the explicit advanced harness from public defaults',()=>{
+  const {element,run}=moduleContext('rsi.js');
+  element('rsi-mode').value='agent';element('rsi-decision-strategy').value='single';
+  for(const [provider,harness] of [['openai','http'],['custom','http'],['anthropic','claude_code'],
+                                  ['openai','dsh'],['compatible','dsh'],['anthropic','dsh']]){
+    const agent={provider,harness,harness_url:'https://harness.example/agent',forward_model_key:harness==='http'&&provider!=='custom',model:'initial-model',base_url:'https://api.openai.com/v1'};
+    element('rsi-agent-json').value=JSON.stringify(agent);run('updateMode();');
+    assert.equal(element('rsi-agent-url').value,provider==='custom'?agent.harness_url:agent.base_url);
+    element('rsi-agent-model').value='edited-model';run('updateAgentJson();');
+    assert.deepEqual(JSON.parse(element('rsi-agent-json').value),{...agent,model:'edited-model'});
+  }
+});
+
+test('RSI URL editing and saving target the custom harness or model API without overwriting the other',async()=>{
+  const {scope,element,run}=moduleContext('rsi.js');
+  const submissions=[],errors=[];
+  scope.fixtureRequest=async(path,payload)=>{if(path==='research/methods'&&payload){submissions.push(payload);return {method_id:'saved'};}return [];};
+  scope.fixtureToast=message=>errors.push(message);
+  run('request=fixtureRequest;refresh=async()=>{};');await run('initRsi({toast:fixtureToast});');
+  element('rsi-mode').value='agent';element('rsi-decision-strategy').value='single';
+  for(const agent of [
+    {provider:'custom',harness:'http',harness_url:'https://harness.example/agent',base_url:'https://model.example/v1'},
+    {provider:'custom',base_url:'https://legacy.example/agent'},
+    {provider:'openai',harness:'http',harness_url:'https://harness.example/agent',base_url:'https://model.example/v1'},
+    {provider:'anthropic',harness:'claude_code',base_url:'https://model.example/v1'},
+    {provider:'openai',harness:'dsh',base_url:'https://model.example/v1'}
+  ]){
+    agent.model='configured-model';element('rsi-agent-json').value=JSON.stringify(agent);run('updateMode();');
+    const key=agent.provider==='custom'&&agent.harness==='http'?'harness_url':'base_url';
+    element('rsi-agent-url').value='https://edited.example/endpoint';element('rsi-agent-url').listeners.change();
+    const expected={...agent,[key]:'https://edited.example/endpoint'};
+    assert.deepEqual(JSON.parse(element('rsi-agent-json').value),expected);
+    if(agent.provider==='custom')assert.match(element('rsi-agent-provider-help').textContent,/HTTP harness/);
+    element('rsi-method-form').listeners.submit({preventDefault(){}});await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(JSON.parse(JSON.stringify(submissions.at(-1).recipe.agent)),expected);
+  }
+  assert.equal(submissions.length,5);assert.deepEqual(errors,[]);
+});
+
+test('RSI runtime credentials keep custom harness authentication separate from model keys',async()=>{
+  const {scope,element,run}=moduleContext('rsi.js');
+  const submissions=[],errors=[];
+  scope.fixtureRequest=async(path,payload)=>{submissions.push({path,payload});return {};};
+  scope.fixtureToast=message=>errors.push(message);
+  scope.fixtureMethods=[
+    {method_id:'managed',recipe:{agent:{provider:'custom',harness:'http'}}},
+    {method_id:'legacy',recipe:{agent:{provider:'custom'}}},
+    {method_id:'split',recipe:{agent:{provider:'openai',harness:'http'}}},
+    {method_id:'model',recipe:{agent:{provider:'openai',harness:'workbench'}}},
+    {method_id:'claude',recipe:{agent:{provider:'anthropic',harness:'claude_code'}}},
+    {method_id:'dsh',recipe:{agent:{provider:'openai',harness:'dsh'}}}
+  ];
+  run('request=fixtureRequest;refresh=async()=>{};methods=fixtureMethods;');await run('initRsi({toast:fixtureToast});');
+  for(const id of ['managed','legacy','split','model','claude','dsh']){
+    const managed=['managed','legacy'].includes(id),separate=id==='split';
+    element('rsi-runtime-agent-key').value='old-model-key';element('rsi-runtime-harness-key').value='old-harness-key';
+    element('rsi-run-method').value=id;element('rsi-run-method').listeners.change();
+    assert.equal(element('rsi-runtime-agent-key').value,'');assert.equal(element('rsi-runtime-harness-key').value,'');
+    assert.equal(element('rsi-runtime-harness-key-field').hidden,!separate);
+    assert.equal(element('rsi-runtime-harness-key').disabled,!separate);
+    assert.equal(element('rsi-runtime-agent-label').textContent,managed?'HTTP harness 运行密钥':'Agent 模型 API Key');
+    element('rsi-runtime-agent-key').value=managed?'harness-secret':'model-secret';
+    element('rsi-runtime-harness-key').value=separate?'harness-secret':'hidden-stale-key';
+    await element('rsi-save-runtime').listeners.click();
+    const expected=managed?{agent_harness_api_key:'harness-secret'}:separate?{agent_api_key:'model-secret',agent_harness_api_key:'harness-secret'}:{agent_api_key:'model-secret'};
+    assert.deepEqual(JSON.parse(JSON.stringify(submissions.at(-1))),{path:`research/methods/${id}/credentials`,payload:expected});
+    assert.equal(element('rsi-runtime-agent-key').value,'');assert.equal(element('rsi-runtime-harness-key').value,'');
+  }
+  assert.equal(submissions.length,6);assert.deepEqual(errors,[]);
+});
+
+test('RSI recipe JSON rejects nested harness and other credential suffixes',()=>{
+  const {element,run}=moduleContext('rsi.js');
+  for(const key of ['harness_api_key','decision_api_keys','agent-harness-api-key','model_password','service_secret','service_access_token','refresh_token','credentials']){
+    element('rsi-agent-json').value=JSON.stringify({tools:[{[key]:'secret'}]});
+    assert.throws(()=>run("parseObject('#rsi-agent-json','Agent 配置');"),/不能包含密钥字段/);
+  }
+  element('rsi-agent-json').value=JSON.stringify({harness:'http',harness_url:'https://harness.example/agent',forward_model_key:true,max_output_tokens:1000});
+  assert.doesNotThrow(()=>run("parseObject('#rsi-agent-json','Agent 配置');"));
+});
+
 test('model cards and comparison entries follow the active engine catalog',()=>{
   const {scope,element,run}=moduleContext('multiarm.js');run('initMultiarm({operate(){}});');
   scope.models=['panda','dual_panda','triple_panda'].map(id=>({id,name:id,arm_dof:7,hand_dof:1}));run("updateModelCatalog(models,'dual_panda');");
@@ -137,6 +258,12 @@ test('model cards and comparison entries follow the active engine catalog',()=>{
   scope.models=[scope.models[0]];run("updateModelCatalog(models,'panda');");
   for(const id of ['compare-robot','rsi-protocol-robot'])assert.deepEqual(element(id).children.map(option=>option.value),['panda']);
   assert.deepEqual(element('model-cards').children.map(card=>card.dataset.model),['panda']);
+});
+
+test('a robot without an official thumbnail renders its identity without a broken image',()=>{
+  const {element,run}=moduleContext('multiarm.js');run("initMultiarm({operate(){}});updateModelCatalog([{id:'arx_x5',name:'ARX X5',arm_dof:6,hand_dof:1,robot_count:2}],'arx_x5')");
+  assert.equal(element('model-cards').querySelectorAll('img').length,0);
+  assert.match(element('model-cards').textContent,/ARX X5/);assert.match(element('model-cards').textContent,/×2/);
 });
 
 for(const [stateKey,path,button] of [['research','research/stop','rsi-run-stop'],['experiment','research/experiments/stop','rsi-experiment-stop']]){
@@ -180,6 +307,27 @@ test('Codex repair mode ignores stale invalid API fields in validation and paylo
   element('repair-provider').value='openai';run('providerFields();');
   assert.equal(element('repair-base').disabled,false);
   assert.equal(element('repair-tokens').disabled,false);
+});
+
+test('repair custom service reopens its harness endpoint and saved credential without changing model API providers',async()=>{
+  const {scope,element,run}=moduleContext('repair.js');
+  const errors=[];scope.fixtureToast=message=>errors.push(message);
+  run('context={toast:fixtureToast};request=async path=>path==="config"?fixtureConfig:path==="sources"?[]:{};');
+  let opened=0;element('repair-dialog').showModal=()=>opened++;
+  const shared={model:'repair-model',base_url:'https://model.example/v1',timeout_s:120,max_output_tokens:4096,skills:[],extra_instructions:''};
+  for(const [config,expectedUrl,hasKey] of [
+    [{provider:'custom',harness:'http',harness_url:'https://harness.example/agent',has_harness_api_key:true,has_api_key:false},'https://harness.example/agent',true],
+    [{provider:'custom',has_api_key:true},shared.base_url,true],
+    [{provider:'openai',harness_url:'https://harness.example/agent',has_harness_api_key:true,has_api_key:false},shared.base_url,false]
+  ]){
+    scope.fixtureConfig={...shared,...config};element('repair-key').value='stale-secret';await run('show();');
+    assert.equal(element('repair-base').value,expectedUrl);
+    assert.equal(element('repair-key').value,'');
+    assert.equal(element('repair-key').placeholder.includes('已配置'),hasKey);
+    assert.equal(run('payload().base_url'),expectedUrl);
+    assert.equal(run('payload().api_key'),'');
+  }
+  assert.equal(opened,3);assert.deepEqual(errors,[]);
 });
 
 test('automatic retry alone is visibly inactive until automatic diagnosis is enabled',()=>{
@@ -234,15 +382,24 @@ test('partial token totals retain known usage without claiming a complete total'
 });
 
 test('Agent provider fields disable hidden token inputs and restore API validation',()=>{
-  const {element,run}=moduleContext('repair.js',{URL});
+  const {element,run}=moduleContext('repair.js',{URL,effectiveHarness,harnessCompatibility,harnessReasoningError,selectedReasoning:()=>null});
   const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
   run('const capabilityLoading=false;function reasoningFields(){};'+source.slice(source.indexOf('function providerFields(){'),source.indexOf("\n$('#config-base-url').addEventListener")));
   for(const id of ['config-base-url','config-api-key']){element(id).tagName='input';element('api-config-fields').append(element(id));}
   element('config-base-url').value='invalid-url';element('config-output-tokens').value='invalid-number';
   for(const provider of ['codex','custom','openai']){
     element('config-provider').value=provider;run('providerFields();');
-    assert.equal(element('config-output-tokens').disabled,provider!=='openai');
-    assert.equal(element('config-base-url').disabled,provider==='codex');
+    assert.equal(element('config-output-tokens').disabled,provider==='codex');
+    assert.equal(element('config-base-url').disabled,['codex','custom'].includes(provider));
+  }
+  for(const [harness,provider] of [['claude_code','anthropic'],['dsh','openai'],['dsh','compatible'],['dsh','anthropic']]){
+    element('config-harness').value=harness;element('config-provider').value=provider;run('providerFields();');
+    assert.equal(element('config-output-tokens').disabled,false);
+    assert.equal(element('api-budget-fields').hidden,false);
+    assert.equal(element('config-base-url').disabled,false);
+    assert.equal(element('config-api-key').disabled,false);
+    assert.equal(element('harness-http-fields').hidden,true);
+    assert.equal(element('apply-agent-config').disabled,false);
   }
 });
 
@@ -354,6 +511,32 @@ test('opening a workbench already in a native environment initializes its own ta
   assert.equal(element('policy-task').value,'Put the vase in the safe');
 });
 
+test('OmniGibson scene controls use the selected task instance range and reset an invalid prior seed',()=>{
+  const {element,run}=resultsContext();
+  run("researchControlsLocked=false;catalog={engine_id:'omnigibson',scenes:[{id:'house',description:'House',tasks:['many','one','missing'],instances:{many:[2,5,9],one:[7],missing:[]}}],tasks:{many:{},one:{},missing:{}}};");
+  element('scene-select').value='house';element('task-select').value='many';element('scene-seed').value='42';
+  run('updateSceneInfo()');
+  assert.equal(element('scene-seed').value,'0');assert.equal(element('scene-seed').max,'2');
+  assert.match(element('scene-description').textContent,/3 个预采样实例.*0–2/);
+  element('scene-seed').value='2';element('task-select').value='one';run('updateSceneInfo()');
+  assert.equal(element('scene-seed').value,'0');assert.equal(element('scene-seed').max,'0');
+  element('task-select').value='missing';run('updateSceneInfo()');
+  assert.equal(element('apply-scene').disabled,true);assert.match(element('scene-description').textContent,/尚未安装/);
+  run("catalog.engine_id='mujoco';updateSceneInfo()");
+  assert.equal(element('scene-seed').max,'4294967295');assert.equal(element('scene-seed').title,'');assert.equal(element('apply-scene').disabled,false);
+});
+
+test('OmniGibson apply rejects a manually entered instance outside the selected task range',async()=>{
+  const {scope,element,run}=resultsContext();scope.commands=[];scope.messages=[];
+  scope.nativeCatalog={engine_id:'omnigibson',scenes:[{id:'house',description:'House',name:'House',tasks:['put'],instances:{put:[7]}}],tasks:{put:{name:'Put',instruction:'Put'}}};
+  run("request=async path=>path==='scenes'?nativeCatalog:{};");
+  await run('initResearch({toast:message=>messages.push(message),operate:command=>commands.push(command),selectTab(){}})');
+  element('scene-seed').value='42';await element('apply-scene').listeners.click();
+  assert.equal(scope.commands.length,0);assert.match(scope.messages[0],/0–0/);
+  element('scene-seed').value='0';await element('apply-scene').listeners.click();
+  assert.equal(scope.commands.length,1);assert.equal(scope.commands[0].seed,0);
+});
+
 test('composition rejection history renders without an action or selected candidate',()=>{
   const {scope,element,run}=moduleContext('rsi.js');
   scope.fixtureRun={run_id:'composition',step:4,history:[{step:4,result:{status:'completion_rejected',message:'环境尚未验收，请重新规划。'}}]};
@@ -416,6 +599,7 @@ test('a rejected scene application does not replace task drafts with an unapplie
   scope.nativeCatalog={engine_id:'fixture',scenes:[{id:'room',name:'Room',tasks:['one','two']}],tasks:{one:{name:'One',instruction:'First task'},two:{name:'Two',instruction:'Second task'}}};
   run("request=async path=>path==='scenes'?nativeCatalog:{}");
   await run('initResearch({toast(){},operate:async()=>null,selectTab(){}})');
+  element('scene-seed').value='42'; // Match the real HTML input's valid default.
   element('task-select').value='two';element('command').value='Keep this task';element('policy-task').value='Keep policy task';
   await element('apply-scene').listeners.click();
   assert.equal(element('command').value,'Keep this task');assert.equal(element('policy-task').value,'Keep policy task');
@@ -460,6 +644,99 @@ test('environments without camera controls retain normal page scrolling and do n
   assert.deepEqual(calls,['prevented',1,'prevented','camera']);
 });
 
+test('native fixed camera presets are displayed without advertising free camera movement',()=>{
+  const {scope,element,run}=moduleContext('repair.js');
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
+  run(source.slice(source.indexOf('const defaultViews='),source.indexOf('const environmentBudget=')));
+  const actions=[];scope.operate=payload=>actions.push(payload);
+  scope.native={backend:{capabilities:['view','observe']},view_presets:[{id:'head',label:'头部相机'},{id:'left_wrist',label:'左腕相机'},{id:'right_wrist',label:'右腕相机'}]};
+  run('renderViewPresets(native)');
+  assert.deepEqual(element('view-switch').children.map(button=>button.dataset.view),['head','left_wrist','right_wrist']);
+  assert.equal(element('viewport-bottom > span').hidden,true);assert.equal(element('view-reset').hidden,false);
+  element('view-switch').children[2].listeners.click();
+  assert.equal(JSON.stringify(actions),JSON.stringify([{action:'view',view:'right_wrist'}]));
+  scope.native={backend:{capabilities:['observe']}};run('renderViewPresets(native)');
+  assert.equal(element('view-switch').hidden,true);assert.equal(element('view-reset').hidden,true);
+  assert.equal(element('view-switch').children.length,0);
+});
+
+test('observation images retain native camera names and clear stale sources across environments',()=>{
+  const {element,run}=moduleContext('repair.js');
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
+  run(source.slice(source.indexOf('const defaultViews='),source.indexOf('const environmentBudget=')));
+  run("renderObservationCameras(['head','left_wrist','right_wrist'],'agent',{observation_id:'round-1'},true)");
+  const images=element('camera-grid').querySelectorAll('img');
+  assert.deepEqual(images.map(img=>img.src),['head','left_wrist','right_wrist'].map(name=>`/api/agent/camera/${name}?observation=round-1`));
+  assert.match(element('camera-grid').textContent,/左腕相机/);
+  run("renderObservationCameras(['front'],'policy',{observation_id:'round-2'},true)");
+  const front=element('camera-grid').querySelectorAll('img');
+  assert.equal(front.length,1);assert.equal(front[0].src,'/api/policy/camera/front?observation=round-2');
+  run("renderObservationCameras(['front'],'agent',null,false)");
+  assert.equal(front[0].hidden,true);assert.equal(front[0].src,undefined);assert.equal(front[0].nextElementSibling.hidden,false);
+});
+
+test('gripper telemetry follows the selected arm and open fraction uses percent bidirectionally',()=>{
+  const {scope,element,run}=moduleContext('repair.js');
+  const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8');
+  run(source.slice(source.indexOf('const angular='),source.indexOf('function buildJoints(){')));
+  scope.robotState={active_robot:'arm2',actuators:[{robot_id:'arm1',is_gripper:true,unit:'open_fraction',actual:.2},{robot_id:'arm2',is_gripper:true,unit:'open_fraction',actual:.85}]};
+  run('renderGripper(robotState)');
+  assert.equal(element('gripper-status').textContent,'85.0%');assert.match(element('gripper-detail').textContent,/0% 闭合 \/ 100% 张开/);
+  assert.equal(run("toDisplay({unit:'open_fraction'},.4)"),40);assert.equal(run("fromDisplay({unit:'open_fraction'},40)"),.4);
+  scope.robotState.active_robot='arm1';run('renderGripper(robotState)');assert.equal(element('gripper-status').textContent,'20.0%');
+  scope.robotState.active_robot='missing';run('renderGripper(robotState)');assert.equal(element('gripper-status').textContent,'—');
+  scope.robotState={active_robot:'arm2',actuators:[{robot_id:'arm2',is_gripper:true,unit:'command',actual:.025}]};
+  run('renderGripper(robotState)');assert.equal(element('gripper-status').textContent,'50.0 mm');assert.equal(element('gripper-detail').textContent,'两指间距（实际）');
+  scope.robotState={actuators:[{is_gripper:true,unit:'rad',actual:Math.PI/2}]};
+  run('renderGripper(robotState)');assert.equal(element('gripper-status').textContent,'90.0°');assert.equal(element('gripper-detail').textContent,'夹爪关节（实际）');
+});
+
+test('lack of restorable checkpoints disables paired research but permits single method runs',()=>{
+  const {element,run}=moduleContext('rsi.js');
+  run("context={};methods=[{id:'one'},{id:'two'}];protocols=[{id:'protocol'}];currentState={ready:true,backend:{engine_id:'robodojo',action_mode:'tcp_pose',capabilities:['observe','move_tcp','checkpoint']}};renderLocks()");
+  assert.equal(element('rsi-run-start').disabled,false);assert.equal(element('rsi-run-once').disabled,false);
+  assert.equal(element('rsi-save').disabled,false);assert.equal(element('rsi-save-protocol').disabled,true);
+  assert.equal(element('rsi-experiment-start').disabled,true);assert.match(element('rsi-environment-note').textContent,/支持单次方法组合/);
+  run("currentState.backend.capabilities.push('restore');renderLocks()");
+  assert.equal(element('rsi-save-protocol').disabled,false);assert.equal(element('rsi-experiment-start').disabled,false);
+  assert.equal(element('rsi-environment-note').hidden,true);
+});
+
+test('comparison requires restorable checkpoints while custom single policy remains available',()=>{
+  const {scope,element,run}=resultsContext();
+  scope.document.querySelectorAll=selector=>selector==='input[name="method"]:checked'?[{value:'agent',disabled:false},{value:'vla',disabled:false}]:[];
+  element('policy-kind').value='vla';element('compare-robot').value='arx_x5';
+  scope.fixtureState={ready:true,model:'arx_x5',backend:{engine_id:'robodojo',capabilities:['observe','move_tcp','policy_chunk','checkpoint']}};
+  run('renderResearch(fixtureState)');
+  assert.equal(element('compare-start').disabled,true);assert.match(element('comparison-method-note').textContent,/未提供可恢复检查点/);
+  assert.equal(element('policy-start').disabled,false);assert.equal(element('policy-one-chunk').disabled,false);
+  scope.fixtureState.backend.capabilities.push('restore');run('renderResearch(fixtureState)');
+  assert.equal(element('compare-start').disabled,false);
+});
+
+test('RoboDojo policy timing rejects default 0.05 seconds and preserves other environment settings',async()=>{
+  const {scope,element,run}=resultsContext(),calls=[];
+  scope.fixtureRequest=async(path,payload)=>{calls.push({path,payload});return {};};
+  run("request=fixtureRequest;configs={vla:{dt_s:.05,endpoint:'http://localhost/policy'}}");
+  element('policy-kind').value='vla';element('policy-config-dt').value='0.05';
+  scope.fixtureState={ready:true,model:'arx_x5',timestep:.04,backend:{engine_id:'robodojo',capabilities:['observe','policy_chunk']}};
+  run('renderResearch(fixtureState)');
+  assert.equal(element('policy-start').disabled,true);assert.equal(element('policy-one-chunk').disabled,true);
+  assert.match(element('policy-model-note').textContent,/0.04、0.08/);
+  assert.equal(element('policy-config-dt').min,'0.04');assert.equal(element('policy-config-dt').step,'0.04');
+  assert.equal(element('policy-config-dt').value,'0.05');assert.equal(run('configs.vla.dt_s'),.05);
+  await run('startPolicy(false)');assert.equal(calls.length,0);assert.match(element('policy-message').textContent,/正整数倍/);
+  await run('savePolicySettings({preventDefault(){}})');assert.equal(calls.length,0);assert.match(element('policy-config-error').textContent,/正整数倍/);
+  run('configs.vla.dt_s=.08;renderResearch(fixtureState)');
+  assert.equal(element('policy-start').disabled,false);assert.equal(element('policy-one-chunk').disabled,false);
+  assert.equal(run('policyTimingError(.12)'), '');assert.match(run('policyTimingError(.06)'),/正整数倍/);
+  scope.fixtureState={ready:true,model:'panda',timestep:.002,backend:{engine_id:'mujoco',capabilities:['policy_chunk','checkpoint','restore']}};
+  run('configs.vla.dt_s=.05;renderResearch(fixtureState)');
+  assert.equal(element('policy-start').disabled,false);assert.equal(element('policy-config-dt').min,'0.02');assert.equal(element('policy-config-dt').step,'0.01');
+  assert.equal(run('configs.vla.dt_s'),.05);assert.equal(element('policy-config-dt').value,'0.05');
+  assert.doesNotMatch(element('policy-model-note').textContent,/RoboDojo/);
+});
+
 test('a replacement server session rebuilds robot controls even when generation and active arm repeat',()=>{
   const source=readFileSync(new URL('../src/main.js',import.meta.url),'utf8'),start=source.indexOf('function renderState(){')+'function renderState(){'.length;
   const body=source.slice(start,source.indexOf('const discrete=',start)),counts={build:0,clear:0};
@@ -490,7 +767,7 @@ for(const file of ['research.js','rsi.js'])test(`${file} locks execution after a
   const render=file==='research.js'?'renderResearch':'renderRsi';
   const other=file==='research.js'?'renderRsi':'renderResearch';
   scope[other]=()=>{};
-  Object.assign(scope,{enableControls(){},renderMultiarm(){},renderEnvironment(){},renderSimulator(){},renderBenchmarks(){},frame:{removeAttribute(){}},poll(){}});
+  Object.assign(scope,{enableControls(){},renderHarnessPAI(){},renderMultiarm(){},renderEnvironment(){},renderSimulator(){},renderBenchmarks(){},renderBehavior(){},frame:{removeAttribute(){}},poll(){}});
   element('status-dot').classList.remove=()=>{};
   scope.live={ready:true,session_id:'session',generation:1,model:'panda',backend:{engine_id:'mujoco'},
     agent:{active:false},policy:{active:false,run_id:'previous-run'},comparison:{active:false},research:{},experiment:{}};
@@ -524,7 +801,7 @@ test('polling distinguishes a reachable unready environment from an unreachable 
     const rendered=[],urls=[];element('#status-dot').classList.remove=()=>{};
     const scope=vm.createContext({AbortSignal,$:element,document:{createElement:tag=>new Element(tag)},
       frame:{removeAttribute(){}},enableControls(){},renderAgent(){},renderRepair(){},renderState(){},
-      renderResearch:state=>rendered.push(state),renderRsi(){},renderMultiarm(){},renderEnvironment(){},renderSimulator(){},renderBenchmarks(){},
+      renderResearch:state=>rendered.push(state),renderRsi(){},renderHarnessPAI(){},renderMultiarm(){},renderEnvironment(){},renderSimulator(){},renderBenchmarks(){},renderBehavior(){},
       fetch:async url=>{urls.push(url);if(scenario.error)throw new TypeError(scenario.error);return {ok:true,json:async()=>scenario.state};}});
     vm.runInContext('let state=null,connected=false,frameStarted=false;'+code,scope);
     await vm.runInContext('pollState()',scope);

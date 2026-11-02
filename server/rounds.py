@@ -8,14 +8,69 @@ import time
 from .task_verification import environment_success, trusted_evaluation
 
 
+def evaluation_snapshot(snapshot):
+    evaluation = deepcopy(snapshot.get('evaluation') or {})
+    valid = snapshot.get('ready') is True and trusted_evaluation(evaluation, snapshot)
+    discrete = (snapshot.get('backend') or {}).get('action_mode') in ('text', 'discrete')
+    return {'time': snapshot.get('time'), 'steps': snapshot.get('steps'),
+            'generation': snapshot.get('generation'),
+            'clock_mode': 'turn_based' if discrete else 'physics_paused',
+            'evaluation': evaluation, 'evaluation_valid': valid,
+            'success': environment_success(snapshot) if valid else None}
+
+
 def evaluation_state(worker):
     with worker.lock:
-        snapshot = worker.snapshot
-        evaluation = deepcopy(snapshot.get('evaluation') or {})
-        valid = snapshot.get('ready') is True and trusted_evaluation(evaluation, snapshot)
-        return {'time': snapshot.get('time'), 'steps': snapshot.get('steps'),
-                'evaluation': evaluation, 'evaluation_valid': valid,
-                'success': environment_success(snapshot) if valid else None}
+        return evaluation_snapshot(worker.snapshot)
+
+
+def terminal_evidence(after):
+    """Classify only trusted environment outcomes; external stopping is separate."""
+    if after.get('evaluation_valid') is not True:
+        return {'terminated': None, 'truncated': None, 'termination_reason': None}
+    evaluation = after.get('evaluation') or {}
+    graph = evaluation.get('task_graph') or {}
+    success = after.get('success') is True
+    graph_failed = graph.get('terminal_failure') is True
+    native_failed = evaluation.get('terminated') is True and evaluation.get('success') is False
+    terminated = success or graph_failed or native_failed
+    truncated = not terminated and evaluation.get('truncated') is True
+    reason = None
+    if success:
+        reason = 'task_success'
+    elif graph_failed:
+        reason = graph.get('failure_reason') or 'task_failure'
+    elif native_failed:
+        reason = evaluation.get('termination_reason') or 'task_failure'
+    elif truncated:
+        reason = evaluation.get('termination_reason') or 'environment_limit'
+    return {'terminated': terminated, 'truncated': truncated, 'termination_reason': reason}
+
+
+def transition_evidence(before, after, elapsed_s):
+    """Privileged measurements, kept separate from observations and scalar rewards."""
+    valid = before.get('evaluation_valid') is True and after.get('evaluation_valid') is True
+    bgraph = (before.get('evaluation') or {}).get('task_graph') or {}
+    graph = (after.get('evaluation') or {}).get('task_graph') or {}
+    failed = graph.get('terminal_failure') is True
+    success = after.get('success') is True
+    reward = float(success and before.get('success') is not True) if valid else None
+    result = {'reward': reward, 'reward_version': 'native-success-transition-v1',
+              **terminal_evidence(after),
+              'clock_mode': after.get('clock_mode', 'physics_paused'),
+              'reward_components_version': 'robot-decision-measurements-v1',
+              'reward_components': {'task_success': reward, 'elapsed_wall_s': elapsed_s,
+                                    'stage_potential_delta': None, 'first_achievements': None,
+                                    'constraint_violation': float(failed) if valid else None},
+              'stage_events': []}
+    if valid and graph and bgraph.get('version') == graph.get('version'):
+        result['reward_components'].update(
+            stage_potential_delta=graph.get('potential', 0)-bgraph.get('potential', 0),
+            first_achievements=graph.get('first_achievements', 0)-bgraph.get('first_achievements', 0))
+        previous = {event['id'] for event in bgraph.get('events', [])}
+        result['stage_events'] = [deepcopy(event) for event in graph.get('events', [])
+                                  if event['id'] not in previous]
+    return result
 
 
 class RoundClock:
@@ -49,7 +104,8 @@ async def measured_round(log, worker, number, state):
     clock = RoundClock(number)
     log.current_round = number
     log._round_clock = clock
-    log.write('round_start', {'round': number, 'before': before})
+    decision_id = f'{log.id}:round:{number}'
+    log.write('round_start', {'round': number, 'decision_id': decision_id, 'before': before})
     error = None
     status = 'complete'
     try:
@@ -76,11 +132,10 @@ async def measured_round(log, worker, number, state):
         after = evaluation_state(worker)
         if error is None and state.get('status') in ('verified', 'blocked', 'limit', 'replan', 'unverified'):
             status = state['status']
-        valid = before['evaluation_valid'] and after['evaluation_valid']
-        log.write('round_end', {**clock.snapshot(), 'status': status, 'error': error,
+        timing = clock.snapshot()
+        log.write('round_end', {**timing, 'decision_id': decision_id, 'status': status, 'error': error,
             'after': after, 'feedback_error': feedback_error,
-            'reward': float(after['success'] is True and before['success'] is not True) if valid else None,
-            'reward_version': 'native-success-transition-v1',
+            **transition_evidence(before, after, timing['elapsed_s']),
             'reward_semantics': '仅原生判据从未成功到成功时奖励 1；其他有效状态为 0；判据不可用为 null。'})
         log._round_clock = None
         if feedback_cancel is not None: raise feedback_cancel

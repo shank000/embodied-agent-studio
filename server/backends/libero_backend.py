@@ -6,6 +6,7 @@ geometry, goal predicates or controller equations are replaced by this adapter.
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 from collections import deque
 import hashlib
 import importlib.util
@@ -132,6 +133,25 @@ def source_revision(package):
     return value if len(value) == 40 and all(c in '0123456789abcdef' for c in value) else None
 
 
+def native_initial_state_identity(path, states, *, task_id, scene_id, seed):
+    """Fingerprint the already-loaded official pool, including content aliases."""
+    if len(states) == 0: raise ValueError('LIBERO 官方初态文件为空。')
+    hashes = []
+    for state in states:
+        array = np.ascontiguousarray(state, dtype='<f8')
+        if array.ndim != 1 or not np.isfinite(array).all():
+            raise ValueError('LIBERO 官方初态必须是一维有限数值状态。')
+        hashes.append(hashlib.sha256(array.tobytes()).hexdigest())
+    index = seed % len(states)
+    return {'schema_version': 'libero-native-initial-state-v1', 'status': 'verified',
+            'task_id': task_id, 'scene_id': scene_id,
+            'file': f'{scene_id}/{Path(path).name}',
+            'file_sha256': hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+            'state_count': len(states), 'state_index': index,
+            'state_sha256': hashes[index], 'state_sha256_by_index': hashes,
+            'seed_mapping': 'seed_mod_state_count'}
+
+
 class LiberoSimulation:
     def __init__(self, model_id='panda', render=True, scene_id='libero_spatial', seed=42, task_id=None):
         self._validate(model_id, scene_id, task_id or f'{scene_id}:0')
@@ -206,6 +226,9 @@ class LiberoSimulation:
             raise ValueError(f'缺少官方初态：{initial}；不需要演示数据。')
         # These states come from the pinned official LIBERO source checkout.
         states = torch.load(initial, map_location='cpu', weights_only=False)
+        self.native_initial_state = native_initial_state_identity(initial, states,
+            task_id=self.task_id, scene_id=self.scene_id, seed=self.seed)
+        self.initial_state_pool = deepcopy(self.native_initial_state)
         self.init_state_index = self.seed % len(states)
         self.env.set_init_state(np.asarray(states[self.init_state_index]))
         gripper_ranges = self.sim.model.actuator_ctrlrange[self.robot._ref_joint_gripper_actuator_indexes]
@@ -466,6 +489,7 @@ class LiberoSimulation:
                   'task_id': self.task_id, 'seed': self.seed, 'time': self.time, 'state': state,
                   'ctrl': self.ctrl.tolist(), 'hold_pose': self.hold_pose, 'mode': self.mode,
                   'init_state_index': self.init_state_index,
+                  'native_initial_state': deepcopy(self.native_initial_state),
                   'gripper_command': self.robot.gripper.current_action.tolist(),
                   'native_ctrl': self.sim.data.ctrl.tolist(),
                   'qacc_warmstart': self.sim.data.qacc_warmstart.tolist(),
@@ -495,6 +519,18 @@ class LiberoSimulation:
             raise ValueError('LIBERO 检查点的控制位姿、种子或标识无效。')
         if value['mode'] not in ('OSC_POSE', 'JOINT_POSITION'):
             raise ValueError('LIBERO 检查点控制器无效。')
+        origin = value.get('native_initial_state')
+        if origin is not None and not isinstance(origin, dict):
+            raise ValueError('LIBERO 检查点的原生初态证据格式无效。')
+        if origin is not None and origin.get('status') == 'verified':
+            current = self.initial_state_pool
+            if any(origin.get(key) != current.get(key) for key in
+                    ('schema_version', 'task_id', 'scene_id', 'file', 'file_sha256', 'state_count', 'state_sha256_by_index')):
+                raise ValueError('LIBERO 检查点的官方初态目录与当前资产不一致。')
+            if origin.get('state_index') != value['init_state_index'] or value['init_state_index'] != value['seed'] % origin['state_count']:
+                raise ValueError('LIBERO 检查点的原生初态编号无效。')
+            if origin.get('state_sha256') != origin['state_sha256_by_index'][value['init_state_index']]:
+                raise ValueError('LIBERO 检查点的原生初态内容标识无效。')
         additional = {}
         for key, shape in [('gripper_command', (2,)), ('native_ctrl', self.sim.data.ctrl.shape),
                            ('qacc_warmstart', self.sim.data.qacc_warmstart.shape), ('controller_initial_joint', (7,))]:
@@ -505,6 +541,8 @@ class LiberoSimulation:
         self.env.set_init_state(state)
         self.cancel_motion()
         self.ctrl, self.seed, self.init_state_index = ctrl, value['seed'], value['init_state_index']
+        self.native_initial_state = deepcopy(origin) if isinstance(origin, dict) else {
+            'status': 'unverified_legacy', 'reason': '旧检查点没有原生初态目录证据，不能确认数据划分独立性。'}
         self.native.timestep, self.native.cur_time = value['env_timestep'], value['env_cur_time']
         self.physics_steps = value['physics_steps']; self.mode = None
         self._mode(value['mode']); self.hold_pose = value['hold_pose']

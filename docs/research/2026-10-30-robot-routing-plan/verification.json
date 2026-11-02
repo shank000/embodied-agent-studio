@@ -1,0 +1,51 @@
+{
+  "sections": 20,
+  "requirements": true,
+  "templates": true,
+  "script_syntax": true,
+  "export_doctype": true,
+  "export_storage_isolated": true,
+  "embedded_markdown_matches": true,
+  "browser_checks": {
+    "edit_toggle": true,
+    "notes_save_reload": true,
+    "checkbox_save_reload": true,
+    "html_download": true,
+    "broken_anchors": 0,
+    "console_errors": 0
+  },
+  "scope": "Report validation only; no new simulation or model evaluations.",
+  "illustration_update": {
+    "version": "1.1",
+    "figures": 5,
+    "files_decode": true,
+    "embedded_images": 5,
+    "external_image_dependencies": 0,
+    "generated_script_syntax": true,
+    "source_and_attribution": "images/sources.json and section 17",
+    "original_bytes_preserved": true,
+    "browser_revision_check": "Verified v1.2: all 5 images have naturalWidth > 0, 20 sections, save/reload and standalone HTML download pass."
+  },
+  "implementation_update": {
+    "version": "1.2",
+    "sections": 20,
+    "embedded_images": 5,
+    "script_syntax": true,
+    "embedded_markdown_matches": true,
+    "storage_version": "v4",
+    "legacy_drafts": [
+      "v3",
+      "v2"
+    ],
+    "legacy_drafts_deleted": false,
+    "baseline_sections_preserved": [
+      2,
+      19
+    ],
+    "implementation_section": 20,
+    "browser_revision_check": "Verified in IAB at http://127.0.0.1:8768/report.html; 0 missing navigation anchors and 0 console errors.",
+    "download_embedded_figures": 5,
+    "save_reload_pass": true,
+    "preview": "preview.png"
+  }
+}

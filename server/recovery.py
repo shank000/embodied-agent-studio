@@ -95,8 +95,24 @@ class RecoveryCoordinator:
         feedback = ''
         attempt = 0
         recovery_id = None
+        previous_attempt_config = config.model_copy(deep=True) if config is not None else None
         while True:
             self._check(owner, observation, run_id)
+            if config is not None and previous_attempt_config is not None:
+                previous = previous_attempt_config.model_dump()
+                current = config.model_dump()
+                changed = [name for name in current if current[name] != previous.get(name)]
+                if changed:
+                    log.metadata['configuration_changed'] = True
+                    log.write('configuration_change', {'round': owner.state.get('round', owner.state.get('step', 0)),
+                        'phase': phase, 'reason': 'recovery_retry', 'attempt': attempt,
+                        'changed_fields': changed,
+                        'before': previous_attempt_config.model_dump(exclude={'api_key', 'harness_api_key'}),
+                        'after': config.model_dump(exclude={'api_key', 'harness_api_key'})})
+                    if phase == 'agent_inference' and log.metadata.get('kind') == 'agent':
+                        owner.state.update({name: getattr(config, name) for name in ('provider', 'model', 'harness')
+                                            if hasattr(config, name)})
+                previous_attempt_config = config.model_copy(deep=True)
             token = RECOVERY_CONTEXT.set({'attempt':attempt, 'recovery_id':recovery_id})
             try:
                 result = await operation(feedback, config)
@@ -182,7 +198,7 @@ class RecoveryCoordinator:
                             notice = '诊断已给出恢复方案：'+plan.get('instruction','')
                             if changes: notice += ' 本次参数修正：'+json.dumps(changes,ensure_ascii=False)
                             log.write('recovery_plan',{'failure_id':recovery_id,'instruction':plan.get('instruction'),
-                                'settings_delta':changes,'effective_settings':config.model_dump(exclude={'api_key'}) if config else None})
+                                'settings_delta':changes,'effective_settings':config.model_dump(exclude={'api_key', 'harness_api_key'}) if config else None})
                         else:
                             notice = '诊断未给出可自动执行的恢复方案。请查看建议、修正配置后手动重试，或停止实验。'
                     except asyncio.CancelledError: raise
@@ -204,9 +220,11 @@ class RecoveryCoordinator:
                             live = owner.configs.get(getattr(config,'kind',None))
                         if live is not None and live.model_dump() != live_before:
                             config = live.model_copy(deep=True)
-                            key = config.api_key.get_secret_value()
-                            if key and key not in log.secrets: log.secrets.append(key)
-                        log.write('recovery_manual_settings',config.model_dump(exclude={'api_key'}) if config else {})
+                            for name in ('api_key', 'harness_api_key'):
+                                secret = getattr(config, name, None)
+                                key = secret.get_secret_value() if secret is not None else ''
+                                if key and key not in log.secrets: log.secrets.append(key)
+                        log.write('recovery_manual_settings',config.model_dump(exclude={'api_key', 'harness_api_key'}) if config else {})
                     self._check(owner, observation, run_id)
                     if self.repair.state.get('restart_required'): raise RuntimeError('源码变更尚未重启生效，未重试旧适配器。')
                     feedback = ('Previous attempt failed before action submission: '+message+

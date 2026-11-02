@@ -181,8 +181,8 @@ async def discover_model_capabilities(config):
     except ValueError:
         result['message'] = '元数据服务地址无效；请使用不含账号、参数或密钥的 HTTP(S) 地址，远程连接须使用 HTTPS。'
         return result
-    if provider not in ('openai', 'compatible', 'anthropic', 'custom'):
-        result['message'] = '该提供方未定义只读模型元数据接口；可手动填写推理强度。'
+    if provider not in ('openai', 'compatible', 'anthropic'):
+        result['message'] = '模型由 HTTP harness 管理，未定义独立模型元数据接口；可使用服务默认值或手动填写推理强度。'
         return result
     if not key and hostname not in ('localhost', '127.0.0.1', '::1'):
         result = _profile(settings) or result

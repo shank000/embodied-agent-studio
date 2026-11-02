@@ -16,6 +16,7 @@ from threading import RLock
 from weakref import WeakValueDictionary
 from uuid import uuid4
 
+import numpy as np
 from PIL import Image
 
 from .artifacts import is_secret_key
@@ -102,12 +103,27 @@ class RunLog:
         if phase not in ('before', 'after'): raise ValueError('观察阶段须为 before 或 after。')
         step_name = f'{step:06d}' + ('-after' if phase == 'after' else '')
         cameras = observation.get('cameras', [])
-        mode = observation.get('backend', {}).get('action_mode')
+        backend = observation.get('backend') or {}
+        mode = backend.get('action_mode')
+        declared = backend.get('camera_names',
+            [] if mode == 'text' else ['front'] if mode == 'discrete' else ['front', 'side', 'wrist'])
+        if (not isinstance(declared, list) or any(not isinstance(name, str)
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name)
+                or re.fullmatch(r'CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]', name, re.I) for name in declared)
+                or len({name.casefold() for name in declared}) != len(declared)):
+            raise ValueError('后端 camera_names 须为安全且无重复的原生相机名称列表。')
+        if mode == 'text' and declared:
+            raise ValueError('文字环境不能声明原生相机。')
+        if mode != 'text' and not declared:
+            raise ValueError('视觉环境必须声明至少一台原生相机。')
+        if not isinstance(cameras, list) or any(not isinstance(camera, dict) for camera in cameras):
+            raise ValueError('原生相机观察须为对象列表。')
         names = [camera.get('name') for camera in cameras]
-        expected = set() if mode == 'text' else {'front'} if mode == 'discrete' else {'front', 'side', 'wrist'}
-        if len(names) != len(expected) or set(names) != expected:
-            raise ValueError(f'当前观察必须包含以下原生相机且无重复：{sorted(expected)}。')
+        if (any(not isinstance(name, str) or name not in declared for name in names)
+                or len(names) != len(declared) or len(set(names)) != len(names)):
+            raise ValueError(f'当前观察必须包含以下原生相机且无重复：{declared}。')
         blobs = {}
+        depths = {}
         for camera in cameras:
             try:
                 raw = base64.b64decode(camera['image_base64'], validate=True)
@@ -117,11 +133,32 @@ class RunLog:
             except Exception as exc:
                 raise ValueError('相机 JPEG 数据无效。') from exc
             blobs[camera['name']] = raw
+            if 'depth' in camera:
+                depth = camera['depth']
+                try:
+                    if (not isinstance(depth, dict) or depth.get('encoding') != 'npy-float32'
+                            or depth.get('unit') != 'm' or not isinstance(depth.get('shape'), list)
+                            or len(depth['shape']) != 2
+                            or any(type(size) is not int or size <= 0 for size in depth['shape'])):
+                        raise ValueError('深度须声明二维 npy-float32、米制单位和有效尺寸。')
+                    data = base64.b64decode(depth['data_base64'], validate=True)
+                    array = np.load(io.BytesIO(data), allow_pickle=False)
+                    if (not isinstance(array, np.ndarray) or array.dtype != np.dtype('float32')
+                            or list(array.shape) != depth['shape']
+                            or not np.isfinite(array).all() or (array < 0).any()):
+                        raise ValueError('深度必须是尺寸一致的有限非负 float32 数组，0 表示无效值。')
+                    depths[camera['name']] = data
+                except Exception as exc:
+                    raise ValueError('相机深度数据无效。') from exc
         saved = self.clean(observation)
         for camera in saved['cameras']:
             name = camera['name']
             camera['image_ref'] = f'observations/{step_name}/{name}.jpg'
             camera['image_sha256'] = hashlib.sha256(blobs[name]).hexdigest()
+            if name in depths:
+                camera['depth'].pop('data_base64', None)
+                camera['depth']['depth_ref'] = f'observations/{step_name}/{name}.depth.npy'
+                camera['depth']['depth_sha256'] = hashlib.sha256(depths[name]).hexdigest()
         with self._lock:
             root = self.folder / 'observations'
             root.mkdir(exist_ok=True)
@@ -130,6 +167,7 @@ class RunLog:
             staging = Path(tempfile.mkdtemp(prefix='.observation-', dir=root))
             try:
                 for name, raw in blobs.items(): (staging / f'{name}.jpg').write_bytes(raw)
+                for name, raw in depths.items(): (staging / f'{name}.depth.npy').write_bytes(raw)
                 os.rename(staging, destination)
             finally:
                 if staging.exists():

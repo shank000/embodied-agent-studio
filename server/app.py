@@ -22,7 +22,8 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Query
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
@@ -30,6 +31,7 @@ from starlette.background import BackgroundTask
 from .simulation import Simulation, MODELS, VENDOR, ROOT
 from .simulators import catalog as simulator_catalog, supported_catalog, EVALUATORS, RUNTIMES
 from .agent import AgentController, AgentConfig, AgentStart
+from .actions import NativeAction
 from .policy import PolicyController, PolicyConfig, PolicyStart, release_local_service
 from .comparison import ComparisonController, ComparisonStart
 from .scenes import SCENES, TASKS
@@ -40,6 +42,8 @@ from .training_data import export_transitions
 from .experiment_costs import Expense, append_expense, void_expense
 from .robodojo import RoboDojoController, EvaluationPlan, ResultImport, plan as benchmark_plan, import_result
 from .robodojo_plan_export import export_plan as export_benchmark_plan
+from .behavior_benchmark import (BehaviorBenchmarkController, BehaviorBenchmarkSpec,
+    ResultImport as BehaviorResultImport, plan as behavior_plan, import_result as import_behavior_result)
 from .run_management import rename_run, delete_run, restore_run, batch_delete_runs, RunInUseError
 from .model_capabilities import discover_model_capabilities
 from .pricing import catalog as price_catalog
@@ -53,7 +57,7 @@ from .research import (ResearchProtocol, ResearchExperiment, ResearchController,
 
 class Command(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
-    action: Literal['load', 'scene', 'reset', 'pause', 'step', 'control', 'home', 'demo', 'stop', 'instruction', 'environment_action', 'view', 'camera', 'speed', 'flags', 'gravity', 'drop', 'select_robot']
+    action: Literal['load', 'scene', 'reset', 'pause', 'step', 'control', 'home', 'demo', 'stop', 'instruction', 'environment_action', 'native_action', 'view', 'camera', 'speed', 'flags', 'gravity', 'drop', 'select_robot']
     model: str | None = Field(default=None, min_length=1, max_length=64)
     robot_id: str | None = Field(default=None, min_length=1, max_length=40)
     scene_id: str | None = None
@@ -63,8 +67,9 @@ class Command(BaseModel):
     index: int | None = Field(default=None, ge=0, le=63)
     text: str | None = Field(default=None, max_length=160)
     environment_action: str | None = Field(default=None, min_length=1, max_length=1000)
+    native_action: NativeAction | None = None
     generation: int | None = Field(default=None, ge=0)
-    view: Literal['perspective', 'top', 'front', 'wrist'] | None = None
+    view: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{1,64}$')
     dx: float = Field(default=0, ge=-180, le=180)
     dy: float = Field(default=0, ge=-180, le=180)
     zoom: float = Field(default=0, ge=-1, le=1)
@@ -78,7 +83,7 @@ class Command(BaseModel):
                 and not any(self.model in supported_catalog(engine)[0] for engine in EVALUATORS)):
             raise ValueError('未知机器人型号。')
         required = {'select_robot':['robot_id'], 'load': ['model'], 'scene': ['scene_id'], 'pause': ['value'], 'control': ['index', 'value'], 'instruction': ['text'], 'environment_action': ['environment_action','generation'],
-                    'view': ['view'], 'speed': ['value'], 'flags': ['flags'], 'gravity': ['value']}
+                    'native_action': ['native_action', 'generation'], 'view': ['view'], 'speed': ['value'], 'flags': ['flags'], 'gravity': ['value']}
         for name in required.get(self.action, []):
             if getattr(self, name) is None:
                 raise ValueError(f'{self.action} 缺少 {name}')
@@ -382,11 +387,15 @@ def resolve_research_method(method_id):
     manifest = verify_method(method_id)
     recipe = manifest['recipe']
     credentials = composition.runtime_credentials.get(method_id, {}).copy()
-    declared_agent = recipe.get('agent') or {}
-    if (declared_agent.get('provider') == agent.config.provider and
-            declared_agent.get('base_url') == agent.config.base_url):
+    declared_agent = AgentConfig.model_validate(recipe['agent']) if recipe.get('agent') else None
+    if (declared_agent is not None and declared_agent.provider == agent.config.provider and
+            declared_agent.base_url == agent.config.base_url):
         key = agent.config.api_key.get_secret_value()
         if key: credentials.setdefault('agent_api_key', key)
+    if (declared_agent is not None and declared_agent.harness == agent.config.harness == 'http' and
+            declared_agent.harness_url == agent.config.harness_url):
+        key = agent.config.harness_api_key.get_secret_value()
+        if key: credentials.setdefault('agent_harness_api_key', key)
     declared_policy = recipe.get('policy') or {}
     live_policy = policy.configs.get(declared_policy.get('kind'))
     if live_policy is not None and declared_policy.get('endpoint') == live_policy.endpoint:
@@ -400,10 +409,14 @@ composition = CompositionController(worker, method_resolver=resolve_research_met
 research = ResearchController(worker, composition)
 repair = RepairController()
 benchmark = RoboDojoController()
+behavior_benchmark = BehaviorBenchmarkController()
+from .harnesspai import HarnessPAIController, ProgramValidation
+harnesspai = HarnessPAIController()
 
 
 def repair_secrets():
     return [agent.config.api_key.get_secret_value(),
+            agent.config.harness_api_key.get_secret_value(),
             *(config.api_key.get_secret_value() for config in policy.configs.values()),
             *secret_values(composition.runtime_credentials)]
 
@@ -413,10 +426,12 @@ for controller in (agent, policy, composition): controller.recovery = recovery
 
 
 def research_active():
-    return composition.snapshot().get('active') or research.state.get('active') or benchmark.state.get('active')
+    return composition.snapshot().get('active') or research.state.get('active') or benchmark.state.get('active') or behavior_benchmark.state.get('active') or harnesspai.state.get('active')
 
 
 async def stop_research():
+    await harnesspai.stop()
+    await behavior_benchmark.stop()
     await benchmark.stop()
     await research.stop()
     await composition.stop()
@@ -446,6 +461,15 @@ async def lifespan(app):
 app = FastAPI(title='EmbodiWorks · 具身工坊', lifespan=lifespan)
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(request: Request, error: RequestValidationError):
+    # Pydantic model validators can attach the complete input dictionary, which
+    # includes credentials. The UI only needs field locations and messages.
+    return JSONResponse(status_code=422, content={'detail': [
+        {name: item[name] for name in ('loc', 'msg', 'type') if name in item}
+        for item in error.errors()]})
+
+
 def local_request(request):
     origin = request.headers.get('origin')
     allowed = {'http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8000', 'http://localhost:8000'}
@@ -465,7 +489,9 @@ async def state():
     snapshot['research'] = composition.snapshot()
     snapshot['experiment'] = research.snapshot()
     snapshot['repair'] = repair.snapshot()
-    snapshot['benchmark'] = benchmark.snapshot()
+    snapshot['behavior_benchmark'] = behavior_benchmark.snapshot()
+    snapshot['benchmark'] = snapshot['behavior_benchmark'] if behavior_benchmark.state.get('active') else benchmark.snapshot()
+    snapshot['harnesspai'] = harnesspai.snapshot()
     snapshot['registry'] = read_registry()
     snapshot['backend_switching'] = worker.switching
     return snapshot
@@ -473,7 +499,7 @@ async def state():
 
 class SimulatorSelection(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    engine_id: Literal['mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'alfworld_thor', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365']
+    engine_id: Literal['mujoco', 'genesis', 'maniskill', 'libero', 'alfworld', 'alfworld_thor', 'ai2thor', 'isaac', 'isaacsim', 'robocasa365', 'robodojo', 'omnigibson']
 
 
 @app.get('/api/simulators')
@@ -723,11 +749,11 @@ async def observe_agent(request: Request):
 
 
 @app.get('/api/agent/camera/{name}')
-async def agent_camera(name: Literal['front', 'side', 'wrist']):
+async def agent_camera(name: str):
     if not agent.observation: raise HTTPException(404, '请先采集一次当前环境观察。')
     camera = next((c for c in agent.observation['cameras'] if c['name'] == name), None)
     if camera is None: raise HTTPException(404, '当前环境观察没有提供该相机。')
-    return Response(base64.b64decode(camera['image_base64']), media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
+    return Response(base64.b64decode(camera['image_base64']), media_type=camera.get('mime_type', 'image/jpeg'), headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/api/policy/config')
@@ -766,11 +792,11 @@ async def stop_policy(request: Request):
 
 
 @app.get('/api/policy/camera/{name}')
-async def policy_camera(name: Literal['front','side','wrist']):
+async def policy_camera(name: str):
     if not policy.observation: raise HTTPException(404,'尚未采集策略观察。')
     camera = next((c for c in policy.observation['cameras'] if c['name']==name), None)
     if camera is None: raise HTTPException(404, '当前环境观察没有提供该相机。')
-    return Response(base64.b64decode(camera['image_base64']),media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+    return Response(base64.b64decode(camera['image_base64']),media_type=camera.get('mime_type','image/jpeg'),headers={'Cache-Control':'no-store'})
 
 
 @app.post('/api/comparison/start')
@@ -959,6 +985,99 @@ async def benchmark_info():
     return await asyncio.to_thread(benchmark.info)
 
 
+@app.get('/api/benchmarks/behavior')
+async def behavior_info():
+    return await asyncio.to_thread(behavior_benchmark.info)
+
+
+@app.post('/api/benchmarks/behavior/plan')
+async def prepare_behavior(body: BehaviorBenchmarkSpec, request: Request):
+    local_request(request)
+    try: return await asyncio.to_thread(behavior_plan, body)
+    except (ValueError, OSError) as exc: raise research_error(exc)
+
+
+@app.post('/api/benchmarks/behavior/start')
+async def start_behavior(body: BehaviorBenchmarkSpec, request: Request):
+    local_request(request)
+    async with agent.lock:
+        ensure_research_idle()
+        if repair.snapshot().get('active'): raise HTTPException(409, '请先等待故障修复结束。')
+        with worker.lock:
+            if worker.snapshot.get('task', {}).get('status') in ('running', 'settling'):
+                raise HTTPException(409, '请先停止当前机器人动作。')
+            if worker.snapshot.get('backend', {}).get('engine_id', 'mujoco') != 'mujoco':
+                raise HTTPException(409, '官方评估器会启动独立仿真；请先切回 MuJoCo，释放当前重型仿真环境。')
+        try: return await behavior_benchmark.start(body)
+        except (ValueError, OSError) as exc: raise research_error(exc)
+
+
+@app.post('/api/benchmarks/behavior/stop')
+async def stop_behavior(request: Request):
+    local_request(request)
+    async with agent.lock: return await behavior_benchmark.stop()
+
+
+@app.post('/api/benchmarks/behavior/import')
+async def import_behavior(body: BehaviorResultImport, request: Request):
+    local_request(request)
+    try: return await asyncio.to_thread(import_behavior_result, body)
+    except (ValueError, OSError) as exc: raise research_error(exc)
+
+
+@app.get('/api/harnesspai')
+async def harnesspai_info():
+    return await harnesspai.info(refresh=True)
+
+
+@app.post('/api/harnesspai/start')
+async def start_program(body: ProgramValidation, request: Request):
+    local_request(request)
+    async with agent.lock:
+        ensure_research_idle()
+        if repair.snapshot().get('active'): raise HTTPException(409, '请先等待故障修复结束。')
+        with worker.lock:
+            if worker.snapshot.get('task', {}).get('status') in ('running', 'settling'):
+                raise HTTPException(409, '请先停止当前机械臂动作。')
+        try: return await harnesspai.start(body)
+        except (ValueError, OSError) as exc: raise research_error(exc)
+
+
+@app.get('/api/harnesspai/programs/{version}')
+async def get_verified_program(version: str):
+    from .harnesspai import LIBRARY, digest, json_file
+    from .runlog import RUN_ID
+    if not RUN_ID.fullmatch(version): raise HTTPException(400, '无效程序版本。')
+    folder = LIBRARY / version
+    try:
+        manifest = json_file(folder / 'manifest.json')
+        source = (folder / 'program.py').read_text(encoding='utf-8')
+        if not manifest or digest(source) != manifest['source_sha256']:
+            raise ValueError('已验证程序内容发生变化，请重新验证。')
+        return {'manifest': manifest, 'source': source}
+    except (ValueError, OSError) as exc: raise research_error(exc)
+
+
+@app.post('/api/harnesspai/stop')
+async def stop_program(request: Request):
+    local_request(request)
+    async with agent.lock: return await harnesspai.stop()
+
+
+class ProgramPromotion(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    run_id: str
+
+
+@app.post('/api/harnesspai/promote')
+async def promote_program(body: ProgramPromotion, request: Request):
+    local_request(request)
+    async with agent.lock:
+        ensure_research_idle()
+        try: return await harnesspai.promote(body.run_id)
+        except (ValueError, OSError) as exc: raise research_error(exc)
+
+
 @app.post('/api/benchmarks/robodojo/plan')
 async def prepare_benchmark(body: EvaluationPlan, request: Request):
     local_request(request)
@@ -1000,7 +1119,7 @@ async def import_benchmark(body: ResultImport, request: Request):
 
 @app.get('/api/research/defaults')
 async def research_defaults():
-    return {'agent': agent.config.model_dump(exclude={'api_key'}),
+    return {'agent': agent.config.model_dump(exclude={'api_key', 'harness_api_key'}),
             'policy': {kind: config.model_dump(exclude={'api_key'}) for kind, config in policy.configs.items()},
             'decision': {'kind': 'typesafe', 'url': 'https://api.typesafe.ai/v1/systemone',
                          'model': 'jev-latest', 'vision': False, 'question_name': 'next_action', 'timeout_s': 30}}
@@ -1018,12 +1137,12 @@ async def save_method(body: MethodRegistration, request: Request):
         ensure_research_idle()
         recipe = body.recipe.copy()
         if recipe.get('mode') in ('agent', 'hybrid') and not recipe.get('agent'):
-            recipe['agent'] = agent.config.model_dump(exclude={'api_key'})
+            recipe['agent'] = agent.config.model_dump(exclude={'api_key', 'harness_api_key'})
         if recipe.get('mode') == 'policy' and not recipe.get('policy'):
             recipe['policy'] = policy.configs['smolvla'].model_dump(exclude={'api_key'})
         try:
             # Validate runtime fields before creating any persistent version.
-            allowed = {'agent_api_key', 'policy_api_key', 'decision_api_key', 'decision_api_keys'}
+            allowed = {'agent_api_key', 'agent_harness_api_key', 'policy_api_key', 'decision_api_key', 'decision_api_keys'}
             if set(body.credentials) - allowed:
                 raise ValueError('运行时凭据仅接受 Agent、策略和决策接口的 API Key。')
             manifest = register_method(MethodRecipe.model_validate(recipe))
@@ -1163,8 +1282,11 @@ async def run_episode(run_id: str):
     if manifest.exists():
         observations = [json.loads(line) for line in manifest.read_text(encoding='utf-8').splitlines() if line]
     checkpoint = artifacts.get('checkpoints', {}).get('initial', {})
-    return {'available': bool(artifacts.get('trajectory') and checkpoint), 'run_id': run_id,
-            'message': '记录状态回放不会重新调用模型，也不代表重新执行动力学后得到相同结果。',
+    capabilities = (summary.get('backend') or {}).get('capabilities')
+    replay_supported = capabilities is None or {'restore', 'replay_frame'}.issubset(capabilities)
+    return {'available': bool(artifacts.get('trajectory') and checkpoint and replay_supported), 'run_id': run_id,
+            'message': ('记录状态回放不会重新调用模型，也不代表重新执行动力学后得到相同结果。' if replay_supported else
+                        '此环境未提供完整物理状态恢复和回放；仍可查看已保存的视频、观察、动作及评价记录。'),
             'method_id': summary.get('method_id'), 'observations': observations,
             'trajectory_frames': artifacts.get('trajectory_frames', 0),
             'initial_checkpoint': checkpoint.get('path'), 'metrics': summary.get('metrics'),

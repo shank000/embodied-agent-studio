@@ -36,6 +36,9 @@ class Handler(BaseHTTPRequestHandler):
                     'evidence':['finish_reason=stop, content=whitespace'],'recommendations':['纠正输出契约后重试。'],
                     'edits':[], 'recovery':self.server.plan},'usage':{'input_tokens':10,'output_tokens':5},
                 'debug_echo':getattr(self.server,'secret_echo','')}
+        elif self.path=='/agent-harness':
+            response={'protocol':'embodied-agent-v1','model':body['model'],
+                'output':ACTION,'usage':{'input_tokens':20,'output_tokens':8}}
         else:
             self.server.agent_calls+=1
             invalid=self.server.always_bad or (self.server.first_agent_error and self.server.agent_calls==1)
@@ -129,6 +132,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         from server.analysis import analyze_run
         analysis=analyze_run(self.log.id)
         self.assertTrue(analysis['recovery_assisted']);self.assertEqual(analysis['recovery_attempts'],1)
+        self.assertEqual(analysis['harness'],'workbench')
         self.assertEqual(analysis['total']['calls'],3)
         self.assertEqual(analysis['total']['output_tokens'],21)
 
@@ -225,6 +229,47 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             if not task.done():task.cancel();await asyncio.gather(task,return_exceptions=True)
             self.log.finish({'status':'complete'})
+
+    async def test_manual_harness_switch_preserves_attempts_and_reports_mixed_execution(self):
+        self.repair.config.auto_recover=False
+        self.owner.state.update(provider='compatible', model='fixture-policy-model', harness='workbench')
+        task=asyncio.create_task(self.call())
+        try:
+            await self.wait_paused(task)
+            self.owner.config=AgentConfig(harness='http', provider='custom', model='switched-model',
+                harness_url=self.base+'/agent-harness', harness_api_key='new-harness-private')
+            self.coordinator.resume(self.coordinator.view['failure_id'])
+            action,_=await asyncio.wait_for(task,3)
+            self.assertEqual(action.status,'done')
+            self.assertEqual(self.owner.state['harness'],'http')
+            self.assertEqual(self.owner.state['model'],'switched-model')
+            self.assertEqual(self.owner.state['provider'],'custom')
+            self.assertEqual(self.owner.state['round'],7)
+            change=self.events('configuration_change')
+            self.assertEqual(len(change),1)
+            self.assertEqual(change[0]['before']['harness'],'workbench')
+            self.assertEqual(change[0]['after']['harness'],'http')
+            self.assertEqual(change[0]['attempt'],1)
+            self.assertTrue(self.log.metadata['configuration_changed'])
+            self.assertEqual(self.log.metadata['model'],'fixture-policy-model')
+            calls=[item for item in self.events('inference') if item['phase']=='agent_inference']
+            self.assertEqual([item['harness'] for item in calls],['workbench','http'])
+            self.assertEqual([item['model'] for item in calls],['fixture-policy-model','switched-model'])
+            self.assertNotIn('new-harness-private',self.log.path.read_text(encoding='utf-8'))
+            self.assertNotIn('api_key',change[0]['after'])
+            self.assertNotIn('harness_api_key',change[0]['after'])
+        finally:
+            if not task.done():task.cancel();await asyncio.gather(task,return_exceptions=True)
+            self.log.finish({'status':'complete'})
+        from server.analysis import analyze_run, analyze_experiments
+        analysis=analyze_run(self.log.id)
+        self.assertEqual(analysis['harness'],'http + workbench')
+        self.assertTrue(analysis['configuration_changed'])
+        self.assertEqual(len(analysis['configuration_changes']),1)
+        self.assertIn('fixture-policy-model',analysis['model'])
+        self.assertIn('switched-model',analysis['model'])
+        groups=analyze_experiments()['groups']
+        self.assertEqual([row['harness'] for row in groups],['http + workbench'])
 
     async def test_cancelling_paused_recovery_cannot_execute_a_late_result(self):
         self.repair.config.auto_recover=False

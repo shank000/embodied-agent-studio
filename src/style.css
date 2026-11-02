@@ -54,3 +54,4 @@
 .environment-budget{display:flex;align-items:center;gap:10px;margin:16px 0;color:#62806a;font-size:13px}.environment-budget input{width:7em;min-width:0;padding:7px;border:1px solid #dbe6d7;border-radius:6px;background:#fbfdf8;color:#4b7143}
 .telemetry-cell[hidden],.camera-grid figure[hidden]{display:none!important}
 .sim-action[hidden],.tasks-heading[hidden]{display:none}
+.agent-config-section{font-size:14px;font-weight:600;color:#365b46;margin:8px 0 0;padding-top:14px;border-top:1px solid #dce8dd}.harness-http-fields{display:flex;flex-direction:column;gap:14px;padding:16px;border:1px solid #dce8dd;border-radius:8px;background:#f6faf5}.config-form .agent-key-forward{flex-direction:row;align-items:flex-start;line-height:1.7}.config-form .agent-key-forward input{width:auto;flex:none;margin-top:3px}#agent-harness-name{margin-top:6px;color:#365b46}#agent-config-dialog{width:600px}

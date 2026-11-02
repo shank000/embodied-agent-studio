@@ -19,6 +19,21 @@ class EnvironmentAction(BaseModel):
         return schema
 
 
+class NativeAction(BaseModel):
+    """One bounded command in the backend's declared whole-robot action space."""
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False, strict=True)
+    status: Literal['move', 'done', 'blocked']
+    action: list[float] = Field(min_length=1, max_length=128)
+    steps: int = Field(ge=1, le=120)
+    explanation: str = Field(min_length=1, max_length=1000)
+
+    @classmethod
+    def action_schema(cls):
+        schema = cls.model_json_schema()
+        schema['required'] = list(schema['properties'])
+        return schema
+
+
 class PoseAction(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False, strict=True)
     status: Literal['move', 'done', 'blocked']

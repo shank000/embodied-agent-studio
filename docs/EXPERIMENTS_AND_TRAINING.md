@@ -1,17 +1,19 @@
 # 实验能力、训练数据与 IDE 接入
 
+复合任务使用步骤、路由 API 返回格式、费用去重和 LIBERO 初态隔离见 [机器人路由研究契约](ROBOT_ROUTING_RESEARCH.md)。
+
 ## 本轮能力核对
 
 | 实验要求 | 当前可用能力 | 使用边界 |
 | --- | --- | --- |
 | 丰富、灵活的任务空间 | MuJoCo 自定义桌面/抽屉/多臂任务；LIBERO 官方任务；RoboCasa365 厨房原子与复合任务；ALFWorld 文字及视觉家务任务；AI2-THOR 交互房间；ManiSkill、Genesis、Isaac Lab / Newton 适配任务 | 各后端展示自己的机器人、场景、任务和动作空间；安装 SDK 不表示适配了 SDK 的所有任务。完整 Isaac Sim / RoboDojo 的物理运行仍需要对应运行环境。 |
-| 端到端复合任务 | 观察 → 决策 → 本地控制/原生命令 → 执行反馈 → 再观察；有任务预算、停止、故障恢复与原生成功判定 | 能执行复合任务不等于任意模型都能完成任务。长程实验需一起配置模型轮数、环境步数/仿真时间和墙钟预算。 |
+| 端到端复合任务 | 观察 → 决策 → 本地控制/原生命令 → 执行反馈 → 再观察；MuJoCo 新增有序备料交付与抽屉开合复位，按顺序、持续时间和约束判定阶段及最终成功 | 能执行复合任务不等于任意模型都能完成任务。长程实验需一起配置模型轮数、环境步数/仿真时间和墙钟预算。 |
 | 可配置 harness / 路由 API | Codex 本机登录、OpenAI Responses、OpenAI 兼容 Chat、Anthropic、自定义 `embodied-agent-v1`；可填地址、密钥、模型名称 | 路由网关应匹配所选协议、图片格式及结构化动作输出；请求模型与服务返回模型分别留档。非官方网关单价不能自动当成原厂实际账单。 |
 | 视觉、VLA、决策等工具 | 自定义 Agent 服务可组织其内部工具；策略服务支持 `embodied-policy-v1` 的 VLA/WAM；决策服务支持 `embodied-decision-v1`；方法版本可组合规划、策略、单决策、级联及投票 | 不是任意 SDK 的即插即用插件加载器。新视觉工具通过自定义 harness 服务对接；VLA 仍需正确的关节、动作归一化及相机映射。 |
 | 成功、耗时、用量、费用、失败恢复 | 原生验收、全实验计时、逐轮阶段计时、每次调用用量/公开输出/恢复事件、轨迹和视频；成本按调用阶段与模型归因；非模型费用可按数量和单价登记及作废 | 未返回用量或没有价格时保留缺失。已记录合计不是完整账单。人工登记需避免与 API 费、子实验账单重复。 |
 | 成本为什么发生 | 规划/策略/决策/恢复与重试的调用次数、失败次数、输入输出 Token、累计服务耗时、价格组成、其他费用的来源和说明 | 网络、排队和 GPU 时间不能仅从总响应时间分离；需服务端指标。服务内部多次工具调用若只返回一个总量，平台只能归因到该服务。 |
 
-同条件比较应固定后端和版本、任务、机器人、动作频率、相机、预算以及种子划分。重复试验报告成功次数/总尝试数、成功率、耗时和成本分布；成功率分母包括取消、错误与中断，另列这些数量。开发、验证和测试种子继续使用现有 RSI 协议隔离。
+同条件比较应固定后端和版本、任务、机器人、动作频率、相机、预算以及种子划分。重复试验报告成功次数/总尝试数、成功率、耗时和成本分布；成功率分母包括取消、错误与中断，另列这些数量。开发、验证和测试继续使用现有 RSI 协议隔离；LIBERO 另在模型执行前校验官方状态池和实际初态内容，不能仅凭数字种子不同认定划分独立。
 
 ## 每轮记录与训练导出
 
@@ -22,13 +24,15 @@
 接口：
 
 - `GET /api/runs/{run_id}/rounds?limit=20&offset=0`：按新到旧分页，包含真实调用、恢复事件、执行结果、阶段耗时和环境判据。
-- `GET /api/runs/{run_id}/training`：结束后下载 `embodied-transitions-v1` JSON。
+- `GET /api/runs/{run_id}/training`：结束后下载 `embodied-transitions-v2` JSON。
 - `GET /api/runs/{run_id}/bundle`：完整 episode、图像、轨迹、检查点和可选视频。
 - `GET /api/runs/{run_id}/analysis`：用量、费用、`cost_attribution` 与完整评价结果。
-- `POST /api/runs/{run_id}/expenses`：登记非模型开销；`category`、`name`、`quantity`、`unit`、`unit_price_usd`、`source`、可选 `note`。类别为 compute/storage/tool/network/human/other。
+- `POST /api/runs/{run_id}/expenses`：登记非模型开销；`category`、`name`、`quantity`、`unit`、`unit_price_usd`、`source`、可选 `note`。类别为 compute/storage/tool/network/human/other；可附 `evidence_type`、`source_invoice_id`、`allocation_key`、`allocation_rule`。账单范围和冲突处理见[费用契约](ROBOT_ROUTING_RESEARCH.md#3-费用证据与避免重复计算)。
 - `POST /api/runs/{run_id}/expenses/{expense_id}/void`：作废登记，原费用和原实验日志仍保留。
 
 每条训练转移包含 `observation`、实际提交的 `action`、`next_observation`、`reward`、`terminated`、`truncated`、结束原因、逐轮耗时、调用记录与单独的特权评价。消费方先筛选 `training_eligible=true`；错误、取消、缺失数据及首次终止之后的记录保留用于诊断，不默认参与训练。
+
+v2 同时输出 `decision_id`、`stage_events`、`reward_components`、`call_cost`、`routing_decisions`。`routing_training_eligible` 要求有效转移、已返回的能力选择及路由策略版本；`propensity_evaluation_eligible` 还要求每条路由记录返回 `(0, 1]` 内的真实选择概率。缺失概率不补为 1；这些筛选条件不等于统计有效性或模型质量证明。旧导出文件保留原版本，不改写历史数据。
 
 批量汇总、故障修复运行和外部基准归档不能冒充本地动作转移；请导出实际执行动作的子实验。图像相对路径以对应 bundle 为根，不能仅下载 JSON 就假定图像齐全。
 
@@ -42,9 +46,9 @@
 
 本轮提供版本化稀疏奖励 `native-success-transition-v1`：有效原生判据从未成功变成成功时为 1，其余有效转移为 0；评价缺失为 null。模型说“完成”不会得到成功奖励。终止与外部预算截断分别记录；这一区分影响价值函数是否 bootstrap，见 [Gymnasium 官方说明](https://gymnasium.farama.org/tutorials/gymnasium_basics/handling_time_limits/)。
 
-当前适配任务以成功作为终止判据；尚未统一提供的原生失败终态不能仅凭 harness 的 blocked/error 推断。后续新增失败终态时应明确写入对应环境的评价契约。
+任务成功作为终止判据；新增 MuJoCo 复合任务还具有任务图约束失败终态。其他任务尚未提供的原生失败终态不能仅凭 harness 的 blocked/error 推断，后续新增时应明确写入对应环境的评价契约。
 
-密集奖励应按任务单独定义，例如抽屉位移、物体进入目标区、抓取稳定性，并明确顺序约束和权重。保留原始谓词与测量值供离线分析，不能把不同后端的 `progress` 任意加总成统一分数。奖励修改需要独立版本和留出种子验证，防止通过反复开关抽屉等行为刷分。
+密集奖励应按任务单独定义，例如抽屉位移、物体进入目标区、抓取稳定性，并明确顺序约束和权重。目前复合任务已记录阶段进度变化、首次达成和违规分量，但尚未将它们加权为统一密集奖励。保留原始谓词与测量值供离线分析，不能把不同后端的 `progress` 任意加总成统一分数。奖励修改需要独立版本和留出初态验证，防止通过反复开关抽屉等行为刷分。
 
 任务奖励与成本项分开保存；若研究成本敏感策略，可在固定协议中显式定义成功奖励减去调用费用、耗时和违规惩罚。不同单位先确定归一化与权重，原始量不覆盖。
 

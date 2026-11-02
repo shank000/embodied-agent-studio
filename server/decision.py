@@ -83,6 +83,9 @@ async def choose_candidate(config, context, candidates, *, api_key='', cameras=(
     if not ids or len(ids) != len(set(ids)):
         raise ValueError('决策需要非空、ID 唯一的动作候选；未调用服务。')
     headers = {'Authorization': 'Bearer ' + api_key} if api_key else {}
+    from .telemetry import routing_request_context
+    headers.update({f'X-EmbodiWorks-{name.replace("_", "-")}': value
+                    for name, value in routing_request_context().items() if isinstance(value, str)})
     if config.kind == 'custom':
         body = {'protocol': 'embodied-decision-v1', **context,
                 'model': config.model, 'candidates': candidates}
