@@ -254,7 +254,7 @@ class VisualLoopTests(unittest.TestCase):
                 usage={'input_tokens':1,'output_tokens':1}
                 model_output({'provider':'custom','model':config.model,'output':proposal.model_dump(),'usage':usage})
                 return proposal,usage
-            with patch('server.agent.api_action',boundary),patch('server.repair.api_action',diagnose), \
+            with patch('server.agent.api_action',boundary),patch('server.repair.invoke_agent_action',diagnose), \
                     patch.object(self.worker,'execute',wraps=self.worker.execute) as execute:
                 await agent.start(AgentStart(task='抬高两厘米并确认',record_video=True,evaluator_stop=False))
                 await asyncio.wait_for(agent.task,25)

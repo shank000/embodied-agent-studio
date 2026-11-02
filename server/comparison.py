@@ -10,7 +10,7 @@ from .runlog import RunLog, run_folder
 from .telemetry import batch_timing, enter_recorded_run
 from .scenes import SCENES, TASKS
 from .simulation import MODELS
-from .simulators import validate_selection, supported_catalog
+from .simulators import validate_selection, supported_catalog, backend_identity
 
 
 class ComparisonStart(BaseModel):
@@ -54,6 +54,8 @@ class ComparisonController:
         with self.worker.lock: engine = (self.worker.snapshot.get('backend') or {}).get('engine_id', 'mujoco')
         if engine in ('alfworld','alfworld_thor','ai2thor'):
             raise ValueError('当前方法对比使用连续机械臂动作协议；文字和离散环境请先使用 Agent 单次实验。')
+        if 'restore' not in backend_identity(engine)['capabilities']:
+            raise ValueError('当前环境尚不支持恢复完整物理初态，不能执行配对比较；请使用单次实验或官方评测流程。')
         if engine != request.engine_id: raise ValueError('请先切换到本次对比指定的仿真后端。')
         for method in request.methods:
             if method != 'agent': self.policy.validate_start(method, request.robot)

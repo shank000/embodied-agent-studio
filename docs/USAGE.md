@@ -90,14 +90,48 @@ DeepSeek 的峰谷判定已接入带来源的 2026 年国务院放假日历，�
 
 ## 视觉 Agent 使用
 
-1. 在右侧“Agent 接管”中点击模型卡片。默认使用 **Codex 本机登录 + gpt-6-astra + low**。
+1. 在右侧“Agent 接管”中点击“模型与 Harness”。先选择 **Agent harness**，再独立配置模型协议、地址、密钥和名称；默认使用 Codex CLI 与本机登录。
 2. 可选择或输入 `gpt-6-astra`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 等当前账号可用的模型 ID。不会自动换用其他模型。
 3. 点击“末端抬高 2 cm”示例，先用“仅执行一轮”观察完整流程；输入框发送按钮则连续运行，默认不限制轮数。模型配置中轮数留空或填 0 表示不按轮数停止，也可设置任意正整数；手动停止、模型完成、错误与仿真时间预算仍生效。
 
-模型配置中的“读取模型能力”仅查询模型元数据，不发起推理。Codex 使用本机 `models_cache.json` 的精确模型记录；DeepSeek、Claude 与兼容服务优先读取服务声明的原生等级。OpenAI 模型接口未提供等级时，对已核对的精确型号显示带日期和来源的官方文档配置；新型号和未知服务保留“服务默认”及手动填写入口。`low`、`high`、`max` 等值按各服务原样传送，不进行跨模型等级换算。Claude 的 effort 作用于输出投入程度，思考模式仍由服务默认控制。旧实验配方继续保持原先未传送原生 effort 的含义，新的界面配置会显式启用原生参数。
+模型配置中的“读取模型能力”仅查询模型元数据，不发起推理。Codex 使用本机 `models_cache.json` 的精确模型记录；DeepSeek、Claude 与兼容服务优先读取服务声明的原生等级。OpenAI 模型接口未提供等级时，对已核对的精确型号显示带日期和来源的官方文档配置；新型号和未知服务保留“服务默认”及手动填写入口。工作台直接 API 接入按供应商语义传送推理参数；CLI harness 使用各自官方模型适配器。相同的 `high` 不代表不同模型有相同的预算或推理能力。工作台直接 Claude Messages 接入的 effort 与思考模式分别由服务处理；旧实验配方继续保持原先未传送原生 effort 的含义。
 4. “停止接管”会终止未完成请求、丢弃未执行输出并暂停物理。暂停、重置、切换机械臂也会取消接管。网页关闭不会自动停止任务；运行仍受配置的请求超时、仿真预算及可选轮数限制。
 
-Codex 通过项目依赖中的 CLI 0.155.1 复用原有 ChatGPT 登录，不读取、复制或导出登录令牌。该版本独立于电脑上的全局 CLI，避免旧版不支持 Astra。单轮采用临时目录、只读沙箱、禁用 shell、应用与 hooks，使用三张附件和 JSON Schema 输出；终止后清理临时图片。适配器使用官方 HTTPS Responses 传输。调用消耗当前账号 Codex 用量。若换电脑，需要先通过 Codex CLI 登录；`CODEX_CLI_PATH` 可指定原生 CLI 路径。
+### Harness 与模型分别配置
+
+Harness 管理如何组织一次模型调用和处理输出；模型配置选择实际的模型服务。CLI 的名称不等于固定模型名。五种 harness 共用工作台的动作校验、控制器、环境评价和实验记录。
+
+| Agent harness | 可独立选择的模型接入 | 凭据与执行方式 |
+| --- | --- | --- |
+| 工作台视觉闭环 | OpenAI Responses、兼容 Chat Completions、Anthropic Messages | 填写模型基础地址、API Key 和模型名；工作台直接调用接口。 |
+| Codex CLI · 受限单轮 | Codex 本机登录，或 OpenAI Responses | 本机登录沿用 Codex 额度；Responses 使用单独配置的地址、模型和 Key。 |
+| Claude Code | Anthropic Messages，包括符合该协议的路由地址 | 官方 CLI **2.1.316**，隔离 API 模式；必须填写模型 Key，不读取 Claude 订阅／OAuth 登录。 |
+| DeepSeek Harness（dsh） | OpenAI Responses、兼容 Chat Completions、Anthropic Messages | 官方 CLI **0.2.1-rc.5** 的 `sdk-minimal`；三个协议均使用独立模型地址、Key 和模型名，不限定 DeepSeek 模型。 |
+| 自定义 HTTP harness | 上述三种模型 API，或由外部服务管理模型 | harness 的完整 POST 地址与鉴权独立于模型配置；模型 Key 默认不转交。 |
+
+配置步骤：
+
+1. 打开“控制与策略 → Agent 接管 → 模型与 Harness”，选择 harness。使用 CLI 时先完成 `npm ci`，Node.js 至少为 **22.19.0**。
+2. 选择该 harness 支持的模型协议，填写模型服务的**基础地址**、API Key 和精确模型 ID。路由 API 也按其公开协议选择；地址不要填写成另一个协议的请求路径。选择 Codex 本机登录时使用已登录账号。
+3. 读取模型能力，设置模型和 harness 都支持的推理选项、请求超时与输出预算。Claude Code 支持 `low / medium / high / xhigh / max`；dsh 支持 `off / minimal / low / medium / high / xhigh / max`。留在模型默认可避免向不支持 effort 的模型强加选项；列表中的等级仍需目标模型服务支持。
+4. 点击保存，关闭并重新打开确认 harness、模型协议、地址和名称。HTTP harness 如需代持模型调用，另按下文设置密钥转交。
+5. 用“仅执行一轮”检查三路观察、模型返回、动作执行和环境反馈，再启动连续任务。图像任务要求模型支持多图输入；保存成功和协议接通不代表模型已能完成机器人任务。
+
+切换 harness 保留已填写的模型名称与地址。不兼容的协议组合会直接提示；不会静默替换模型。模型 API 地址可填写支持对应协议的路由服务。实验日志记录所选 harness，实验分析按 harness 分组。
+
+HTTP harness 有自己的完整 POST 地址和鉴权密钥。模型 API Key 与 harness 密钥独立保存；默认不向外部 harness 发送模型密钥。服务端已配置模型凭据时无需勾选转交；确需由服务代理调用时，填写模型 Key 并明确勾选“转交模型 API Key”。更换 harness 地址会取消该勾选。密钥仅存于本机服务内存，同一地址留空保留，重启后重新填写。
+
+HTTP 接口沿用 `embodied-agent-v1`，请求保留 `task`、`prompt`、`system_contract`、`cameras`、`response_schema` 和 `model_settings`；新增 `model_config`，包含 `provider`、`model`、`base_url`、`reasoning`、`reasoning_native`、`deepseek_thinking`、`max_output_tokens`。只有显式授权转交时才有 `model_config.api_key`；harness 密钥通过 `Authorization: Bearer …` 发送。响应格式为 `{"protocol":"embodied-agent-v1","output":{…},"usage":{…}}`，其中 `output` 必须满足请求中的 `response_schema`，`usage` 可省略。外部 harness 若内部调用多个模型，返回的聚合用量不能直接按一个模型单价估算。
+
+旧配置无需重新录入：Codex 接入迁移到 Codex CLI，普通模型 API 迁移到工作台闭环，旧自定义 Agent 地址和密钥迁移到 HTTP harness。
+
+Codex 通过项目依赖中的 CLI 0.155.1 复用原有 ChatGPT 登录，不读取、复制或导出登录令牌。该版本独立于电脑上的全局 CLI。当前接入采用受限单轮模式：临时目录、只读沙箱、禁用 shell、应用与 hooks，使用相机附件和 JSON Schema 输出；终止后清理临时图片。选择 Responses API 时，CLI 使用独立配置的模型地址，密钥只传入子进程环境；选择本机登录则消耗当前账号 Codex 用量。该模式不提供任意终端工具执行，也不使用工作台的输出 token 上限参数。若换电脑，需要先通过 Codex CLI 登录；`CODEX_CLI_PATH` 可指定原生 CLI 路径。
+
+Claude Code 使用 `--bare`、隔离配置目录和受限执行，关闭用户设置、MCP、文件／终端工具与会话持久化。它通过官方结构化输出机制返回动作，机器人仍由工作台执行。模型必须支持 Messages 图像和相应结构化输出请求；本接入不提供 Claude 订阅登录模式。CLI 返回的公开文本、推理文本及汇总用量会归档。`total_cost_usd` 与 `modelUsage` 是 CLI 报告的参考值；一次 CLI 运行可能包含多个底层请求，不能将合并用量当作单次请求，声称已按官方长上下文档位精确复算。收费仍以供应商账单为准。
+
+dsh 由官方 SDK 的 Agent 和模型适配器完成一次调用，使用临时工作目录与独立 HOME。工作台关闭文件、终端、MCP、网页及隐式插件工具，不读取全局登录配置；模型输出须为动作 JSON，不允许模型自行调用本机工具。官方适配器负责把推理设置转换成所选协议，例如 Anthropic 的思考预算。返回的输入、缓存和输出用量按对应供应商口径记录；缺失用量保持未知。超时、取消、无效输出或不支持的组合都会明确报错，不改用其他 harness 或模型。
+
+Claude Code 与 dsh 已增加“真实官方 CLI → 本机协议测试服务”的验收，覆盖多图、配置、动作格式及错误边界；这类测试不调用收费模型，也不证明真实模型的视觉控制能力。具体证据和复现命令见 [Harness 验收记录](QA_HARNESS.md)。
 
 API 模式可填写服务地址、API Key、模型名称；Key 只保存在本机后端内存，不写入网页存储或文件。切换服务地址或协议会清除旧密钥。重启后需重新配置。兼容适配器可以对接 DeepSeek 等兼容协议的服务，但**所选模型必须支持多图像输入**；文本模型不适用本闭环，不会静默省略图像或改成文字规划。API 适配器已通过本地 HTTP 契约测试，实际账号可用性、视觉能力需用对应 Key 验证。
 

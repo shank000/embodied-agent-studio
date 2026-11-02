@@ -19,7 +19,7 @@ WSL2 本轮使用 WSLg 的 GLFW，OpenGL 实际为 llvmpipe 软件渲染；这�
 
 ## 1. 准备工具与源码
 
-- Python **3.13**，Node.js **22.12 或以上受支持版本**，Git。
+- Python **3.13**，Node.js **22.19.0 或以上受支持版本**，Git。
 - 能创建 OpenGL 上下文的图形驱动。Linux 无桌面环境见下文。
 - 可选视频录制：安装带 `libx264` 的 [FFmpeg](https://ffmpeg.org/download.html)，将 `ffmpeg` 与 `ffprobe` 放入 PATH。
 
@@ -97,9 +97,15 @@ macOS 的本项目使用 `mujoco.Renderer` 离屏画面，经 CGL 创建上下�
 
 ## 模型接入
 
-网页模型卡片支持 Codex 登录、OpenAI、Claude、兼容 API 与自定义 Agent。项目内固定版本的 Codex CLI 随 `npm ci` 安装；程序按当前 OS 和 CPU 架构选择原生文件。也可安装本机原生 CLI，或通过 `CODEX_CLI_PATH` 指定原生可执行文件。
+“Agent 接管 → 模型与 Harness”将执行 harness 与模型服务分别配置，支持工作台视觉闭环、Codex CLI、Claude Code、DeepSeek Harness（dsh）和自定义 HTTP harness。协议矩阵和保存步骤见[使用指南](USAGE.md#harness-与模型分别配置)。
+
+`npm ci` 安装项目锁定的 Codex CLI **0.155.1**、Claude Code **2.1.316** 和 dsh **0.2.1-rc.5**。Codex／Claude Code 按操作系统和 CPU 架构选原生程序，dsh 使用官方 Node.js SDK 入口。不要省略 optional dependencies，它们包含原生 CLI。Node.js **22.19.0** 是这组依赖的最低要求，使用 Node 22 的最新修订版也可以。
+
+需要指定其他安装位置时，`CODEX_CLI_PATH`、`CLAUDE_CLI_PATH` 指向各自原生可执行文件；`DSH_CLI_PATH` 指向官方 dsh 可执行文件或 `lib/bin.js`。项目验证范围以锁定版本为准；dsh 对不匹配版本明确报错，不静默退回普通 API 调用。
 
 使用 Codex 时先在该系统执行 `npx --no-install codex login`。WSL 请从 Ubuntu 终端启动，并在 Linux 内分别安装 Node 依赖和登录 Codex；不要使用继承自 Windows PATH 的 npm 包装脚本。工作台不复制 Windows 登录令牌。其余服务在页面填写地址、模型与 Key；密钥仅存内存。
+
+Claude Code 当前采用 **API-only** 模式：选择 Anthropic Messages，填写模型基础地址、模型 ID 与 API Key；不需要也不读取 Claude OAuth／订阅登录。dsh 可选 Responses、Chat Completions 或 Messages，均填写独立模型 Key。两个 CLI 都在隔离配置下运行，关闭本机工具，只把结构化动作交给工作台。视觉任务必须选择支持多图输入的模型。
 
 ## 可选：SmolVLA 策略环境
 
@@ -134,3 +140,5 @@ npm run build
 ```
 
 完整 Python 回归需要所有机器人资源，视频测试还需要 FFmpeg / ffprobe。普通测试不调用付费模型；`tests/live_agent_smoke.py` 只有显式运行才消耗模型额度。[跨平台 CI](../.github/workflows/platform-smoke.yml)运行三平台基础检查和 Linux 渲染 smoke，不代表所有平台的全部功能已验收。
+
+真实 Claude Code／dsh 的协议检查连接本机测试服务，不使用供应商账号。安装 Node 依赖后，可按 [Harness 验收记录](QA_HARNESS.md#真实-cli-协议检查)启用；CI 会独立执行这一组测试。它验证 CLI 接口兼容性，不作为付费模型语义或任务成功率验收。

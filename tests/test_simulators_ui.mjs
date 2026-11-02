@@ -40,14 +40,14 @@ test('simulator availability comes from catalog; unsafe descriptions remain text
   const {element,run}=setup([{body:catalog('not_installed')}]);
   await run('initSimulators(callbacks)');
   assert.equal(element('simulator-select').value,'mujoco');
-  assert.deepEqual(element('simulator-select').children.map(option=>[option.value,option.disabled]),[['mujoco',false],['genesis',true],['future',true]]);
+  assert.deepEqual(element('simulator-select').children.map(option=>[option.value,option.disabled]),[['mujoco',false],['genesis',false],['future',true]]);
   assert.equal(element('simulator-load').disabled,true);
   const future=element('simulator-catalog').children[2];
   assert.ok(future.textContent.includes('<img src=x onerror=bad()>'));
   assert.equal(future.children.some(node=>node.tagName==='a'),false);
 });
 
-test('RoboDojo opens its independent benchmark from the environment selector without switching physics',async()=>{
+test('legacy benchmark-only catalogs retain their independent official evaluation entry',async()=>{
   const value=catalog();value.backends.push({id:'robodojo',name:'RoboDojo',kind:'benchmark',status:'external_runtime',installed:null,implemented:true,description:'Isaac Sim 5.1 independent rollout'});
   let opened=0;
   const {element,calls,run,scope}=setup([{body:value}]);scope.callbacks.onOpenBenchmark=()=>opened++;
@@ -55,7 +55,7 @@ test('RoboDojo opens its independent benchmark from the environment selector wit
   const option=element('simulator-select').children.find(item=>item.value==='robodojo');
   assert.equal(option.disabled,false);assert.ok(option.textContent.includes('独立评测入口'));
   element('simulator-select').value='robodojo';element('simulator-select').listeners.change();
-  assert.equal(element('simulator-load').textContent,'打开 RoboDojo');assert.equal(element('simulator-load').disabled,false);
+  assert.equal(element('simulator-load').textContent,'打开官方评测');assert.equal(element('simulator-load').disabled,false);
   await element('simulator-load').listeners.click();
   assert.equal(opened,1);assert.equal(calls.length,1);assert.ok(element('simulator-current').textContent.startsWith('MuJoCo'));
   assert.ok(element('simulator-message').textContent.includes('当前仿真环境保持不变'));
@@ -67,8 +67,25 @@ test('broken interpreter is unavailable with an actionable diagnostic instead of
   const value=catalog('unavailable');value.backends[1].error='Python home missing; repair pyvenv.cfg <literal>';
   const {element,run}=setup([{body:value}]);await run('initSimulators(callbacks)');
   const option=element('simulator-select').children.find(item=>item.value==='genesis');
-  assert.equal(option.disabled,true);assert.ok(option.textContent.includes('运行环境异常'));
+  assert.equal(option.disabled,false);assert.ok(option.textContent.includes('运行环境异常'));
+  element('simulator-select').value='genesis';element('simulator-select').listeners.change();
+  assert.equal(element('simulator-load').disabled,true);
   assert.ok(element('simulator-catalog').textContent.includes(value.backends[1].error));
+});
+
+test('OmniGibson shows resource preparation and native acceptance separately and cannot load prematurely',async()=>{
+  const value=catalog();value.backends.push({id:'omnigibson',name:'BEHAVIOR / OmniGibson',status:'not_ready',installed:false,implemented:true,
+    capabilities:['observe','native_action','policy_chunk','verify_task'],
+    integration:{mode:'interactive_research',native_validation:'not_recorded',limitations:['原生运行待验收']},
+    readiness:{message:'资源尚未就绪',checks:[{label:'至少 32 GB 内存',status:'missing',detail:'检测到 16 GB'}]}});
+  const {element,calls,run}=setup([{body:value}]);await run('initSimulators(callbacks)');
+  element('simulator-select').value='omnigibson';element('simulator-select').listeners.change();
+  assert.ok(element('simulator-select').children.find(item=>item.value==='omnigibson').textContent.includes('待准备'));
+  assert.equal(element('simulator-load').disabled,true);
+  assert.ok(element('simulator-readiness').textContent.includes('至少 32 GB 内存'));
+  assert.ok(element('simulator-readiness').textContent.includes('整机原生动作'));
+  assert.ok(element('simulator-readiness').textContent.includes('原生运行待验收'));
+  await element('simulator-load').listeners.click();assert.equal(calls.length,1);
 });
 
 test('RoboDojo cannot be posted as an interactive backend when navigation is unavailable',async()=>{
@@ -176,11 +193,48 @@ test('a failed engine can be explicitly reloaded while healthy same-engine loads
 test('refresh detects a newly installed backend without switching or running a simulation',async()=>{
   const {element,calls,run}=setup([{body:catalog('not_installed')},{body:catalog()}]);
   await run('initSimulators(callbacks)');
-  assert.equal(element('simulator-select').children[1].disabled,true);
+  element('simulator-select').value='genesis';element('simulator-select').listeners.change();
+  assert.equal(element('simulator-load').disabled,true);
   await element('simulator-refresh').listeners.click();
   assert.equal(element('simulator-select').children[1].disabled,false);
-  assert.equal(element('simulator-select').value,'mujoco');
+  assert.equal(element('simulator-select').value,'genesis');
+  assert.equal(element('simulator-load').disabled,false);
   assert.deepEqual(calls.map(call=>call.url),['/api/simulators','/api/simulators']);
+});
+
+test('RoboDojo interactive adapter loads normally and keeps official evaluation separate',async()=>{
+  const value=catalog();value.backends.push({id:'robodojo',name:'RoboDojo',status:'available',installed:true,implemented:true,
+    capabilities:['observe','move_tcp','verify_task','view','checkpoint'],
+    integration:{mode:'interactive_research',native_validation:'runtime_preflight_only',limitations:['物理状态不支持恢复']}});
+  let opened=0,changed=0;
+  const {element,calls,run,scope}=setup([{body:value},{body:{backend:{engine_id:'robodojo'},session_id:'dojo'}}],async()=>changed++);
+  scope.callbacks.onOpenBenchmark=()=>opened++;
+  await run('initSimulators(callbacks)');element('simulator-select').value='robodojo';element('simulator-select').listeners.change();
+  assert.equal(element('simulator-load').textContent,'加载交互环境');assert.equal(element('simulator-load').disabled,false);
+  assert.match(element('simulator-readiness').textContent,/依赖预检完成 · 原生运行待验收/);
+  assert.match(element('simulator-readiness').textContent,/物理状态不支持恢复/);
+  assert.equal(element('simulator-benchmark').hidden,false);
+  await element('simulator-load').listeners.click();
+  assert.equal(calls[1].url,'/api/simulators/select');assert.equal(JSON.parse(calls[1].body).engine_id,'robodojo');
+  assert.equal(opened,0);assert.equal(changed,1);assert.equal(element('simulator-select').value,'robodojo');
+  element('simulator-benchmark').listeners.click();assert.equal(opened,1);
+});
+
+test('missing RoboDojo runtime exposes readiness without attempting a simulation switch',async()=>{
+  const value=catalog();value.backends.push({id:'robodojo',name:'RoboDojo',status:'not_installed',installed:false,implemented:true,
+    integration:{mode:'interactive_research',native_validation:'not_recorded'},
+    readiness:{ready:false,message:'请配置 Linux GPU 运行环境',checks:[{status:'missing',label:'Isaac Sim 5.1',detail:'<install-runtime>'}]}});
+  const {element,calls,run}=setup([{body:value}]);await run('initSimulators(callbacks)');
+  element('simulator-select').value='robodojo';element('simulator-select').listeners.change();
+  assert.equal(element('simulator-select').children.at(-1).disabled,false);
+  assert.equal(element('simulator-load').disabled,true);assert.equal(element('simulator-load').textContent,'运行环境未就绪');
+  assert.match(element('simulator-readiness').textContent,/尚未记录原生验收/);
+  assert.match(element('simulator-readiness').textContent,/请配置 Linux GPU 运行环境/);
+  assert.match(element('simulator-readiness').textContent,/待准备 Isaac Sim 5.1：<install-runtime>/);
+  assert.equal(element('simulator-readiness').children.at(-1).children[0].children.length,0);
+  await element('simulator-load').listeners.click();assert.equal(calls.length,1);
+  element('simulator-select').value='mujoco';element('simulator-select').listeners.change();
+  assert.equal(element('simulator-benchmark').hidden,true);
 });
 
 test('a UI synchronization error reports that the engine already loaded',async()=>{

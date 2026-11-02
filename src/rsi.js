@@ -35,7 +35,7 @@ function parseObject(selector,label){
   if(!value||Array.isArray(value)||typeof value!=='object')throw new Error(`${label}必须是 JSON 对象。`);
   rejectSecrets(value,label);return value;
 }
-function rejectSecrets(value,label){for(const [key,entry] of Object.entries(value)){if(/^(api_key|apikey|token|password|authorization|decision_api_keys)$/i.test(key))throw new Error(`${label}不能包含密钥字段 ${key}；请在专用密钥输入框填写。`);if(entry&&typeof entry==='object')rejectSecrets(entry,label);}}
+function rejectSecrets(value,label){for(const [key,entry] of Object.entries(value)){const normalized=key.toLowerCase().replaceAll('-','_');if(/^(api_keys?|apikeys?|authorization|password|passwd|secret|client_secret|access_token|refresh_token|id_token|token|bearer|bearer_token|credentials?|secrets)$|_(api_keys?|password|secret|access_token)$/.test(normalized))throw new Error(`${label}不能包含密钥字段 ${key}；请在专用密钥输入框填写。`);if(entry&&typeof entry==='object')rejectSecrets(entry,label);}}
 function parseDecisions(){
   let list;try{list=JSON.parse($('#rsi-decisions-json').value);}catch{throw new Error('多决策配置 JSON 格式错误，请填写 2–8 个决策器对象组成的数组。');}
   if(!Array.isArray(list)||list.length<2||list.length>8||list.some(item=>!item||Array.isArray(item)||typeof item!=='object'))throw new Error('多决策组合必须包含 2–8 个决策器对象。');
@@ -62,19 +62,38 @@ function fillConfigs(source){
   updateMode();
 }
 function updateAgentFields(agent){
-  $('#rsi-agent-source').value=agent.provider||'codex';$('#rsi-agent-model').value=agent.model||'';$('#rsi-agent-url').value=agent.base_url||'';
+  $('#rsi-agent-source').value=agent.provider||'codex';$('#rsi-agent-model').value=agent.model||'';$('#rsi-agent-url').value=(agent.provider==='custom'?(agent.harness_url||agent.base_url):agent.base_url)||'';
   $('#rsi-agent-url-field').hidden=agent.provider==='codex';
   $('#rsi-agent-url').disabled=agent.provider==='codex'||$('#rsi-mode').value==='policy';
-  $('#rsi-agent-provider-help').textContent=agent.provider==='custom'?'自定义 Agent 服务使用 embodied-agent-v1：填写完整请求地址与实际模型／Agent 标识，响应须返回符合动作或子目标 Schema 的 output。任意 Agent 实现均须遵循相同观察与执行权限。':'可填写此服务实际可用的任意模型 ID。保存会冻结模型和调用配置；当前工作台配置只是默认起点。';
+  $('#rsi-agent-provider-help').textContent=agent.provider==='custom'?'服务地址是自定义 HTTP harness 的完整请求地址；该服务使用 embodied-agent-v1，须返回符合动作或子目标 Schema 的 output。模型由 harness 服务管理，所有 Agent 均遵循相同观察与执行权限。':'服务地址是模型 API 地址；高级 JSON 中的 harness_url 独立配置。可填写此服务实际可用的任意模型 ID，保存会冻结模型和调用配置。';
 }
-function updateAgentJson(providerChanged=false){
-  try{const agent=parseObject('#rsi-agent-json','Agent 配置');agent.provider=$('#rsi-agent-source').value;agent.model=$('#rsi-agent-model').value.trim();agent.base_url=providerChanged?({codex:'https://api.openai.com/v1',openai:'https://api.openai.com/v1',compatible:'',anthropic:'https://api.anthropic.com',custom:''}[agent.provider]):$('#rsi-agent-url').value.trim();$('#rsi-agent-json').value=pretty(agent);updateMode();}catch(error){report(error);}
+function agentConfigFromFields(providerChanged=false){
+  const agent=parseObject('#rsi-agent-json','Agent 配置');agent.provider=$('#rsi-agent-source').value;agent.model=$('#rsi-agent-model').value.trim();
+  // This legacy shortcut selects both execution path and model protocol. Let
+  // backend migration infer its harness; custom's URL remains in base_url.
+  if(providerChanged){delete agent.harness;delete agent.harness_url;delete agent.forward_model_key;}
+  const urlKey=agent.provider==='custom'&&agent.harness==='http'?'harness_url':'base_url';
+  agent[urlKey]=providerChanged?({codex:'https://api.openai.com/v1',openai:'https://api.openai.com/v1',compatible:'',anthropic:'https://api.anthropic.com',custom:''}[agent.provider]):$('#rsi-agent-url').value.trim();
+  return agent;
 }
+function updateAgentJson(providerChanged=false){try{$('#rsi-agent-json').value=pretty(agentConfigFromFields(providerChanged));updateMode();}catch(error){report(error);}}
 function updateDecisionStrategy(){
   const strategy=$('#rsi-decision-strategy').value,active=$('#rsi-mode').value==='hybrid';setFieldsVisible('#rsi-single-decision-config',active&&strategy==='single');setFieldsVisible('#rsi-multi-decision-config',active&&strategy!=='single');
   $('#rsi-decision-strategy-help').textContent={single:'一个决策器选择候选动作；只有该服务可使用单决策器密钥。',cascade:'第一个决策器提出首选，后续决策器依次复核；未达成一致则请求主 Agent 重规划。',weighted_vote:'各决策器分别选择候选，按 weight 计算票份额；须获得严格多数，没有多数则重规划。票份额不等同于校准概率。'}[strategy];
 }
 function setFieldsVisible(selector,visible){const field=$(selector);field.hidden=!visible;field.querySelectorAll('input,select,textarea').forEach(input=>input.disabled=!visible);}
+function runtimeAgentCredentials(){
+  const agent=methods.find(method=>methodId(method)===$('#rsi-run-method').value)?.recipe?.agent;
+  const http=agent?.harness==='http'||(!agent?.harness&&agent?.provider==='custom');
+  return {managed:http&&agent?.provider==='custom',separate:http&&agent?.provider!=='custom'};
+}
+function updateRuntimeCredentialFields(){
+  const {managed,separate}=runtimeAgentCredentials();
+  $('#rsi-runtime-agent-label').textContent=managed?'HTTP harness 运行密钥':'Agent 模型 API Key';
+  $('#rsi-runtime-agent-key').placeholder=managed?'自定义 HTTP harness 的鉴权密钥':'可选';
+  $('#rsi-runtime-harness-key-field').hidden=!separate;$('#rsi-runtime-harness-key').disabled=!separate;
+  if(!separate)$('#rsi-runtime-harness-key').value='';
+}
 function updateMode(){
   const mode=$('#rsi-mode').value,policy=mode==='policy'||(mode==='hybrid'&&$('#rsi-hybrid-policy').checked);
   setFieldsVisible('#rsi-decision-fields',mode==='hybrid');setFieldsVisible('#rsi-policy-kind-field',policy);
@@ -105,7 +124,7 @@ function renderMethods(){
   $('#rsi-compare-methods').replaceChildren();
   for(const method of methods){const label=document.createElement('label');label.innerHTML=`<input type="checkbox" value="${escape(methodId(method))}"><span><strong>${escape(method.recipe.name)}</strong><small>G${method.recipe.evolution_generation??0} · ${escape(modes[method.recipe.mode])}</small></span>`;label.querySelector('input').checked=selected.has(methodId(method));$('#rsi-compare-methods').append(label);}
   if(!methods.length)$('#rsi-compare-methods').innerHTML='<p class="rsi-help">需要先保存方法版本。</p>';
-  updatePromotionParent();renderRegistry();renderLocks();
+  updatePromotionParent();renderRegistry();renderLocks();updateRuntimeCredentialFields();
 }
 function inheritMethod(id){const recipe=methods.find(method=>methodId(method)===id)?.recipe;if(!recipe)return;$('#rsi-parent').value=id;$('#rsi-mode').value=recipe.mode;$('#rsi-name').value=`${recipe.name} · 子代`;$('#rsi-change').value='';if(recipe.policy?.kind)$('#rsi-policy-kind').value=recipe.policy.kind;fillConfigs(recipe);$('#rsi-method-message').textContent=`已载入父代 ${id} 的完整配方；修改并保存会生成新版本。`;$('#rsi-name').focus();}
 function renderProtocols(){
@@ -140,12 +159,13 @@ function renderRegistry(){
 }
 function renderLocks(){
   if(!context)return;
-  const state=currentState,locked=!!(state.ready===false||state.backend_switching||context.catalogReady?.()===false||(catalog?.engine_id&&state.backend?.engine_id&&catalog.engine_id!==state.backend.engine_id)||state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active||state.benchmark?.active);
+  const state=currentState,locked=!!(state.ready===false||state.backend_switching||context.catalogReady?.()===false||(catalog?.engine_id&&state.backend?.engine_id&&catalog.engine_id!==state.backend.engine_id)||state.agent?.active||state.policy?.active||state.comparison?.active||state.research?.active||state.experiment?.active||(state.benchmark?.active||state.harnesspai?.active));
   const discrete=['text','discrete'].includes(state.backend?.action_mode);
-  let note=$('#rsi-environment-note');if(!note){note=document.createElement('p');note.id='rsi-environment-note';note.className='research-note';$('#rsi-run-message').after(note);}note.hidden=!discrete;note.textContent=discrete?'此方法组合与配对评测使用连续机械臂动作协议。当前环境请使用工作台 Agent 或原生命令；历史实验仍可查看与回放。':'';
+  const pairedStateSupported=!Array.isArray(state.backend?.capabilities)||['checkpoint','restore'].every(name=>state.backend.capabilities.includes(name));
+  let note=$('#rsi-environment-note');if(!note){note=document.createElement('p');note.id='rsi-environment-note';note.className='research-note';$('#rsi-run-message').after(note);}note.hidden=!discrete&&pairedStateSupported;note.textContent=discrete?'此方法组合与配对评测使用连续机械臂动作协议。当前环境请使用工作台 Agent 或原生命令；历史实验仍可查看。':!pairedStateSupported?'当前环境支持单次方法组合；冻结协议与配对批量研究需要可恢复检查点，暂不可用。实验视频与轮次记录仍可保存和查看。':'';
   $('#rsi-run-start').disabled=busy||locked||!methods.length||discrete;$('#rsi-run-once').disabled=busy||locked||!methods.length||discrete;$('#rsi-run-stop').disabled=stopping||!state.research?.active;
-  $('#rsi-experiment-start').disabled=busy||locked||methods.length<2||!protocols.length||discrete;$('#rsi-experiment-stop').disabled=stopping||!state.experiment?.active;
-  $('#rsi-save').disabled=busy||locked||discrete;$('#rsi-save-protocol').disabled=busy||locked||discrete;$('#rsi-save-runtime').disabled=busy||locked||!methods.length||discrete;$('#rsi-refresh').disabled=busy;$('#rsi-promote').disabled=busy||locked||!$('#rsi-promotion-experiment').value;$('#rsi-rollback').disabled=busy||locked||!registry.active_method_id;
+  $('#rsi-experiment-start').disabled=busy||locked||methods.length<2||!protocols.length||discrete||!pairedStateSupported;$('#rsi-experiment-stop').disabled=stopping||!state.experiment?.active;
+  $('#rsi-save').disabled=busy||locked||discrete;$('#rsi-save-protocol').disabled=busy||locked||discrete||!pairedStateSupported;$('#rsi-save-runtime').disabled=busy||locked||!methods.length||discrete;$('#rsi-refresh').disabled=busy;$('#rsi-promote').disabled=busy||locked||!$('#rsi-promotion-experiment').value;$('#rsi-rollback').disabled=busy||locked||!registry.active_method_id;
   $('#rsi-restore-frame').disabled=busy||locked||!episode?.available;for(const selector of ['#rsi-run-method','#rsi-run-task','#rsi-run-sim','#rsi-run-wall','#rsi-run-steps','#rsi-run-record-video'])$(selector).disabled=busy||!!state.research?.active;
   $('#rsi-experiment-record-video').disabled=busy||locked;
 }
@@ -163,21 +183,23 @@ export async function initRsi(callbacks){
   $('#rsi-use-current').addEventListener('click',()=>action(async()=>{defaults=await request('research/defaults');const current={agent:defaults.agent,policy:defaults.policy[$('#rsi-policy-kind').value]};$('#rsi-agent-json').value=pretty(current.agent);$('#rsi-policy-json').value=pretty(current.policy);updateMode();$('#rsi-method-message').textContent='已载入当前工作台模型配置，保存时冻结为此版本。';}));
   $('#rsi-method-form').addEventListener('submit',event=>{event.preventDefault();action(async()=>{
     const mode=$('#rsi-mode').value,needsPolicy=mode==='policy'||(mode==='hybrid'&&$('#rsi-hybrid-policy').checked),strategy=mode==='hybrid'?$('#rsi-decision-strategy').value:'single';
-    const agent=mode!=='policy'?{...parseObject('#rsi-agent-json','Agent 配置'),provider:$('#rsi-agent-source').value,model:$('#rsi-agent-model').value.trim(),base_url:$('#rsi-agent-url').value.trim()}:null;
+    const agent=mode!=='policy'?agentConfigFromFields():null;
     const recipe={schema_version:'embodied-method-v1',name:$('#rsi-name').value.trim(),mode,parent_id:$('#rsi-parent').value||null,change_summary:$('#rsi-change').value.trim(),agent,policy:needsPolicy?{...parseObject('#rsi-policy-json','策略配置'),kind:$('#rsi-policy-kind').value}:null,decision_strategy:strategy,decision:mode==='hybrid'&&strategy==='single'?{kind:$('#rsi-decision-kind').value,url:$('#rsi-decision-url').value.trim(),model:$('#rsi-decision-model').value.trim(),vision:$('#rsi-decision-vision').checked,question_name:$('#rsi-question-name').value.trim(),timeout_s:Number($('#rsi-decision-timeout').value),weight:1}:null,decisions:mode==='hybrid'&&strategy!=='single'?parseDecisions():[],skills:parseObject('#rsi-skills-json','技能配置'),controller:parseObject('#rsi-controller-json','控制配置')};
     const credentials={};if(mode==='hybrid'){if(strategy==='single'&&$('#rsi-decision-key').value)credentials.decision_api_key=$('#rsi-decision-key').value;if(strategy!=='single'){const keys=parseKeyMap('#rsi-decision-keys');if(Object.keys(keys).some(index=>Number(index)>=recipe.decisions.length))throw new Error('密钥索引超出本方法的决策器列表。');if(Object.keys(keys).length)credentials.decision_api_keys=keys;}}
     const saved=await request('research/methods',{recipe,credentials});$('#rsi-decision-key').value='';$('#rsi-decision-keys').value='';
-    methods=await request('research/methods');renderMethods();$('#rsi-run-method').value=methodId(saved);$('#rsi-method-message').textContent=`已保存 ${methodId(saved)}。后续修改请创建子代版本。`;
+    methods=await request('research/methods');renderMethods();$('#rsi-run-method').value=methodId(saved);updateRuntimeCredentialFields();$('#rsi-method-message').textContent=`已保存 ${methodId(saved)}。后续修改请创建子代版本。`;
   });});
   $('#rsi-run-form').addEventListener('submit',event=>{event.preventDefault();action(()=>startMethod(false));});$('#rsi-run-once').addEventListener('click',()=>{if($('#rsi-run-form').reportValidity())action(()=>startMethod(true));});
   $('#rsi-run-stop').addEventListener('click',()=>stopRun('research/stop'));
-  $('#rsi-run-method').addEventListener('change',()=>{for(const type of ['agent','policy','decision'])$(`#rsi-runtime-${type}-key`).value='';$('#rsi-runtime-decision-keys').value='';$('#rsi-runtime-message').textContent='';});
+  $('#rsi-run-method').addEventListener('change',()=>{for(const type of ['agent','harness','policy','decision'])$(`#rsi-runtime-${type}-key`).value='';$('#rsi-runtime-decision-keys').value='';$('#rsi-runtime-message').textContent='';updateRuntimeCredentialFields();});
   $('#rsi-save-runtime').addEventListener('click',()=>action(async()=>{
     const id=$('#rsi-run-method').value;if(!id)throw new Error('请先选择一个方法版本。');const credentials={},recipe=methods.find(method=>methodId(method)===id)?.recipe;
-    for(const type of ['agent','policy','decision']){const value=$(`#rsi-runtime-${type}-key`).value;if(value)credentials[`${type}_api_key`]=value;}
+    const {managed,separate}=runtimeAgentCredentials();
+    for(const type of ['agent','policy','decision']){const value=$(`#rsi-runtime-${type}-key`).value;if(value)credentials[type==='agent'&&managed?'agent_harness_api_key':`${type}_api_key`]=value;}
+    if(separate&&$('#rsi-runtime-harness-key').value)credentials.agent_harness_api_key=$('#rsi-runtime-harness-key').value;
     const keys=parseKeyMap('#rsi-runtime-decision-keys');if(Object.keys(keys).length)credentials.decision_api_keys=keys;
     const count=recipe?.decisions?.length||(recipe?.decision?1:0);if(count>1&&credentials.decision_api_key)throw new Error('多决策方法需要按索引分别填写密钥，不能使用单决策器密钥。');if(Object.keys(keys).some(index=>Number(index)>=count))throw new Error('密钥索引超出所选方法的决策器列表。');
-    if(!Object.keys(credentials).length)throw new Error('请填写需要更新的运行时密钥。');await request(`research/methods/${encodeURIComponent(id)}/credentials`,credentials);for(const type of ['agent','policy','decision'])$(`#rsi-runtime-${type}-key`).value='';$('#rsi-runtime-decision-keys').value='';$('#rsi-runtime-message').textContent='凭据已应用于所选版本，各决策器密钥独立，仅在本次服务会话生效。';
+    if(!Object.keys(credentials).length)throw new Error('请填写需要更新的运行时密钥。');await request(`research/methods/${encodeURIComponent(id)}/credentials`,credentials);for(const type of ['agent','harness','policy','decision'])$(`#rsi-runtime-${type}-key`).value='';$('#rsi-runtime-decision-keys').value='';$('#rsi-runtime-message').textContent='凭据已应用于所选版本，模型、harness 和决策器密钥独立，仅在本次服务会话生效。';
   }));
   $('#rsi-protocol-scene').addEventListener('change',fillTasks);$('#rsi-protocol-task').addEventListener('change',updateCriterion);$('#rsi-protocol-select').addEventListener('change',describeProtocol);
   $('#rsi-protocol-form').addEventListener('submit',event=>{event.preventDefault();action(async()=>{

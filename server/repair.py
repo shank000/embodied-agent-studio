@@ -23,9 +23,10 @@ import time
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field
 
-from .agent import AgentConfig, api_action, codex_action, validate_agent_access
+from .agent import (AgentConfig, invoke_agent_action, validate_agent_access,
+                    retain_agent_credentials, agent_secrets, AGENT_SECRET_FIELDS)
 from .runlog import RunLog, CURRENT_LOG, LIVE_RUNS, run_folder, list_runs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -242,16 +243,14 @@ class RepairController:
                 self.state['message'] = f'上次修复恢复信息无法读取：{exc}'
 
     def public_config(self):
-        return {**self.config.model_dump(exclude={'api_key'}), 'has_api_key': bool(self.config.api_key.get_secret_value()),
+        return {**self.config.model_dump(exclude=AGENT_SECRET_FIELDS), 'has_api_key': bool(self.config.api_key.get_secret_value()),
+                'has_harness_api_key': bool(self.config.harness_api_key.get_secret_value()),
                 'skills': [item['name'] for item in skills()], 'editable_files': list(EDITABLE),
                 'application_mode': 'review_then_apply', 'validation_scope': 'fixed_local_provider_contracts_and_candidate_regression'}
 
     def configure(self, config):
         if self.state['active']: raise ValueError('修复 Agent 运行中，请先停止。')
-        if config.provider == self.config.provider and config.base_url == self.config.base_url and not config.api_key.get_secret_value():
-            config.api_key = self.config.api_key
-        if config.provider == 'codex': config.api_key = SecretStr('')
-        self.config = config
+        self.config = retain_agent_credentials(config, self.config)
         return self.public_config()
 
     def snapshot(self):
@@ -275,7 +274,7 @@ class RepairController:
             raise ValueError('上一项代码变更尚待重启或恢复，请先完成后再开始新诊断。')
         validate_agent_access(self.config)
         config = self.config.model_copy(deep=True)
-        sensitive = (*secrets, config.api_key.get_secret_value())
+        sensitive = (*secrets, *agent_secrets(config))
         context = source_context(request.source_run_id, request.description, sensitive)
         source_bytes = {path:safe_path(self.root,path).read_bytes() for path in EDITABLE}
         if (self.root/REGRESSION).exists(): source_bytes[REGRESSION] = safe_path(self.root,REGRESSION).read_bytes()
@@ -286,7 +285,7 @@ class RepairController:
         self.current = {'id': job_id, 'folder': folder, 'source_hashes': {path:digest(content) for path,content in source_bytes.items()},
                         'source_run_id': request.source_run_id, 'secrets': sensitive}
         self.state = {'active': True, 'status': 'analyzing', 'job_id': job_id,
-                      'source_run_id': request.source_run_id, 'model': config.model,
+                      'source_run_id': request.source_run_id, 'model': config.model, 'harness':config.harness,
                       'started_at': datetime.now(timezone.utc).isoformat(), 'timeout_s':config.timeout_s,
                       'message': '正在按内置修复技能分析原始报错与模型接入代码。'}
         self._clock = time.monotonic()
@@ -294,9 +293,9 @@ class RepairController:
         return self.snapshot()
 
     async def run(self, config, context, sources, *, parent_log=None):
-        log = parent_log or RunLog('repair', {'model':config.model, 'provider':config.provider,
+        log = parent_log or RunLog('repair', {'model':config.model, 'provider':config.provider, 'harness':config.harness,
             'task':'诊断并修复模型调用报错', 'source_run_id':context.get('source_run_id'),
-            'settings':config.model_dump(exclude={'api_key'})}, secrets=self.current['secrets'])
+            'settings':config.model_dump(exclude=AGENT_SECRET_FIELDS)}, secrets=self.current['secrets'])
         if parent_log is not None:
             for secret in self.current['secrets']:
                 if secret and secret not in log.secrets: log.secrets.append(secret)
@@ -305,7 +304,7 @@ class RepairController:
         try:
             prompt = json.dumps(redact({'diagnostic_data':context, 'editable_source':sources,
                 'regression_file':REGRESSION, 'additional_user_requirements':config.extra_instructions}, self.current['secrets']), ensure_ascii=False)
-            function = codex_action if config.provider == 'codex' else api_action
+            function = invoke_agent_action
             proposal, usage = await function(config, prompt, [], response_type=RepairProposal,
                 system_prompt=system_contract(), schema_name='workbench_repair')
             proposal = RepairProposal.model_validate(redact(proposal.model_dump(), self.current['secrets']))

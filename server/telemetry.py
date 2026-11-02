@@ -13,6 +13,29 @@ CURRENT_CALL = ContextVar('robot_inference_call', default=None)
 RECOVERY_CONTEXT = ContextVar('robot_recovery_attempt', default=None)
 
 
+def routing_request_context():
+    """Correlation only; never send evaluation truth or credentials to a gateway."""
+    record = CURRENT_CALL.get()
+    if record is None: return {}
+    return {'schema_version': 'robot-routing-trace-v1', 'trace_id': record.get('trace_id'),
+            'decision_id': record.get('decision_id'), 'request_id': record['call_id'],
+            'parent_call_id': record.get('parent_call_id')}
+
+
+def normalize_routing(value):
+    """Accept explicit gateway metadata, not confidence prose or arbitrary payloads."""
+    value = value if isinstance(value, dict) else {}
+    result = {'availability': 'returned' if value and value.get('availability') != 'unavailable' else 'unavailable'}
+    for key in ('resolved_provider', 'resolved_model', 'router_policy_version', 'selected_capability',
+                'reason_code', 'billing_source', 'usage_completeness'):
+        item = value.get(key)
+        result[key] = item[:500] if isinstance(item, str) and item.strip() else None
+    probability = value.get('selection_probability')
+    result['selection_probability'] = probability if (isinstance(probability, (int, float))
+        and not isinstance(probability, bool) and math.isfinite(probability) and 0 <= probability <= 1) else None
+    return result
+
+
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -92,11 +115,27 @@ def note_response(data):
     response = data.get('response') if isinstance(data.get('response'), dict) else data
     usage = data.get('usage') if data.get('usage') is not None else response.get('usage')
     if isinstance(usage, dict): record['usage'] = usage
+    for field in ('cli_num_turns', 'cli_model_usage', 'cli_total_cost_usd', 'dsh_assistant_messages'):
+        if data.get(field) is not None: record[field] = data[field]
     if response.get('model'): record['model'] = response['model']
+    metadata = response.get('metadata') if isinstance(response.get('metadata'), dict) else {}
+    routing = data.get('routing', response.get('routing', metadata.get('routing')))
+    if isinstance(routing, dict):
+        record['routing'] = normalize_routing(routing)
+        if record['routing']['resolved_model']: record['model'] = record['routing']['resolved_model']
+    billing = data.get('billing', response.get('billing', metadata.get('billing')))
+    if isinstance(billing, dict):
+        scope = billing.get('scope')
+        record['billing_scope'] = scope if scope in ('self', 'inclusive', 'included') else 'unknown'
 
 
 def effective_reasoning(settings):
     provider = settings.get('provider')
+    if settings.get('harness') in ('claude_code', 'dsh'):
+        if (settings.get('harness') == 'dsh' and provider == 'compatible'
+                and urlsplit(settings.get('base_url', '')).hostname == 'api.deepseek.com'
+                and settings.get('deepseek_thinking') == 'disabled'): return 'off'
+        return settings.get('reasoning') or 'provider_default'
     if provider == 'anthropic' and not settings.get('reasoning_native'): return 'not_requested'
     if provider == 'compatible':
         deepseek = urlsplit(settings.get('base_url', '')).hostname == 'api.deepseek.com'
@@ -114,12 +153,21 @@ def track_inference(phase):
             from .costing import calculate_call_cost
             log = CURRENT_LOG.get()
             if log is None: return await function(config, *args, **kwargs)
-            settings = config.model_dump(exclude={'api_key'}) if hasattr(config, 'model_dump') else dict(config)
+            settings = config.model_dump(exclude={'api_key', 'harness_api_key'}) if hasattr(config, 'model_dump') else {
+                key: value for key, value in dict(config).items() if key not in ('api_key', 'harness_api_key')}
             pricing = await quote_for_call(settings)
             effort = effective_reasoning(settings)
             current_phase = 'repair_diagnosis' if kwargs.get('schema_name') == 'workbench_repair' else 'planning' if getattr(kwargs.get('response_type'), '__name__', '') == 'PlannerOutput' else phase
+            if kwargs.get('schema_name') in ('harnesspai_edit', 'harnesspai_diagnosis', 'harnesspai_memory'):
+                current_phase = kwargs['schema_name']
+            parent = CURRENT_CALL.get()
             record = {'call_id': uuid4().hex, 'round': log.current_round, 'phase': current_phase,
+                      'trace_schema_version': 'robot-routing-trace-v1', 'trace_id': log.id,
+                      'decision_id': f'{log.id}:round:{log.current_round}',
+                      'parent_call_id': parent['call_id'] if parent and parent.get('trace_id') == log.id else None,
+                      'routing': normalize_routing(None), 'billing_scope': 'self',
                       'provider': settings.get('provider', settings.get('kind')), 'model': settings.get('model'),
+                      'harness': settings.get('harness'), 'harness_url': settings.get('harness_url') or None,
                       'requested_model': settings.get('model'),
                       'reasoning_effort': effort, 'configured_reasoning': settings.get('reasoning'), 'started_at': utc_now(),
                       'status': 'running', 'public_text': None, 'response_returned': False, 'usage': None,

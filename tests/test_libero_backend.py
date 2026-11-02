@@ -139,6 +139,21 @@ class LiberoNativeTests(unittest.TestCase):
             with self.assertRaises(ValueError): sim.restore(invalid)
             self.assertEqual(before, sim.checkpoint())
 
+    def test_official_pool_alias_and_legacy_checkpoint_provenance(self):
+        sim = self.sim
+        saved = sim.checkpoint()
+        identity = saved['native_initial_state']
+        self.assertGreater(identity['state_count'], 0)
+        self.assertEqual(identity['state_index'], saved['seed'] % identity['state_count'])
+        sim.seed += identity['state_count']
+        sim.reset()
+        self.assertEqual(sim.checkpoint()['native_initial_state']['state_sha256'], identity['state_sha256'])
+        legacy = copy.deepcopy(saved); legacy.pop('native_initial_state')
+        sim.restore(legacy)
+        self.assertEqual(sim.checkpoint()['native_initial_state']['status'], 'unverified_legacy')
+        sim.restore(saved)
+        self.assertEqual(sim.checkpoint()['native_initial_state'], identity)
+
     def test_policy_native_joint_controller_and_seeded_initial_state(self):
         from server.backends.libero_backend import JOINTS
         sim = self.sim

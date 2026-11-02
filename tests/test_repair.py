@@ -14,7 +14,7 @@ import httpx
 
 from server import repair, runlog
 from server.agent import api_action
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 REGRESSION = """import unittest
 from server.agent import response_value
@@ -49,7 +49,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(name,kwargs['system_prompt'])
             self.assertNotIn('sensitive-example-key', prompt)
             return result or proposal(), {'input_tokens':1,'output_tokens':1}
-        with patch('server.repair.codex_action',boundary),patch('server.repair.validate_agent_access'):
+        with patch('server.repair.invoke_agent_action',boundary),patch('server.repair.validate_agent_access'):
             await self.controller.start(repair.RepairStart(description='bad response sensitive-example-key'),secrets=['sensitive-example-key'])
             await self.controller.task
         self.assertEqual(self.controller.state['status'],'proposed')
@@ -87,7 +87,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         async def boundary(config,*args,**kwargs):
             self.assertEqual(config.timeout_s,900)
             entered.set();await release.wait();raise TimeoutError()
-        with patch('server.repair.codex_action',boundary),patch('server.repair.validate_agent_access'):
+        with patch('server.repair.invoke_agent_action',boundary),patch('server.repair.validate_agent_access'):
             await self.controller.start(repair.RepairStart(description='slow diagnosis'))
             await entered.wait()
             before=self.controller.snapshot();await asyncio.sleep(.02)
@@ -206,7 +206,7 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         config=repair.RepairConfig(provider='compatible',model='code-model',base_url='https://api.deepseek.com',api_key='private-key')
         self.controller.configure(config)
         self.assertNotIn('private-key',json.dumps(self.controller.public_config()))
-        self.controller.configure(config.model_copy(update={'api_key':repair.SecretStr('')}))
+        self.controller.configure(config.model_copy(update={'api_key':SecretStr('')}))
         self.assertEqual(self.controller.config.api_key.get_secret_value(),'private-key')
         self.assertNotIn('private-key',json.dumps(repair.redact({'api_key':'private-key','error':'Bearer private-key'},['private-key'])))
 

@@ -28,7 +28,7 @@ PROTOCOL_ID = re.compile(r'^protocol-[0-9a-f]{24}$')
 def evaluation_contract(engine_id='mujoco'):
     """Evaluator and physical environment are outside the candidate search space."""
     import mujoco
-    paths = ['server/scenes.py', 'server/simulation.py', 'server/task_verification.py',
+    paths = ['server/scenes.py', 'server/simulation.py', 'server/task_verification.py', 'server/task_graph.py',
              'server/robot_assets.py', 'server/multiarm.py', 'server/control.py', 'server/actions.py']
     contract = {'mujoco': mujoco.__version__, 'files': {
         name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths},
@@ -40,11 +40,15 @@ def evaluation_contract(engine_id='mujoco'):
         paths = [f'server/backends/{RUNTIMES[engine_id][2]}.py', 'server/backends/runtime.py', 'server/simulators.py', 'server/task_verification.py', 'server/actions.py']
         if engine_id == 'libero': paths.append('server/backends/libero_catalog.py')
         if engine_id == 'robocasa365': paths.append('server/backends/robocasa_catalog.py')
+        if engine_id == 'omnigibson': paths.extend(['server/backends/omnigibson_native.py', 'server/backends/omnigibson_catalog.py', 'server/omnigibson.py'])
         if engine_id in ('ai2thor', 'alfworld_thor'): paths.append('server/backends/alfworld_backend.py')
         if engine_id == 'alfworld_thor': paths.extend(['server/backends/thor_backend.py', 'server/backends/alfworld_thor_assets.py'])
         contract.pop('mujoco')
         contract['backend'] = backend_identity(engine_id, engine['version'])
         contract['files'] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths}
+        if engine_id == 'omnigibson':
+            contract.update(input_condition='native_rgb_depth_proprioception', action_condition='whole_body_native',
+                            evaluation_condition='bddl_physical_q_separate_from_success')
         if engine_id in ('alfworld','alfworld_thor','ai2thor'):
             contract.update(input_condition='native_text' if engine_id=='alfworld' else 'native_rgb_visible_metadata',
                             inference_timing='turn_based', time_unit='environment_step')
@@ -54,6 +58,52 @@ def evaluation_contract(engine_id='mujoco'):
 def _require_continuous_research(engine_id):
     if backend_identity(engine_id)['action_mode'] != 'tcp_pose':
         raise ValueError('研究组合与配对评测目前只支持连续机械臂动作；此环境请使用普通 Agent 接管或原生环境动作。')
+    if 'restore' not in backend_identity(engine_id)['capabilities']:
+        raise ValueError('此环境尚不支持恢复完整物理初态，不能执行保证相同初态的配对评测；请使用单次 Agent、策略或组合实验，以及官方评测流程。')
+
+
+def native_split_validation(spec, checkpoint):
+    """Check the complete registered split using one native LIBERO pool load."""
+    result = {'version': 'native-split-validation-v1', 'engine_id': spec.get('engine_id', 'mujoco'),
+              'task_id': spec['task_id'], 'status': 'not_applicable', 'conflicts': [], 'splits': {}}
+    if result['engine_id'] != 'libero':
+        result['message'] = '此后端不使用 LIBERO 固定初态池；本检查不代表其他后端已验证语义划分。'
+        return result
+    origin = checkpoint.get('native_initial_state')
+    count = origin.get('state_count') if isinstance(origin, dict) else None
+    hashes = origin.get('state_sha256_by_index') if isinstance(origin, dict) else None
+    def digest(value): return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+    if (not isinstance(origin, dict) or origin.get('schema_version') != 'libero-native-initial-state-v1'
+            or origin.get('status') != 'verified' or type(count) is not int or count < 1
+            or not isinstance(hashes, list) or len(hashes) != count or not all(digest(value) for value in hashes)
+            or not digest(origin.get('file_sha256')) or origin.get('seed_mapping') != 'seed_mod_state_count'):
+        return {**result, 'status': 'unverified', 'message': 'LIBERO 检查点缺少有效原生初态目录；请更新并重新加载环境，旧记录不能证明开发/验证/测试独立。'}
+    if (checkpoint.get('task_id') != spec['task_id'] or origin.get('task_id') != spec['task_id']
+            or checkpoint.get('scene_id') != spec['scene_id'] or origin.get('scene_id') != spec['scene_id']):
+        return {**result, 'status': 'unverified', 'message': 'LIBERO 原生初态目录属于其他任务，不能用于此协议。'}
+    seed = checkpoint.get('seed')
+    if (type(seed) is not int or type(origin.get('state_index')) is not int or origin['state_index'] != seed % count
+            or origin.get('state_sha256') != hashes[seed % count]):
+        return {**result, 'status': 'unverified', 'message': 'LIBERO 当前种子、原生编号和内容标识不一致。'}
+    pool_id = f"{spec['task_id']}:{origin['file_sha256']}"
+    result.update(pool_id=pool_id, source_file=origin.get('file'), state_count=count,
+                  identity_basis='task_and_pool_and_state_content')
+    seen = {}
+    for split in ('development', 'validation', 'test'):
+        mapped = []
+        for assigned_seed in spec[split + '_seeds']:
+            index = assigned_seed % count
+            identity = f'{pool_id}:{hashes[index]}'
+            row = {'seed': assigned_seed, 'index': index, 'native_initial_state_id': identity}
+            mapped.append(row)
+            if identity in seen:
+                result['conflicts'].append({'first': seen[identity], 'second': {'split': split, **row}})
+            else: seen[identity] = {'split': split, **row}
+        result['splits'][split] = mapped
+    result['status'] = 'conflict' if result['conflicts'] else 'passed'
+    result['message'] = ('不同种子映射到相同 LIBERO 原生初态；请重新划分种子，不能将别名作为独立条件。'
+                         if result['conflicts'] else '开发、验证和测试的原生初态内容身份互不重叠。')
+    return result
 
 
 class ResearchProtocol(BaseModel):
@@ -243,11 +293,22 @@ class ResearchController:
                 await self.worker.execute({'action': 'settle'})
                 checkpoint = await self.worker.execute({'action': 'checkpoint'})
                 log.write('initial_state', checkpoint)
+                split_check = native_split_validation(spec, checkpoint)
+                previous_check = self.state.get('native_split_validation')
+                if previous_check and previous_check.get('pool_id') != split_check.get('pool_id'):
+                    split_check.update(status='unverified', message='研究运行期间 LIBERO 原生初态目录发生变化，请固定资产后重新运行。')
+                self.state['native_split_validation'] = split_check
+                if not previous_check or previous_check != split_check: log.write('native_split_validation', split_check)
+                if split_check['status'] in ('conflict', 'unverified'):
+                    raise ValueError(split_check['message'])
                 order = list(request.method_ids)
                 rng.shuffle(order)
                 for method_id in order:
                     row = next(row for row in self.state['rows'] if row['seed'] == seed and row['method_id'] == method_id)
                     row.update(status='running', initial_state_id=checkpoint['state_id'])
+                    if split_check['status'] == 'passed':
+                        row['native_initial_state_id'] = next(item['native_initial_state_id']
+                            for item in split_check['splits'][request.split] if item['seed'] == seed)
                     self.state.update(status='running', message=f'种子 {seed} · {row["method_name"]}')
                     previous_run_id = self.runner.snapshot().get('run_id')
                     self._active_trial = {'row': row, 'previous_task': self.runner.task,
@@ -323,6 +384,8 @@ def promote(experiment_id, candidate_id, parent_id):
     if result.get('kind') != 'research_experiment' or result.get('status') != 'complete' or result.get('split') != 'validation':
         raise ValueError('只有完整结束的验证集配对实验可用于晋升；测试集结果不得用于选版本。')
     protocol = get_protocol(result['protocol_id'])
+    if protocol['spec'].get('engine_id') == 'libero' and (result.get('native_split_validation') or {}).get('status') != 'passed':
+        raise ValueError('此 LIBERO 实验没有通过原生初态划分检查；旧结果保留可读，但不能用于方法晋升。')
     if protocol['contract'] != evaluation_contract(protocol['spec'].get('engine_id', 'mujoco')):
         raise ValueError('评价环境已变化，旧实验不能用于当前晋升。')
     rows = result['rows']

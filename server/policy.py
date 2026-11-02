@@ -1,6 +1,7 @@
 """Direct action-chunk policies, independent of the language-agent control loop."""
 import asyncio
 import base64
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -16,7 +17,7 @@ from .control import PoseAction
 from .runlog import RunLog, CURRENT_LOG, model_output
 from .rounds import measured_round, round_phase
 from .telemetry import track_inference, controller_timing, enter_recorded_run
-from .task_verification import verify_completion, environment_success
+from .task_verification import verify_completion, environment_success, environment_stop
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_KINDS = ('smolvla', 'vla', 'wam')
@@ -53,15 +54,16 @@ class PolicyStart(BaseModel):
     task: str = Field(min_length=1, max_length=2000)
     one_chunk: bool = False
     record_video: bool = False
-    max_sim_time_s: float = Field(default=60, ge=1, le=600)
+    max_sim_time_s: float = Field(default=60, ge=1)
 
 
 class PolicyOutput(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
     protocol: Literal['embodied-policy-v1']
-    action_type: Literal['actuator_targets', 'tcp_pose']
+    action_type: Literal['actuator_targets', 'tcp_pose', 'native']
     robot_id: str | None = Field(default=None, min_length=1, max_length=40)
     joint_names: list[str] = Field(default_factory=list, max_length=64)
+    action_names: list[str] = Field(default_factory=list, max_length=128)
     actions: list[list[float]] = Field(default_factory=list, max_length=50)
     dt_s: float = Field(default=.05, ge=.02, le=.5)
     pose: PoseAction | None = None
@@ -78,11 +80,26 @@ class PolicyOutput(BaseModel):
     def required_action(self):
         if self.action_type == 'actuator_targets' and (not self.actions or not self.joint_names):
             raise ValueError('动作块需要非空 actions 与明确的 joint_names。')
+        if self.action_type == 'native' and (not self.actions or not self.action_names or self.joint_names or self.pose is not None):
+            raise ValueError('原生动作块需要 actions 与 action_names；不能混用 joint_names 或 TCP pose。')
+        if self.action_type == 'native' and (len(set(self.action_names)) != len(self.action_names)
+                or any(not name or len(row) != len(self.action_names) for name in self.action_names for row in self.actions)):
+            raise ValueError('原生动作名称须非空且唯一，每帧维度必须与 action_names 一致。')
         if self.action_type == 'tcp_pose' and self.pose is None: raise ValueError('TCP 策略输出必须包含 pose。')
         if self.pose is not None and self.robot_id:
             if self.pose.robot_id and self.pose.robot_id != self.robot_id: raise ValueError('策略外层与 TCP 动作的 robot_id 不一致。')
             self.pose = self.pose.model_copy(update={'robot_id':self.robot_id})
         return self
+
+
+def policy_chunk_command(output, generation):
+    command = {'action': 'policy_chunk', 'generation': generation, 'actions': output.actions,
+               'dt_s': output.dt_s, 'robot_id': output.robot_id}
+    if output.action_type == 'native':
+        command.update(action_space='native', action_names=output.action_names)
+    else:
+        command['joint_names'] = output.joint_names
+    return command
 
 
 async def ensure_local_service():
@@ -142,11 +159,29 @@ def policy_task_with_feedback(task, history):
     return task
 
 
+def validate_policy_timestep(config, observation):
+    """Reject an incompatible native cadence before paying for inference."""
+    native = observation.get('backend', {}).get('action_mode') == 'native'
+    if observation.get('backend', {}).get('engine_id') != 'robodojo' and not native: return
+    name = observation.get('backend', {}).get('engine_id', '原生环境')
+    interval = (observation.get('native_action_spec') or observation.get('action_space') or {}).get('dt_s') if native else None
+    if interval is None: interval = observation.get('limits', {}).get('control_timestep_s', observation.get('timestep'))
+    if interval is None or not math.isfinite(interval) or interval <= 0:
+        raise ValueError(f'{name} 未返回有效原生控制周期，请重新加载环境。')
+    ratio = config.dt_s / interval
+    if ratio < 1 - 1e-6 or abs(ratio - round(ratio)) > 1e-6:
+        raise ValueError(f'{name} 策略动作周期须为 {interval:g} 秒的正整数倍；当前配置为 {config.dt_s:g} 秒，请修改策略配置。')
+
+
 @track_inference('policy_inference')
 async def predict_policy(config, body, client=None):
     """Inference only. The episode owner controls observation and execution."""
+    validate_policy_timestep(config, body.get('observation', {}))
     endpoint = 'http://127.0.0.1:8010/predict' if config.kind == 'smolvla' else config.endpoint
     headers = {'Authorization': 'Bearer ' + config.api_key.get_secret_value()} if config.api_key.get_secret_value() else {}
+    from .telemetry import routing_request_context
+    headers.update({f'X-EmbodiWorks-{name.replace("_", "-")}': value
+                    for name, value in routing_request_context().items() if isinstance(value, str)})
     if client is not None:
         response = await client.post(endpoint, json=body, headers=headers, timeout=config.timeout_s)
     else:
@@ -192,7 +227,8 @@ class PolicyController:
     def snapshot(self):
         return {**controller_timing(self.state, getattr(self, 'run_log', None)), 'observation_id': self.observation_id,
                 'observation_time': self.observation['time'] if self.observation else None,
-                'observation_robot': self.observation['robot'] if self.observation else None}
+                'observation_robot': self.observation['robot'] if self.observation else None,
+                'observation_cameras': [camera['name'] for camera in self.observation.get('cameras', [])] if self.observation else []}
 
     def reset_observation(self):
         if self.state.get('active'): raise ValueError('请先停止当前策略任务，再清除场景观察。')
@@ -205,6 +241,8 @@ class PolicyController:
         config = self.configs[kind]
         if kind == 'smolvla' and robot != 'so101': raise ValueError('默认 SmolVLA 当前适配 SO-101。其他机器人请接入对应 VLA/WAM 策略。')
         if kind != 'smolvla' and not config.endpoint: raise ValueError(f'请先配置 {kind.upper()} 推理接口。')
+        with self.worker.lock: snapshot = self.worker.snapshot.copy()
+        validate_policy_timestep(config, snapshot)
 
     async def warmup(self):
         return await warmup_policy(self.worker, self.configs['smolvla'])
@@ -261,8 +299,9 @@ class PolicyController:
                 for number in range(1, self.state['max_rounds']+1):
                     with self.worker.lock: current = self.worker.snapshot.copy()
                     remaining = request.max_sim_time_s - (current['time']-initial['time'])
-                    if environment_success(current):
-                        self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
+                    ending = environment_stop(current)
+                    if ending:
+                        self.state.update(ending); return
                     if remaining < config.dt_s:
                         self.state.update(status='limit', message='已达到仿真时间上限。'); return
                     async with measured_round(log, self.worker, number, self.state):
@@ -307,8 +346,7 @@ class PolicyController:
                             result = await self.worker.execute({'action': 'move_tcp', 'generation': obs['generation'], 'pose': output.pose.model_dump()})
                             frames += 1
                         else:
-                            result = await self.worker.execute({'action': 'policy_chunk', 'generation': obs['generation'],
-                                'actions': output.actions, 'joint_names': output.joint_names, 'dt_s': output.dt_s, 'robot_id': output.robot_id})
+                            result = await self.worker.execute(policy_chunk_command(output, obs['generation']))
                             frames += result['frames']; limited += result['limited_targets']
                         deadline = time.monotonic()+60
                         while time.monotonic() < deadline:
@@ -316,7 +354,7 @@ class PolicyController:
                             with self.worker.lock: current = self.worker.snapshot.copy()
                             if not current.get('ready'): raise RuntimeError(current.get('error','仿真服务未就绪。'))
                             if current['generation'] != obs['generation']: raise RuntimeError('场景已切换，策略运行结束。')
-                            if current['time']-initial['time'] >= request.max_sim_time_s or environment_success(current):
+                            if current['time']-initial['time'] >= request.max_sim_time_s or environment_stop(current):
                                 await self.worker.execute({'action':'stop'}); break
                             if current['task']['status'] not in ('running','settling'): break
                         else: raise TimeoutError('策略动作执行超过 60 秒。')
@@ -325,8 +363,9 @@ class PolicyController:
                         log.write('execution', record)
                         self.state['history'].append({'round':number, 'frames': result.get('frames',1), 'limited_targets':result.get('limited_targets',0), 'latency_s':round(latencies[-1],3)})
                         self.state['history'] = self.state['history'][-30:]
-                        if environment_success(current):
-                            self.state.update(status='verified', message='场景评价器已确认任务成功。'); return
+                        ending = environment_stop(current)
+                        if ending:
+                            self.state.update(ending); return
                 self.state.update(status='round_complete' if request.one_chunk else 'limit', message='本次策略运行结束；任务结果以场景评价器为准。')
         except asyncio.CancelledError:
             self.state.update(status='stopped', message='策略已停止，迟到的推理结果不会执行。'); raise

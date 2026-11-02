@@ -4,16 +4,17 @@ EmbodiWorks 在同一个工作台选择后端，复用模型接入、实验记�
 
 左侧 **仿真环境 → 选择后端 → 加载环境**。目录按适配器及本机独立运行环境显示可用状态，安装后点击 **刷新**。首次 SDK 初始化、编译或资产下载可能较慢，加载结束前请等待结果。候选后端加载失败会保留原有可用环境并报告真实原因，不会静默换引擎继续实验。
 
-同一选择器也提供 **RoboDojo · 独立评测入口**，点击“打开 RoboDojo”进入任务配置、运行环境检查、计划导出和结果管理。它使用自己的 Isaac Sim 5.1 生命周期，不会将当前交互场景替换为尚未就绪的基准环境。顶部“官方基准”是同一页面的快捷入口。
+同一选择器提供 **RoboDojo 交互仿真**，复用官方 Isaac Sim 5.1 生命周期、双 ARX X5、三路原生相机与任务判据；独立 Linux GPU 环境尚未就绪时展示准备清单，禁止误加载。另有“官方评测”按钮进入批量协议、计划导出和结果管理，顶部“官方基准”保留同一快捷入口。
 
 若 Windows 报 `No Python at ...`，检查对应 `.venv-*/pyvenv.cfg` 的 `home` 是否仍包含有效的基础 Python。桌面应用的目录重定向可能令 `%APPDATA%` 路径只在该应用中可见；应使用相同版本解释器的真实物理路径，或重建该独立虚拟环境。不要用其他 Python 小版本替换已有环境。目录会把基础解释器缺失标为“运行环境异常”，并在支持范围中保留具体路径；不会仅凭已有包目录显示“可加载”。
 
 ## 当前范围
 
-本项目维护范围为 **MuJoCo、Genesis、ALFWorld、AI2-THOR、LIBERO、ManiSkill、Isaac 和 RoboCasa365**，另提供 RoboDojo 官方基准入口。Genesis 是已有后端；其他未适配的仿真栈不列入接入计划。
+本项目维护范围为 **MuJoCo、Genesis、ALFWorld、AI2-THOR、LIBERO、ManiSkill、Isaac、RoboCasa365、RoboDojo 和 BEHAVIOR / OmniGibson**。Genesis 是已有后端；OmniGibson 是新增的明确授权范围，其他未适配的仿真栈不列入接入计划。各后端本次依赖、接口与原生运行证据见[完整性检查](ENVIRONMENT_INTEGRITY.md)。
 
 | 后端 / 任务套件 | 当前实现 | 本次验收与安装说明 |
 | --- | --- | --- |
+| BEHAVIOR / OmniGibson | 独立官方运行环境、R1Pro 整机原生动作、安装实例目录、相机与 BDDL 完全成功／Q 评价 | 平台接口接入；原生物理验收尚未完成。支持 Windows / Linux，固定 BEHAVIOR v3.9.4 / Python 3.11 / Isaac Sim 5.1，预检至少 32 GB 内存与 16 GB 显存。详见[OmniGibson 指南](omnigibson.md)。 |
 | RoboCasa365 | 官方 65 项原子技能与 300 项复合厨房任务目录；PandaOmron 移动机械臂、原生控制与三相机 | 本机 Windows 的导航、抽屉、柜体抓放与烹饪组合任务样本，以及真实 Worker/Agent/视频回放链路通过；独立 Python 3.11，详见[RoboCasa365 指南](robocasa365.md)。未逐一运行全部 365 任务。 |
 | MuJoCo | Panda、SO-101、RM65 + GaiaHand、双/三 Panda；七类场景、三相机、关节/末端控制及任务评价 | 本轮主后端 27 项回归通过。Windows 本机、Linux 渲染和三平台 CI 的各自边界见[安装文档](INSTALL.md)。 |
 | Genesis World | Panda 桌面抬起、放置、末端到达；Genesis 物理、IK、PD 和三相机 | 本机 Windows CPU 物理的七项原生回归与一项主 Worker 集成通过；其他系统待实机验收。独立 `.venv-genesis`，安装见下文。 |
@@ -33,7 +34,7 @@ EmbodiWorks 在同一个工作台选择后端，复用模型接入、实验记�
 
 LIBERO 是基于 robosuite / MuJoCo 的任务套件；ManiSkill 使用 SAPIEN 的物理与渲染；Isaac Lab 是可选择物理运行栈的框架。这些层次分别保存在实验身份中，不把任务套件都当作独立物理引擎。
 
-RoboCasa365 基于 robosuite / MuJoCo，环境身份单独记录其任务判据和版本。RoboDojo 则在“官方基准”页管理，由独立的官方 Isaac Sim 5.1 客户端运行，使用 XPolicyLab WebSocket 策略。**RoboDojo 尚未完成本机原生仿真验收**：当前未配置其完整 Linux GPU 运行时，已提供计划导出和终局结果、视频导入；静态依赖检查通过也不代表原生任务运行成功。详见[RoboDojo 指南](robodojo.md)。
+RoboCasa365 基于 robosuite / MuJoCo，环境身份单独记录其任务判据和版本。RoboDojo 的交互模式使用工作台 Agent / 自定义策略，官方批量模式使用独立客户端和 XPolicyLab WebSocket。**RoboDojo 尚未完成本机原生仿真验收**：当前未配置完整 Linux GPU 运行时，接口测试或静态预检不能替代真实加载。交互模式不支持完整状态恢复，因此不开放配对初态比较和物理回放，但保留视频、观察、动作与独立评价记录。详见[RoboDojo 指南](robodojo.md)。
 
 ## Genesis 独立环境
 

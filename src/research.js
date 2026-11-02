@@ -1,3 +1,5 @@
+import {taskGraphMarkup} from './task_graph.js';
+import {renderProgramAnalysis} from './harnesspai.js';
 import {renderExperimentCosts} from './experiment_costs.js';
 import {renderRoundTimeline} from './rounds.js';
 import {setTaskDraft,syncTaskDraft} from './task_drafts.js';
@@ -47,11 +49,13 @@ export function evaluationEvidenceMarkup(evaluation,{success}={}){
   if(!evaluation)return '<p class="evaluation-note">未记录环境评价证据；模型自报完成不能作为任务成功依据。</p>';
   const result=evaluationOutcome(evaluation,success),source=evaluation.source==='mujoco_privileged_state'?'MuJoCo 特权状态':evaluation.source||'来源未记录',checks=Array.isArray(evaluation.checks)?evaluation.checks:[],reasons=Array.isArray(evaluation.failure_reasons)?evaluation.failure_reasons:[];
   const hold=metric(evaluation.hold_s),required=metric(evaluation.required_hold_s),sim=metric(evaluation.evaluated_at_sim_s);
-  return `<p class="evaluation-note">评价来源：${escape(source)} · 版本 ${escape(evaluation.version||'未记录')}${sim==null?'':` · 仿真时刻 ${sim.toFixed(3)} s`}。物体与关节真值用于独立验收。</p>${hold==null&&required==null?'':`<p class="evaluation-hold">条件连续满足 <strong>${hold==null?'未记录':hold.toFixed(3)} / ${required==null?'未记录':required.toFixed(3)} s</strong>${evaluation.currently_satisfied===true&&result!==true?' · 正在等待稳定性验收':''}</p>`}${checks.length?`<div class="evaluation-table-wrap"><table class="evaluation-checks"><thead><tr><th>验收条件</th><th>实际值</th><th>要求</th><th>结果</th></tr></thead><tbody>${checks.map(check=>`<tr><td>${escape(check.label||check.key)}</td><td>${evaluationValue(check.actual,check.unit)}</td><td>${evaluationValue(check.expected)}</td><td><span class="evaluation-check ${check.passed===true?'passed':check.passed===false?'failed':'unknown'}">${check.passed===true?'通过':check.passed===false?'未通过':'未评价'}</span></td></tr>`).join('')}</tbody></table></div>`:'<p class="evaluation-note">这条历史记录没有逐项判据与测量值。</p>'}${reasons.length?`<ul class="evaluation-failures">${reasons.map(reason=>`<li>${escape(reason)}</li>`).join('')}</ul>`:''}${evaluation.ever_success===true&&result!==true?'<p class="evaluation-note">过程中曾满足成功条件，但当前状态未通过验收；最终结果以结束时的环境证据为准。</p>':''}`;
+  const q=metric(typeof evaluation.q_score==='object'?evaluation.q_score?.final:evaluation.q_score);
+  return `${q==null?'':`<p class="evaluation-note">原生目标完成 Q：<strong>${q.toFixed(3)}</strong> · 完整成功单独判定，部分得分不等于成功。</p>`}<p class="evaluation-note">评价来源：${escape(source)} · 版本 ${escape(evaluation.version||'未记录')}${sim==null?'':` · 仿真时刻 ${sim.toFixed(3)} s`}。物体与关节真值用于独立验收。</p>${hold==null&&required==null?'':`<p class="evaluation-hold">条件连续满足 <strong>${hold==null?'未记录':hold.toFixed(3)} / ${required==null?'未记录':required.toFixed(3)} s</strong>${evaluation.currently_satisfied===true&&result!==true?' · 正在等待稳定性验收':''}</p>`}${checks.length?`<div class="evaluation-table-wrap"><table class="evaluation-checks"><thead><tr><th>验收条件</th><th>实际值</th><th>要求</th><th>结果</th></tr></thead><tbody>${checks.map(check=>`<tr><td>${escape(check.label||check.key)}</td><td>${evaluationValue(check.actual,check.unit)}</td><td>${evaluationValue(check.expected)}</td><td><span class="evaluation-check ${check.passed===true?'passed':check.passed===false?'failed':'unknown'}">${check.passed===true?'通过':check.passed===false?'未通过':'未评价'}</span></td></tr>`).join('')}</tbody></table></div>`:'<p class="evaluation-note">这条历史记录没有逐项判据与测量值。</p>'}${reasons.length?`<ul class="evaluation-failures">${reasons.map(reason=>`<li>${escape(reason)}</li>`).join('')}</ul>`:''}${evaluation.ever_success===true&&result!==true?'<p class="evaluation-note">过程中曾满足成功条件，但当前状态未通过验收；最终结果以结束时的环境证据为准。</p>':''}`;
 }
 export function renderSceneEvaluation(evaluation){
   $('#evaluation-name').textContent=evaluation?.name||'场景任务评价';$('#evaluation-criterion').textContent=evaluation?.criterion||'等待环境返回任务判据。';
   $('#evaluation-result').textContent=evaluationOutcomeText(evaluation?.success);$('#evaluation-result').classList.toggle('success',evaluation?.success===true);
+  const stages=$('#evaluation-stages');if(stages){const graphKey=JSON.stringify(evaluation?.task_graph??null);if(stages.dataset.graphKey!==graphKey){stages.dataset.graphKey=graphKey;stages.innerHTML=taskGraphMarkup(evaluation?.task_graph);}}
   const evidence=$('#evaluation-evidence'),key=JSON.stringify(evaluation??null);if(evidence.dataset.evaluationKey!==key){evidence.dataset.evaluationKey=key;evidence.innerHTML=evaluationEvidenceMarkup(evaluation);}
 }
 export function completionVerificationMarkup(records){
@@ -61,7 +65,7 @@ export function completionVerificationMarkup(records){
 function renderResultCompletion(analysis,run,events){
   const metrics=analysis.metrics??run.metrics,evaluation=metrics?.evaluation||analysis.evaluation,success=typeof metrics?.success==='boolean'?metrics.success:undefined;
   $('#result-evaluation').hidden=false;$('#result-evaluation-result').textContent=evaluationOutcomeText(success);$('#result-evaluation-result').classList.toggle('success',success===true);
-  const evidence=$('#result-evaluation-evidence'),key=JSON.stringify([evaluation,success]);if(evidence.dataset.evaluationKey!==key){evidence.dataset.evaluationKey=key;evidence.innerHTML=evaluationEvidenceMarkup(evaluation,{success});}
+  const evidence=$('#result-evaluation-evidence'),key=JSON.stringify([evaluation,success]);if(evidence.dataset.evaluationKey!==key){evidence.dataset.evaluationKey=key;evidence.innerHTML=taskGraphMarkup(evaluation?.task_graph)+evaluationEvidenceMarkup(evaluation,{success});}
   const complete=Array.isArray(analysis.completion_verifications),records=complete?analysis.completion_verifications:events.filter(event=>event.event==='completion_verification');
   const verifications=$('#result-completion-verifications'),verificationKey=JSON.stringify(records);if(verifications.dataset.verificationKey!==verificationKey){verifications.dataset.verificationKey=verificationKey;verifications.innerHTML=completionVerificationMarkup(records);}$('#result-completion-note').textContent=complete?'逐条保留模型完成声明与环境的接受／拒绝结果。':'此处读取最近 50 条公开事件；完整核验过程请下载 JSONL。历史模型自报完成不作为成功验收。';
 }
@@ -69,8 +73,9 @@ export function renderRunTimer(container,run){
   if(!container)return;const timing=run?.timing||{},wall=metric(timing.elapsed_wall_s)??metric(run?.elapsed_s)??metric(run?.metrics?.wall_time_s),inference=metric(timing.inference_elapsed_s);
   container.hidden=wall==null&&inference==null;if(container.hidden)return;
   const current=metric(timing.current_inference_s),activeCalls=metric(timing.active_calls);
+  const idleInference=(metric(timing.inference_calls)??0)>0||inference>0?'当前无进行中的推理请求':'暂无推理请求';
   const activity={repairing:'故障暂停 · 正在诊断',repair_paused:'故障暂停',retrying:'重试当前轮'}[run?.status]||'运行中';
-  container.innerHTML=`<span>墙钟 <strong>${secondsText(wall)}</strong></span><span title="包含网络、排队与服务处理时间">累计调用 <strong>${secondsText(inference)}</strong></span>${current==null?'':activeCalls>0?`<span>当前请求等待 <strong>${secondsText(current)}</strong>${activeCalls>1?` · ${activeCalls} 个并发请求`:''}</span>`:'<span>暂无推理请求</span>'}${run?.active?`<span class="timer-active">${activity}</span>`:''}`;
+  container.innerHTML=`<span>墙钟 <strong>${secondsText(wall)}</strong></span><span title="包含网络、排队与服务处理时间">累计调用 <strong>${secondsText(inference)}</strong></span>${current==null?'':activeCalls>0?`<span>当前请求等待 <strong>${secondsText(current)}</strong>${activeCalls>1?` · ${activeCalls} 个并发请求`:''}</span>`:`<span>${idleInference}</span>`}${run?.active?`<span class="timer-active">${activity}</span>`:''}`;
 }
 export function metricChartMarkup(points,title,xLabel='轮次 / 调用'){
   const values=points.map(point=>metric(point.value));if(!points.length||values.every(value=>value==null))return '<p class="empty-state">没有返回可绘制的真实数值。</p>';
@@ -86,27 +91,53 @@ export function metricChartMarkup(points,title,xLabel='轮次 / 调用'){
 }
 function options(select,items,value){select.replaceChildren(...items.map(item=>{const option=document.createElement('option');option.value=item.id;option.textContent=item.name;return option;}));if(value)select.value=value;}
 function tasksFor(sceneId,select,taskId){const scene=catalog.scenes.find(s=>s.id===sceneId);options(select,scene.tasks.map(id=>({id,name:catalog.tasks[id].name})),scene.tasks.includes(taskId)?taskId:scene.tasks[0]);}
-function updateSceneInfo(){if(!catalog)return;const scene=catalog.scenes.find(s=>s.id===$('#scene-select').value);$('#scene-description').textContent=scene.description;}
-function updateCompareCriterion(){if(catalog)$('#comparison-criterion').textContent=catalog.tasks[$('#compare-task').value]?.criterion||'';}
+function sceneInstanceRange(){
+  if(catalog?.engine_id!=='omnigibson')return null;
+  const scene=catalog.scenes.find(s=>s.id===$('#scene-select').value),instances=scene?.instances?.[$('#task-select').value]||[];
+  return {min:0,max:instances.length-1,count:instances.length};
+}
+function updateSceneInfo(){
+  if(!catalog)return;
+  const scene=catalog.scenes.find(s=>s.id===$('#scene-select').value),budget=catalog.tasks[$('#task-select').value]?.task_spec?.recommended_budget,range=sceneInstanceRange(),input=$('#scene-seed');
+  input.min='0';input.max=String(range?Math.max(0,range.max):4294967295);
+  input.title=range?'预采样实例索引，不是随机生成种子；范围由当前场景任务的已安装实例决定。':'';
+  if(range&&(!Number.isInteger(Number(input.value))||Number(input.value)<0||Number(input.value)>range.max))input.value='0';
+  const instanceNote=range?(range.count?` 已安装 ${range.count} 个预采样实例；布局种子选择实例索引 0–${range.max}。`:' 尚未安装此场景任务的预采样实例，暂不能应用。'):'';
+  $('#scene-description').textContent=scene.description+instanceNote+(budget?` 复合任务建议：Panda，${budget.sim_seconds}仿真秒、至少${budget.max_actions}动作；原预算不会自动改变。`:'');$('#task-budget-apply').hidden=!budget;
+  const locked=researchControlsLocked||$('#reset').disabled;
+  input.disabled=locked||range?.count===0;$('#apply-scene').disabled=locked||range?.count===0;
+}
+function updateCompareCriterion(){if(catalog){const task=catalog.tasks[$('#compare-task').value],budget=task?.task_spec?.recommended_budget;$('#comparison-criterion').textContent=(task?.criterion||'')+(budget?` 建议仿真预算${budget.sim_seconds}秒，请核对上方时限。`:'');}}
 function fillTask(){if(!catalog)return;const instruction=catalog.tasks[$('#task-select').value]?.instruction;if(instruction){setTaskDraft($('#command'),instruction);setTaskDraft($('#policy-task'),instruction);}}
-let policyRobot=null,researchControlsLocked=true,environmentDiscrete=false;
-function updatePolicySummary(){const kind=$('#policy-kind').value;const config=configs[kind];$('#policy-model-name').textContent=config?.model||names[kind];$('#policy-model-note').textContent=kind==='smolvla'?'官方 SmolVLA 直接预测动作块。默认映射为 SO-101，基础权重未在当前场景微调。':`${names[kind]} 通过你配置的推理服务预测动作。${config?.endpoint?'接口已配置。':'尚未配置接口。'}`;updatePolicyAvailability();}
+let policyRobot=null,researchControlsLocked=true,environmentDiscrete=false,pairedStateSupported=true,policyControlTimestep=null;
+function policyTimingError(value){
+  if(!policyControlTimestep)return '';
+  const dt=Number(value),multiple=dt/policyControlTimestep;
+  return Number.isFinite(dt)&&multiple>=1&&Math.abs(multiple-Math.round(multiple))<1e-6?'':`RoboDojo 动作间隔须为原生控制周期 ${policyControlTimestep} 秒的正整数倍（如 ${policyControlTimestep}、${Number((policyControlTimestep*2).toPrecision(10))} 秒）。当前为 ${value??'未配置'} 秒，请修改策略配置。`;
+}
+function updatePolicyTimingField(){
+  const input=$('#policy-config-dt');input.min=String(policyControlTimestep||.02);input.step=String(policyControlTimestep||.01);
+  input.title=policyControlTimestep?`必须为 ${policyControlTimestep} 秒的正整数倍。策略服务输出 dt_s 也须遵守此周期。`:'';
+}
+function updatePolicySummary(){const kind=$('#policy-kind').value;$('#policy-model-name').textContent=configs[kind]?.model||names[kind];updatePolicyAvailability();}
 function updatePolicyAvailability(robot=policyRobot,locked=researchControlsLocked){
   const supported=robot==='so101',select=$('#policy-kind'),option=[...(select.options||[])].find(item=>item.value==='smolvla');
   if(option)option.disabled=!supported;
-  const incompatible=select.value==='smolvla'&&!supported;
-  $('#policy-start').disabled=locked||incompatible||environmentDiscrete;$('#policy-one-chunk').disabled=locked||incompatible||environmentDiscrete;
+  const incompatible=select.value==='smolvla'&&!supported,config=configs[select.value],timingError=config?policyTimingError(config.dt_s):'';
+  $('#policy-start').disabled=locked||incompatible||environmentDiscrete||!!timingError;$('#policy-one-chunk').disabled=locked||incompatible||environmentDiscrete||!!timingError;
+  $('#policy-model-note').textContent=`${names[select.value]} 通过你配置的推理服务预测动作。${config?.endpoint?'接口已配置。':'尚未配置接口。'}`;
   if(select.value==='smolvla')$('#policy-model-note').textContent=supported?'默认 SmolVLA 映射 SO-101，基础权重未在当前场景微调。':`默认 SmolVLA 仅适配 SO-101，当前机器人${robot?'为 '+robot:'尚未连接'}，不能执行。可切换机器人，或自行配置匹配本体的 VLA / WAM。`;
   if(environmentDiscrete)$('#policy-model-note').textContent='当前环境使用文字或离散命令，请在工作台使用 Agent 或原生命令。连续动作 VLA / WAM 不适用于此动作协议。';
+  else if(!incompatible&&timingError)$('#policy-model-note').textContent+=' '+timingError;
 }
 function availableComparisonMethods(){return [...document.querySelectorAll('input[name="method"]:checked')].filter(input=>!input.disabled).map(input=>input.value);}
 function updateComparisonAvailability(locked=researchControlsLocked){
   const robot=$('#compare-robot').value,smolvla=document.querySelector('input[name="method"][value="smolvla"]'),supported=robot==='so101';
   if(smolvla)smolvla.disabled=locked||!supported;
-  const methods=availableComparisonMethods();$('#compare-start').disabled=locked||methods.length<2||environmentDiscrete;
+  const methods=availableComparisonMethods();$('#compare-start').disabled=locked||methods.length<2||environmentDiscrete||!pairedStateSupported;
   let note=$('#comparison-method-note');
   if(!note){note=document.createElement('p');note.id='comparison-method-note';note.className='research-note';note.setAttribute('role','status');document.querySelector('.comparison-methods').after(note);}
-  const message=environmentDiscrete?'当前比较器使用连续机械臂动作协议。此文字或离散环境请先使用工作台 Agent 单次实验，结果保存在实验记录中。':[supported?'':`默认 SmolVLA 仅适配 SO-101；当前待跑机器人为 ${robot||'未选择'}，此方法不参与比较。`,methods.length<2?'请至少选择两种当前机器人可执行的方法；自定义 VLA / WAM 需先配置匹配接口。':`已选择 ${methods.length} 种可用方法；自定义策略使用你已配置的接口，不会自动切换策略。`].filter(Boolean).join(' ');
+  const message=environmentDiscrete?'当前比较器使用连续机械臂动作协议。此文字或离散环境请先使用工作台 Agent 单次实验，结果保存在实验记录中。':!pairedStateSupported?'当前环境未提供可恢复检查点，暂不支持从同一物理状态开始的配对比较。可运行单次 Agent / 策略实验并保存结果。':[supported?'':`默认 SmolVLA 仅适配 SO-101；当前待跑机器人为 ${robot||'未选择'}，此方法不参与比较。`,methods.length<2?'请至少选择两种当前机器人可执行的方法；自定义 VLA / WAM 需先配置匹配接口。':`已选择 ${methods.length} 种可用方法；自定义策略使用你已配置的接口，不会自动切换策略。`].filter(Boolean).join(' ');
   if(note.textContent!==message)note.textContent=message;
 }
 function changePage(page){currentPage=page;for(const name of ['workspace','rsi','comparison','logs','benchmarks']){const view=$(`#${name}-view`);if(view)view.hidden=name!==page;}document.querySelectorAll('[data-page]').forEach(button=>button.classList.toggle('selected',button.dataset.page===page));if(page==='logs'){refreshLogs();refreshPricingStatus();}}
@@ -126,13 +157,15 @@ export async function initResearch(callbacks){
   window.addEventListener('embodiworks:open-result',event=>{const run_id=event.detail?.run_id;if(run_id){changePage('logs');showRun({run_id});}});
   document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>changePage(button.dataset.page)));
   $('#policy-tab').addEventListener('click',()=>context.selectTab('policy'));
+  $('#task-select').addEventListener('change',updateSceneInfo);
+  $('#task-budget-apply').addEventListener('click',()=>{const b=catalog?.tasks[$('#task-select').value]?.task_spec?.recommended_budget;if(!b)return;$('#agent-sim-budget').value=b.sim_seconds;$('#policy-time-limit').value=b.sim_seconds;context.toast?.(`已将Agent与策略仿真预算设为${b.sim_seconds}秒；模型轮数请另行核对。`);});
   $('#scene-select').addEventListener('change',()=>{tasksFor($('#scene-select').value,$('#task-select'));updateSceneInfo();});
   $('#compare-scene').addEventListener('change',()=>{tasksFor($('#compare-scene').value,$('#compare-task'));updateCompareCriterion();});
   $('#compare-task').addEventListener('change',updateCompareCriterion);
   $('#compare-robot').addEventListener('change',()=>updateComparisonAvailability());
   document.querySelectorAll('input[name="method"]').forEach(input=>input.addEventListener('change',()=>updateComparisonAvailability()));
   $('#use-task').addEventListener('click',fillTask);
-  $('#apply-scene').addEventListener('click',async()=>{const result=await context.operate({action:'scene',scene_id:$('#scene-select').value,task_id:$('#task-select').value,seed:Number($('#scene-seed').value)});if(result)fillTask();});
+  $('#apply-scene').addEventListener('click',async()=>{const input=$('#scene-seed'),seed=Number(input.value),range=sceneInstanceRange();if(!input.value.trim()||!Number.isInteger(seed)||seed<0||seed>(range?.max??4294967295)){context.toast(range?`请选择当前场景任务的预采样实例索引 0–${range.max}。`:'请填写有效的非负整数布局种子。');return;}const result=await context.operate({action:'scene',scene_id:$('#scene-select').value,task_id:$('#task-select').value,seed});if(result)fillTask();});
   $('#policy-kind').addEventListener('change',updatePolicySummary);
   $('#policy-form').addEventListener('submit',event=>{event.preventDefault();startPolicy(false);});
   $('#policy-one-chunk').addEventListener('click',()=>startPolicy(true));
@@ -177,7 +210,7 @@ export async function initResearch(callbacks){
 }
 
 async function startPolicy(oneChunk){
-  try{if($('#policy-kind').value==='smolvla'&&policyRobot!=='so101')throw new Error('默认 SmolVLA 仅适配 SO-101；请切换机器人或配置匹配本体的 VLA / WAM。');await request('policy/start',{kind:$('#policy-kind').value,task:$('#policy-task').value.trim(),one_chunk:oneChunk,max_sim_time_s:Number($('#policy-time-limit').value),record_video:$('#policy-record-video').checked});}catch(error){context.toast(error.message);$('#policy-message').textContent=error.message;}
+  try{const kind=$('#policy-kind').value;if(kind==='smolvla'&&policyRobot!=='so101')throw new Error('默认 SmolVLA 仅适配 SO-101；请切换机器人或配置匹配本体的 VLA / WAM。');const timingError=policyTimingError(configs[kind]?.dt_s);if(timingError)throw new Error(timingError);await request('policy/start',{kind,task:$('#policy-task').value.trim(),one_chunk:oneChunk,max_sim_time_s:Number($('#policy-time-limit').value),record_video:$('#policy-record-video').checked});}catch(error){context.toast(error.message);$('#policy-message').textContent=error.message;}
 }
 
 async function openPolicySettings(){
@@ -186,15 +219,18 @@ async function openPolicySettings(){
     $('#policy-config-model').value=c.model;$('#policy-config-endpoint').value=c.endpoint;
     $('#policy-config-key').value='';$('#policy-config-key').placeholder=c.has_api_key?'当前接口已有密钥，留空保留':'可选，仅保存在服务内存';
     $('#policy-config-device').value=c.device;$('#policy-config-horizon').value=c.horizon;$('#policy-config-dt').value=c.dt_s;
+    updatePolicyTimingField();
     $('#policy-config-chunks').value=c.max_chunks;$('#policy-config-timeout').value=c.timeout_s;
     $('#policy-endpoint-field').hidden=kind==='smolvla';$('#policy-key-field').hidden=kind==='smolvla';$('#policy-device-field').hidden=kind!=='smolvla';
     $('#policy-config-help').textContent=kind==='smolvla'?'默认使用官方 lerobot/smolvla_base，也可填写匹配 SO-101 的微调权重。动作映射和限幅结果会保存在日志中。':`填写实际运行 ${names[kind]} 的服务地址。接口接收三路图像、机械臂状态和任务，返回关节动作块或末端位姿；协议见项目 POLICY_PROTOCOL.md。`;
+    if(policyControlTimestep)$('#policy-config-help').textContent+=` 当前 RoboDojo 原生控制周期为 ${policyControlTimestep} 秒：动作间隔请选择其正整数倍；建议 ${policyControlTimestep} 秒。策略服务返回的 dt_s 也须一致。现有配置不会自动修改。`;
     $('#policy-config-error').hidden=true;$('#policy-config-dialog').showModal();
   }catch(error){context.toast(error.message);}
 }
 async function savePolicySettings(event){
   event.preventDefault();const kind=$('#policy-kind').value;
   try{
+    const timingError=policyTimingError($('#policy-config-dt').value);if(timingError)throw new Error(timingError);
     configs[kind]=await request('policy/config',{kind,model:$('#policy-config-model').value.trim(),endpoint:kind==='smolvla'?'':$('#policy-config-endpoint').value.trim(),api_key:$('#policy-config-key').value,
       device:$('#policy-config-device').value,horizon:Number($('#policy-config-horizon').value),dt_s:Number($('#policy-config-dt').value),max_chunks:Number($('#policy-config-chunks').value),timeout_s:Number($('#policy-config-timeout').value)});
     $('#policy-config-key').value='';$('#policy-config-dialog').close();updatePolicySummary();context.toast('策略配置已应用。');
@@ -213,15 +249,19 @@ export function renderResearch(state){
   if(taskContext!==lastTaskContext&&state.evaluation?.instruction){lastTaskContext=taskContext;for(const id of ['#command','#policy-task'])syncTaskDraft($(id),state.evaluation.instruction);}
   renderSceneEvaluation(state.evaluation);
   if(state.model==='rm65_gaia'){$('#gripper-label').textContent='灵巧手';$('#gripper-status').textContent='15 关节';$('#gripper-detail').textContent='可在关节控制中逐指调节';}
-  const policy=state.policy||{},comparison=state.comparison||{},locked=!!(state.ready===false||state.backend_switching||!matchingCatalog||context.catalogReady?.()===false||state.agent?.active||policy.active||comparison.active||state.research?.active||state.experiment?.active||state.benchmark?.active);
+  const policy=state.policy||{},comparison=state.comparison||{},locked=!!(state.ready===false||state.backend_switching||!matchingCatalog||context.catalogReady?.()===false||state.agent?.active||policy.active||comparison.active||state.research?.active||state.experiment?.active||(state.benchmark?.active||state.harnesspai?.active));
   policyRobot=state.model;researchControlsLocked=locked;environmentDiscrete=['text','discrete'].includes(state.backend?.action_mode);
+  policyControlTimestep=state.backend?.engine_id==='robodojo'&&Number.isFinite(state.timestep)&&state.timestep>0?state.timestep:null;
+  updatePolicyTimingField();
+  pairedStateSupported=!Array.isArray(state.backend?.capabilities)||['checkpoint','restore'].every(name=>state.backend.capabilities.includes(name));
   $('#policy-status').textContent=statuses[policy.status]||policy.status||'等待任务';$('#policy-message').textContent=policy.message||'';
   $('#policy-round').textContent=`${policy.round||0} / ${policy.max_rounds||configs[$('#policy-kind').value]?.max_chunks||60} 次`;
   renderRunTimer($('#policy-run-time'),policy);renderRunTimer($('#comparison-run-time'),comparison);
-  const policyConfigEditable=policy.status==='repair_paused'&&!state.agent?.active&&!comparison.active&&!state.research?.active&&!state.experiment?.active&&!state.benchmark?.active;
-  $('#policy-stop').disabled=!policy.active;$('#policy-start').disabled=locked;$('#policy-one-chunk').disabled=locked;$('#policy-settings').disabled=(policy.active&&!policyConfigEditable)||comparison.active||state.research?.active||state.experiment?.active||state.benchmark?.active;$('#policy-kind').disabled=locked;
+  const policyConfigEditable=policy.status==='repair_paused'&&!state.agent?.active&&!comparison.active&&!state.research?.active&&!state.experiment?.active&&!(state.benchmark?.active||state.harnesspai?.active);
+  $('#policy-stop').disabled=!policy.active;$('#policy-start').disabled=locked;$('#policy-one-chunk').disabled=locked;$('#policy-settings').disabled=(policy.active&&!policyConfigEditable)||comparison.active||state.research?.active||state.experiment?.active||(state.benchmark?.active||state.harnesspai?.active);$('#policy-kind').disabled=locked;
   $('#policy-record-video').disabled=locked;$('#compare-record-video').disabled=locked;renderRunVideo($('#policy-video'),policy.run_id,policy.video);
   for(const selector of ['#apply-scene','#scene-select','#task-select','#scene-seed'])$(selector).disabled=locked||$('#reset').disabled;
+  if(sceneInstanceRange()?.count===0){$('#apply-scene').disabled=true;$('#scene-seed').disabled=true;}
   $('#compare-start').disabled=locked;$('#compare-stop').disabled=!comparison.active;
   document.querySelectorAll('#comparison-form input,#comparison-form select').forEach(input=>input.disabled=comparison.active);
   updatePolicyAvailability(state.model,locked);updateComparisonAvailability(locked);
@@ -230,7 +270,7 @@ export function renderResearch(state){
   $('#comparison-message').textContent=comparison.message||'尚未运行。';
   const rowsKey=JSON.stringify(comparison.rows||[]);
   if(rowsKey!==lastRows){lastRows=rowsKey;renderComparison(comparison.rows||[]);}
-  const keys=['agent','policy','comparison','research','experiment','benchmark'],runStates=JSON.stringify(keys.map(key=>[state[key]?.run_id,state[key]?.status,state[key]?.active]));
+  const keys=['agent','policy','comparison','research','experiment','benchmark','harnesspai'],runStates=JSON.stringify(keys.map(key=>[state[key]?.run_id,state[key]?.status,state[key]?.active]));
   if(currentPage==='logs'&&!refreshingResults&&Date.now()-lastResultRefresh>3000&&(runStates!==lastRunStates||keys.some(key=>state[key]?.active))){lastRunStates=runStates;refreshLogs();}
   if(currentPage==='logs'&&Date.now()-lastPricingCheck>(pricingState?.refreshing?3000:60000))refreshPricingStatus();
 }
@@ -255,7 +295,7 @@ function resultIsActive(run){return !!run.active||run.status==='running';}
 function resultScope(){return $('#log-record-scope').value==='deleted';}
 function resultListPath(offset){return `runs?limit=${RESULTS_PAGE_SIZE}&offset=${offset}&deleted=${resultScope()}`;}
 function filteredResults(){return runs.filter(run=>($('#log-filter').value==='all'||run.kind===$('#log-filter').value)&&($('#log-status-filter').value==='all'||category(run)===$('#log-status-filter').value));}
-function runKinds(kind){return {agent:'视觉 Agent',policy:'策略模型',composition:'方法版本运行',comparison:'对比实验',research_experiment:'RSI 配对评测',repair:'故障修复 Agent',benchmark:'RoboDojo 基准评测'}[kind]||kind;}
+function runKinds(kind){return {agent:'视觉 Agent',policy:'策略模型',composition:'方法版本运行',comparison:'对比实验',research_experiment:'RSI 配对评测',repair:'故障修复 Agent',benchmark:'RoboDojo 基准评测',harnesspai:'HarnessPAI 程序验证'}[kind]||kind;}
 function fillSelect(select,items,placeholder){const previous=select.value;select.replaceChildren();const first=document.createElement('option');first.value='';first.textContent=placeholder;select.append(first);for(const value of [...new Set(items.filter(Boolean))].sort()){const option=document.createElement('option');option.value=value;option.textContent=value;select.append(option);}if([...select.options].some(option=>option.value===previous))select.value=previous;}
 function mergeRunPages(...pages){const records=new Map();for(const page of pages)for(const run of page)if(!records.has(run.run_id))records.set(run.run_id,run);return [...records.values()].sort((a,b)=>a.run_id===b.run_id?0:a.run_id>b.run_id?-1:1);}
 function resultPagingState(){const button=$('#load-more-results');button.disabled=refreshingResults||!resultsHasMore;button.textContent=refreshingResults?'正在读取结果…':resultsHasMore?'加载更多结果':'已读取全部结果';}
@@ -297,6 +337,7 @@ async function showRun(run){
   }catch(error){if(selectedRun===id&&generation===detailGeneration)resultError(error);}
 }
 function clearResult(){
+  const program=$('#result-harnesspai');if(program){program.replaceChildren();program.hidden=true;}
   const benchmark=$('#result-native-benchmark');if(benchmark){benchmark.replaceChildren();benchmark.hidden=true;}
   selectedRun='';selectedResult=null;lastDetailKey='';detailGeneration++;$('#log-detail-title').textContent='选择一条实验结果';$('#log-detail-id').textContent='';$('#log-download').hidden=true;$('#result-actions').hidden=true;$('#result-management-note').hidden=true;
   for(const selector of ['#result-summary','#result-calls','#result-children','#result-task-text'])$(selector).replaceChildren();
@@ -430,7 +471,7 @@ function renderResultAnalysis(analysis,run,events=[]){
   const environmentSteps=metric((analysis.metrics??run.metrics)?.environment_steps);
   const usageLabel=total.calls===0&&total.input_tokens===0&&total.output_tokens===0?'无模型调用':total.usage_complete?'完整':'存在缺失';
   $('#result-summary').innerHTML=[[analysis.record_origin==='external_import'?'本次归档耗时':'完整墙钟',secondsText(wall)],['模型调用次数',numberText(total.calls)],['总 tokens',tokenTotalText(total,'total_tokens')],['输出 tokens',tokenTotalText(total,'output_tokens')],['累计调用耗时',secondsText(total.inference_s)],['用量记录',usageLabel],...(environmentSteps==null?[]:[['环境动作步数',numberText(environmentSteps)]])].map(([label,value])=>`<div><small>${escape(label)}</small><strong>${escape(value)}</strong></div>`).join('');
-  renderResultCompletion(analysis,run,events);
+  renderResultCompletion(analysis,run,events);renderProgramAnalysis(analysis);
   renderNativeBenchmark(analysis);
   $('#result-round-timeline').hidden=false;
   renderResultCost(analysis.cost);
@@ -464,23 +505,24 @@ function renderNativeBenchmark(analysis){
   if(benchmark.denominator){const details=document.createElement('details'),title=document.createElement('summary'),text=document.createElement('pre');title.textContent='原生分母、覆盖范围与来源';text.textContent=JSON.stringify({denominator:benchmark.denominator,coverage:benchmark.coverage,provenance:benchmark.provenance,summary_differences:benchmark.summary_differences},null,2);details.append(title,text);root.append(details);}
   for(const item of analysis.native_videos||[]){if(!item.url?.startsWith(`/api/runs/${analysis.run_id}/artifact/`))continue;const label=document.createElement('p'),video=document.createElement('video');label.textContent=item.name;video.controls=true;video.preload='metadata';video.src=item.url;video.style.maxWidth='100%';root.append(label,video);}
 }
-const analysisEnvironmentFields=['engine_id','engine_version','evaluator_source','evaluator_version','robot','scene_id','task_id'];
+const analysisEnvironmentFields=['engine_id','engine_version','evaluator_source','evaluator_version','robot','scene_id','task_id','harness'];
 function analysisContextKey(row){return JSON.stringify(analysisEnvironmentFields.map(field=>row[field]||row.backend?.[field]||'unknown'));}
 function analysisContextLabel(row){
-  const values=JSON.parse(analysisContextKey(row)),[engine,version,source,evaluator,robot,scene,task]=values;
+  const values=JSON.parse(analysisContextKey(row)),[engine,version,source,evaluator,robot,scene,task,harness]=values;
   const engineName={mujoco:'MuJoCo',genesis:'Genesis',unknown:'环境未记录'}[engine]||engine;
   const label=value=>value==='unknown'?'未记录':value;
-  return `${engineName} ${label(version)} / ${label(robot)} · ${label(scene)} · ${label(task)} / 评价 ${label(source)} ${label(evaluator)}`;
+  const harnessName={workbench:'工作台视觉闭环',codex_cli:'Codex CLI',claude_code:'Claude Code',dsh:'DeepSeek Harness',http:'HTTP harness',unknown:'未记录'}[harness]||harness;
+  return `${engineName} ${label(version)} / ${label(robot)} · ${label(scene)} · ${label(task)} / 评价 ${label(source)} ${label(evaluator)} / Harness ${harnessName}`;
 }
 function ensureAnalysisContext(){
   let select=$('#analysis-context');
   if(!select){
-    const label=document.createElement('label');label.textContent='物理环境 / 评价契约';label.style.gridColumn='1 / -1';
+    const label=document.createElement('label');label.textContent='物理环境 / 评价契约 / Harness';label.style.gridColumn='1 / -1';
     select=document.createElement('select');select.id='analysis-context';select.setAttribute('aria-label','选择相同后端、版本、机器人、场景与评价任务');
     label.append(select);$('#analysis-model').parentElement.before(label);
     select.addEventListener('change',()=>{updateAnalysisSelections();clearAnalysis('物理环境已切换，请选择模型与任务后重新分析。');});
     $('#analysis-model').addEventListener('change',()=>updateAnalysisSelections());
-    const note=$('#results-analysis-form .research-note');if(note)note.textContent='先选择相同物理环境与评价契约，再选择模型、任务及方法类型。不同后端、引擎版本、评价版本、机器人或场景分别统计；种子保留为重复样本。每个点为单次实验均值，缺失值不按零计算。';
+    const note=$('#results-analysis-form .research-note');if(note)note.textContent='先选择相同物理环境、评价契约与 Harness，再选择模型、任务及方法类型。不同后端、引擎版本、评价版本、机器人、场景或 Harness 分别统计；种子保留为重复样本。每个点为单次实验均值，缺失值不按零计算。';
   }
   return select;
 }
@@ -495,7 +537,7 @@ async function refreshAnalysisCatalog(){
     const response=await request('experiments/analysis?limit=1000');if(generation!==analysisCatalogGeneration)return;
     analysisCatalog=response.groups?.length?response.groups:response.runs||[];
     const select=ensureAnalysisContext(),previous=select.value,contexts=new Map(analysisCatalog.map(row=>[analysisContextKey(row),row]));
-    const first=document.createElement('option');first.value='';first.textContent='请选择同一物理环境与评价契约';select.replaceChildren(first);select.value='';
+    const first=document.createElement('option');first.value='';first.textContent='请选择同一物理环境、评价契约与 Harness';select.replaceChildren(first);select.value='';
     for(const [key,row] of contexts){const option=document.createElement('option');option.value=key;option.textContent=analysisContextLabel(row);select.append(option);}
     if(contexts.has(previous))select.value=previous;else if(contexts.size===1)select.value=contexts.keys().next().value;
     updateAnalysisSelections();
@@ -512,7 +554,7 @@ async function runAnalysis(){
     const points=groups.map(group=>({label:group.reasoning||'未记录',shortLabel:group.reasoning||'未记录',value:group.mean_output_tokens}));
     $('#analysis-token-chart').innerHTML=metricChartMarkup(points,'按推理强度比较单次实验累计输出 tokens 均值','推理强度');$('#analysis-time-chart').innerHTML=metricChartMarkup(points.map((point,index)=>({...point,value:groups[index].mean_inference_s})),'按推理强度比较单次实验调用总耗时均值','推理强度');
     $('#analysis-rows').innerHTML=groups.length?groups.map(group=>`<tr><td><strong>${escape(group.reasoning||'未记录')}</strong><small>${escape(group.model)}</small><small>${escape(analysisContextLabel(group))}</small></td><td>${numberText(group.runs)}<small>成功 ${numberText(group.succeeded)} · 成功率 ${metric(group.success_rate)==null?"未记录":(group.success_rate*100).toFixed(1)+"%"}</small><small>恢复 ${numberText(group.recovery_runs)} 次实验 · 已知成本 ${moneyText(group.known_cost_usd)}</small><small>输出样本 ${numberText(group.output_samples)} / 时间样本 ${numberText(group.inference_samples)}</small></td><td>${numberText(group.output_tokens)}<small>均值 ${numberText(group.mean_output_tokens)}</small></td><td>${secondsText(group.inference_s)}<small>均值 ${secondsText(group.mean_inference_s)}</small></td><td>${numberText(group.total_tokens)}<small>完整样本 ${numberText(group.token_samples)}</small></td><td>输出 ${numberText(group.missing_output_runs)}<small>调用耗时 ${numberText(group.missing_inference_runs)}</small></td></tr>`).join(''):'<tr><td colspan="6" class="empty-state">筛选范围内没有可比较的运行。</td></tr>';
-    $('#analysis-message').textContent=`当前物理环境内 ${groups.reduce((sum,group)=>sum+group.runs,0)} 条已结束实验，${groups.length} 个推理强度组。${groups.length?analysisContextLabel(groups[0])+'。':''}不同后端与评价契约分别统计；未知历史字段显示“未记录”。${response.aggregation_scope==='leaf_runs_only'?'统计仅累计实际执行的子试验，排除父实验重复汇总。':''}缺失用量不作为 0，均值仅使用对应字段完整的实验。`;
+    $('#analysis-message').textContent=`当前物理环境内 ${groups.reduce((sum,group)=>sum+group.runs,0)} 条已结束实验，${groups.length} 个推理强度组。${groups.length?analysisContextLabel(groups[0])+'。':''}不同后端、评价契约与 Harness 分别统计；未知历史字段显示“未记录”。${response.aggregation_scope==='leaf_runs_only'?'统计仅累计实际执行的子试验，排除父实验重复汇总。':''}缺失用量不作为 0，均值仅使用对应字段完整的实验。`;
     $('#analysis-issues').hidden=!response.issues?.length;$('#analysis-issues-text').textContent=(response.issues||[]).map(issue=>typeof issue==='string'?issue:JSON.stringify(issue)).join('\n');
   }catch(error){if(generation===analysisGeneration){resultError(error);$('#analysis-message').textContent=error.message;}}finally{if(generation===analysisGeneration)$('#refresh-analysis').disabled=false;}
 }

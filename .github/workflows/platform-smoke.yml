@@ -51,6 +51,9 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Audit installed Node dependencies
+        run: npm audit --audit-level=moderate
+
       - name: Build frontend
         run: npm run build
 
@@ -63,17 +66,32 @@ jobs:
       - name: Check Codex lookup and paused image stream
         run: node tools/python.mjs -m unittest tests.test_codex_executable tests.test_stream -v
 
+      - name: Check independent harness/model configuration and accounting
+        run: node tools/python.mjs -m unittest tests.test_agent_harness tests.test_harness_accounting tests.test_harness_analysis tests.test_claude_code_harness tests.test_dsh_harness -v
+
+      - name: Check official CLI protocols against loopback fixtures (no paid models)
+        env:
+          EMBODIWORKS_CLAUDE_NATIVE_TESTS: '1'
+          RUN_DSH_RUNTIME_TESTS: '1'
+        run: node tools/python.mjs -m unittest tests.test_claude_code_native tests.test_dsh_harness.DshOfficialRuntimeTests -v
+
       - name: Check real robot motion
         run: node tools/python.mjs -m unittest tests.test_simulation.PhysicsTests.test_real_models_and_actuated_joint_motion -v
 
       - name: Check environment task criteria and completion gates
-        run: node tools/python.mjs -m unittest tests.test_task_evaluation tests.test_completion_controllers tests.test_research_discrete -v
+        run: node tools/python.mjs -m unittest tests.test_task_evaluation tests.test_completion_controllers tests.test_research_discrete tests.test_composite_tasks tests.test_robot_research_foundation -v
+
+      - name: Check HarnessPAI execution and evolution contracts (native experiment is opt-in)
+        run: node tools/python.mjs -m unittest tests.test_harnesspai tests.test_harnesspai_files tests.test_harnesspai_automation tests.test_harnesspai_evolution tests.test_native_split_validation -v
 
       - name: Check experiment records, recovery, costs and training exports
-        run: node tools/python.mjs -m unittest tests.test_round_training_costs tests.test_telemetry tests.test_pricing tests.test_recovery tests.test_recovery_provider_operations tests.test_robodojo_export -v
+        run: node tools/python.mjs -m unittest tests.test_round_training_costs tests.test_telemetry tests.test_pricing tests.test_recovery tests.test_recovery_provider_operations tests.test_robodojo_export tests.test_routing_ledger -v
 
       - name: Check simulator isolation, selection and experiment identity
-        run: node tools/python.mjs -m unittest tests.test_backend_process tests.test_backend_lifecycle tests.test_controller_start_stop tests.test_simulator_selection tests.test_analysis_simulators tests.test_environment_registry tests.test_discrete_agent tests.test_household_backends tests.test_alfworld_thor tests.test_setup_alfworld_thor tests.test_isaac_backend tests.test_libero_backend tests.test_maniskill_backend tests.test_robocasa_backend tests.test_robodojo tests.test_robodojo_catalog_results tests.test_setup_robodojo tests.test_setup_robocasa365 -v
+        run: node tools/python.mjs -m unittest tests.test_backend_process tests.test_backend_lifecycle tests.test_controller_start_stop tests.test_simulator_selection tests.test_analysis_simulators tests.test_environment_registry tests.test_discrete_agent tests.test_household_backends tests.test_alfworld_thor tests.test_setup_alfworld_thor tests.test_isaac_backend tests.test_libero_backend tests.test_maniskill_backend tests.test_robocasa_backend tests.test_robodojo tests.test_robodojo_backend tests.test_robodojo_catalog_results tests.test_setup_robodojo tests.test_setup_robocasa365 -v
+
+      - name: Check BEHAVIOR integration contracts (native SDK acceptance is opt-in)
+        run: node tools/python.mjs -m unittest tests.test_omnigibson_runtime tests.test_omnigibson_backend tests.test_native_agent tests.test_native_episode_stop tests.test_observation_contract tests.test_terminal_contract tests.test_behavior_benchmark tests.test_behavior_api -v
 
   linux-rendering:
     name: Native rendering / Linux OSMesa

@@ -23,16 +23,18 @@ EmbodiWorks 将机器人操作、家庭文字/视觉任务与实验记录放进�
 | 能力 | 工作方式 |
 | --- | --- |
 | 多后端任务 | MuJoCo、Genesis、ManiSkill、LIBERO、ALFWorld 文字／三维视觉、AI2-THOR、RoboCasa365；Isaac 运行栈与各环境验收状态见[多后端指南](docs/simulators.md)。 |
-| 官方基准 | RoboDojo 任务目录、评测计划、独立客户端与结果导入；尚未完成本机原生验收，完整运行需要 Linux GPU / Isaac Sim 5.1，见[RoboDojo 指南](docs/robodojo.md)。 |
+| RoboDojo | 已接入交互仿真适配器（双 ARX X5、三路原生相机）及独立官方基准；原生验收待 Linux GPU / Isaac Sim 5.1 环境，见[接入与验收指南](docs/robodojo.md)。 |
+| BEHAVIOR / OmniGibson | 已接入 R1Pro 整机控制、RGB/深度与 BDDL/Q 评价，以及官方评估器计划、运行和结果归档；原生 SDK 验收待独立 RTX 主机与许可资产，见[部署与验收](docs/omnigibson.md)。 |
 | 机器人操作 | MuJoCo 支持 Panda、SO-101、RM65 + GaiaHand、双／三 Panda 和七类场景；其他后端提供各自官方机器人与任务。 |
-| 灵活接入策略 | Codex 本机登录、OpenAI、DeepSeek／兼容 API、Claude、自定义 Agent，以及 SmolVLA 与自定义 VLA/WAM。 |
+| Harness 与模型独立配置 | 工作台闭环、Codex CLI、Claude Code、DeepSeek Harness（dsh）、HTTP harness 分别搭配支持的模型 API／路由服务；另支持 SmolVLA 与自定义 VLA/WAM。[配置方法](docs/USAGE.md#harness-与模型分别配置) |
 | 组合决策 | 主 Agent、决策器和动作策略分别配置；支持单决策、级联复核与加权投票。 |
 | 对照实验 | 冻结方法版本与协议，在同一初态、配对种子下比较，保留验证晋升与回滚记录。 |
+| 程序策略演化 | [HarnessPAI](docs/HARNESSPAI.md) 官方调度、失败反馈、程序改写与分离种子验收；MuJoCo / Panda 本地适配，冻结模型权重，保存经验和视频。 |
 | 结果可追溯 | 可选轨迹视频、完整逐轮输入输出与阶段耗时、恢复记录、费用归因，以及动作前后观察和原生奖励的训练数据导出。 |
 
 ## 快速开始
 
-需要 **Python 3.13、Node.js 22.12+、Git 和可用的 OpenGL 环境**。首次使用请按[安装指南](docs/INSTALL.md)创建 Python 环境、安装依赖并下载机器人资源。
+需要 **Python 3.13、Node.js 22.19.0+、Git 和可用的 OpenGL 环境**。首次使用请按[安装指南](docs/INSTALL.md)创建 Python 环境、安装依赖并下载机器人资源。
 
 ```sh
 git clone https://github.com/shank000/embodied-agent-studio.git
@@ -68,8 +70,9 @@ npm start
 ## 文档与参与
 
 - [安装与平台说明](docs/INSTALL.md) · [完整使用指南](docs/USAGE.md)
+- [Harness／模型配置与验收记录](docs/QA_HARNESS.md)：区分真实模型试验、官方 CLI 本机协议验证与待验收范围。
 - [多后端指南](docs/simulators.md) · [家庭环境](docs/household-environments.md) · [LIBERO](docs/libero.md) · [ManiSkill](docs/maniskill.md) · [Isaac](docs/isaac.md)
-- [RoboCasa365 厨房任务](docs/robocasa365.md) · [RoboDojo 基准评测](docs/robodojo.md)
+- [RoboCasa365 厨房任务](docs/robocasa365.md) · [RoboDojo 基准评测](docs/robodojo.md) · [BEHAVIOR / OmniGibson](docs/omnigibson.md)
 - [组合方法、评测与自定义 Agent](RSI_WORKBENCH.md) · [VLA / WAM 策略协议](POLICY_PROTOCOL.md)
 - [逐轮记录、成本归因、训练数据与 IDE 接入方案](docs/EXPERIMENTS_AND_TRAINING.md)
 - [机器人模型来源](MODEL_SOURCES.md) · [贡献指南](CONTRIBUTING.md)

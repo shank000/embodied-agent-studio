@@ -2,17 +2,21 @@
 import xml.etree.ElementTree as ET
 import numpy as np
 import mujoco
+from copy import deepcopy
+from .task_graph import TASK_GRAPHS, TaskGraph
 
 SCENES = {
     'tabletop': {'name': '桌面抓取', 'description': '彩色方块与目标托盘，测试观察、接近和抓取。', 'tasks': ['lift_red', 'place_red', 'reach_up']},
-    'sorting': {'name': '多物体分拣', 'description': '方块、圆柱、球体与双收纳盒。', 'tasks': ['place_red', 'lift_red']},
+    'sorting': {'name': '多物体分拣', 'description': '方块、圆柱、球体与双收纳盒，支持有序交付复合任务。', 'tasks': ['place_red', 'lift_red', 'order_fulfillment']},
     'stacking': {'name': '方块堆叠', 'description': '将红色方块稳定放在蓝色方块上。', 'tasks': ['stack_red', 'lift_red']},
-    'drawer': {'name': '抽屉操作', 'description': '带滑轨和把手的真实可动抽屉。', 'tasks': ['open_drawer', 'lift_red']},
+    'drawer': {'name': '抽屉操作', 'description': '带滑轨和把手的真实可动抽屉，支持打开—关闭—撤离流程。', 'tasks': ['open_drawer', 'lift_red', 'drawer_cycle']},
     'obstacles': {'name': '障碍与杂物', 'description': '立柱和散落物体，测试受限空间中的操作。', 'tasks': ['place_red', 'lift_red']},
     'assembly': {'name': '圆柱插装', 'description': '自由圆柱销与四壁插座，测试对齐与插入。', 'tasks': ['insert_peg', 'lift_red']},
-    'cooperative': {'name': '多臂共享分拣', 'description': '共享物体与两个收纳盒，搭配双/三 Panda，研究轮间协作、避让与任务分工。', 'tasks': ['sort_red_blue', 'place_red', 'lift_red']},
+    'cooperative': {'name': '多臂共享分拣', 'description': '共享物体与两个收纳盒，搭配双/三 Panda，研究轮间协作、避让与任务分工。', 'tasks': ['sort_red_blue', 'place_red', 'lift_red', 'order_fulfillment']},
 }
 TASKS = {
+    'order_fulfillment': {'name': '有序备料与交付', 'instruction': '先把红块放入绿盒并松手，稳定0.3秒后再把蓝块放入蓝盒；最终两块保持在盒内，所有机械臂松手并撤离。全程不要推动黄色方块超过3厘米（随场景缩放）。', 'criterion': '有序完成红块、蓝块交付与末端撤离，各阶段持续0.3秒，最终保持0.3秒。提前交付蓝块或移动黄色方块超限判失败。', 'task_spec': deepcopy(TASK_GRAPHS['order_fulfillment'])},
+    'drawer_cycle': {'name': '抽屉开合与复位', 'instruction': '先抓住把手拉开抽屉超过12厘米并保持0.3秒，再关闭到2厘米以内，最后松手并离把手至少8厘米；长度阈值随工作台缩放。', 'criterion': '打开阶段确认后才能完成关闭；最终抽屉静止且与手无接触、末端撤离，持续保持0.3秒。', 'task_spec': deepcopy(TASK_GRAPHS['drawer_cycle'])},
     'lift_red': {'name': '抬起红色方块', 'instruction': '把红色方块抓起来，保持在桌面上方。', 'criterion': '红色方块中心高于桌面 8 cm（随工作台缩放），持续 0.3 秒。'},
     'place_red': {'name': '红块放入绿盒', 'instruction': '把红色方块放入绿色收纳盒内，然后松开并移开手。', 'criterion': '红块完全位于绿盒内部、高度正确、速度低于阈值，且与手无接触，持续 0.3 秒。'},
     'stack_red': {'name': '红块叠在蓝块上', 'instruction': '把红色方块叠放在蓝色方块上，松开并移开手。', 'criterion': '两块水平对齐、红块比蓝块高约一个块高、静止且与手无接触，持续 0.3 秒。'},
@@ -119,6 +123,8 @@ class TaskEvaluator:
         self.steps = 0
         self.last_time = float(sim.data.time)
         self.previous_valid = False
+        self.graph = TaskGraph(task_id) if task_id in TASK_GRAPHS else None
+        self.initial_yellow_xy = sim.data.body('block_yellow').xpos[:2].copy()
         self.robot_bodies = set()
         for actuator in sim.all_actuators:
             body = int(sim.model.jnt_bodyid[sim.model.joint(actuator['name']).id])
@@ -200,12 +206,27 @@ class TaskEvaluator:
             _, distance, speed = placed('red', 'tray')
             progress = max(0., 1 - distance / (.5*s))
             values = {'target_distance_m': distance, 'object_speed_m_s': speed}
-        elif self.task_id == 'sort_red_blue':
+        elif self.task_id in ('sort_red_blue', 'order_fulfillment'):
             satisfied = {}; distances = {}
             for name, tray in [('red', 'tray'), ('blue', 'blue_bin')]:
                 satisfied[name], distances[name], _ = placed(name, tray)
             progress = sum(satisfied.values()) / 2
             values = {'objects_placed': satisfied, 'target_distances_m': distances}
+            if self.graph:
+                yellow_displacement = float(np.linalg.norm(data.body('block_yellow').xpos[:2] - self.initial_yellow_xy))
+                distance = min(float(np.linalg.norm(data.site_xpos[r['site_id']] - data.body('block_'+name).xpos))
+                               for r in sim.robots.values() for name in ('red', 'blue'))
+                previous_red = self.graph.stages['red_delivered']['satisfied']
+                violation = ('物理状态数值无效' if not finite else
+                             '黄色非目标物体水平位移超限' if yellow_displacement > .03*s else
+                             '蓝块在红块阶段完成之前交付' if satisfied['blue'] and not previous_red and not self.graph.stages['blue_delivered']['ever_achieved'] else None)
+                self.graph.update(data.time, {'red_delivered': satisfied['red'], 'blue_delivered': satisfied['blue'],
+                                             'withdrawn': distance > .08*s}, violation)
+                graph = self.graph.snapshot()
+                check('task_graph_complete', '有序交付与撤离阶段均完成', graph['complete'], True, graph['complete'])
+                check('task_rules', '未违反任务规则', not graph['terminal_failure'], True, not graph['terminal_failure'])
+                values.update(yellow_displacement_m=yellow_displacement, minimum_tcp_distance_m=distance)
+                progress = graph['potential']
         elif self.task_id == 'stack_red':
             blue = data.body('block_blue').xpos
             xy = float(np.linalg.norm(red[:2] - blue[:2])); dz = float(red[2]-blue[2])
@@ -216,7 +237,7 @@ class TaskEvaluator:
             check('red_released', '红块已脱离机械臂接触', not touched, True, not touched)
             progress = max(0., 1 - np.linalg.norm(red-blue-[0, 0, .048*s])/(.3*s))
             values = {'alignment_error_m': xy, 'height_difference_m': dz, 'object_speed_m_s': speed}
-        elif self.task_id == 'open_drawer':
+        elif self.task_id in ('open_drawer', 'drawer_cycle'):
             joint = model.joint('drawer_slide')
             position = float(data.joint('drawer_slide').qpos[0])
             closed, maximum = map(float, joint.range)
@@ -225,7 +246,8 @@ class TaskEvaluator:
             # MuJoCo joint limits are soft; small solver excursions at the stop
             # are valid, while a displaced/off-rail state is not.
             limit_tolerance = .002*s
-            check('drawer_displacement', '抽屉相对闭合位置的位移', distance, f'> {threshold:g}', distance > threshold, 'm')
+            if not self.graph:
+                check('drawer_displacement', '抽屉相对闭合位置的位移', distance, f'> {threshold:g}', distance > threshold, 'm')
             check('drawer_joint_limits', '抽屉滑轨处于物理行程内', position,
                   f'{closed:g} - {limit_tolerance:g} <= qpos <= {maximum:g} + {limit_tolerance:g}',
                   closed-limit_tolerance <= position <= maximum+limit_tolerance, 'm')
@@ -234,6 +256,18 @@ class TaskEvaluator:
                       'drawer_joint_qpos_m': position, 'drawer_closed_qpos_m': closed,
                       'drawer_joint_limits_m': [closed, maximum], 'limit_tolerance_m': limit_tolerance,
                       'drawer_velocity_m_s': float(data.joint('drawer_slide').qvel[0])}
+            if self.graph:
+                velocity = abs(float(data.joint('drawer_slide').qvel[0]))
+                clearance = min(float(np.linalg.norm(data.site_xpos[r['site_id']] - data.geom('drawer_handle').xpos)) for r in sim.robots.values())
+                self.graph.update(data.time, {'opened': distance > threshold,
+                    'closed': distance < .02*s and velocity < .03*s,
+                    'released': not self.touches_robot(sim, 'drawer') and clearance > .08*s},
+                    '物理状态数值无效' if not finite else None)
+                graph = self.graph.snapshot()
+                check('task_graph_complete', '抽屉开合与撤离阶段均完成', graph['complete'], True, graph['complete'])
+                check('task_rules', '未违反任务规则', not graph['terminal_failure'], True, not graph['terminal_failure'])
+                values.update(minimum_tcp_distance_m=clearance)
+                progress = graph['potential']
         elif self.task_id == 'insert_peg':
             peg = data.body('peg'); pos = peg.xpos
             vertical = float(abs(peg.xmat.reshape(3,3)[2,2]))
@@ -275,6 +309,30 @@ class TaskEvaluator:
                      'hold_s': round(self.hold_s, 6), 'required_hold_s': self.REQUIRED_HOLD_S,
                      'evaluated_at_sim_s': plain(now), 'values': plain(values), 'checks': checks,
                      'failure_reasons': [item['label'] for item in checks if not item['passed']]}
+        if self.graph:
+            self.last['task_graph'] = self.graph.snapshot()
+            self.last['reward_components'] = {'version': self.graph.spec['version'],
+                'task_success': int(self.success), 'potential': self.last['task_graph']['potential'],
+                'first_achievements': self.last['task_graph']['first_achievements'],
+                'constraint_violation': int(self.graph.terminal_failure)}
+            if self.graph.terminal_failure:
+                self.last['status'] = 'terminal_failure'
+                self.last['failure_reasons'].append(self.graph.failure_reason)
+
+    def checkpoint(self):
+        if not self.graph: return None
+        return {'task_id': self.task_id, 'graph': self.graph.snapshot(),
+                'initial_yellow_xy': self.initial_yellow_xy.tolist(),
+                'hold_s': self.hold_s, 'success': self.success, 'ever_success': self.ever_success,
+                'last_time': self.last_time, 'previous_valid': self.previous_valid, 'last': deepcopy(self.last)}
+
+    def restore(self, state):
+        if not self.graph or state['task_id'] != self.task_id: raise ValueError('任务检查点不匹配。')
+        self.graph.restore(state['graph'])
+        self.graph.last_time = state['last_time']
+        self.initial_yellow_xy = np.asarray(state['initial_yellow_xy'])
+        for key in ('hold_s', 'success', 'ever_success', 'last_time', 'previous_valid', 'last'):
+            setattr(self, key, deepcopy(state[key]))
 
     def snapshot(self):
         return {'task_id': self.task_id, **TASKS[self.task_id], **self.last}

@@ -27,7 +27,7 @@
 
 示例的空数组用于省略长数据。实际请求包含：
 
-- `cameras`：同一物理时刻的 `front`、`side`、`wrist`，每项包含 JPEG `image_base64`、时间、世界坐标位置、旋转矩阵和视场角。
+- `cameras`：同一物理时刻的相机，名称以 `observation.backend.camera_names` 为准；MuJoCo 默认 `front`、`side`、`wrist`。每项包含 JPEG `image_base64` 和时间；标定与位姿字段由原生后端提供，不能假定所有后端采用相同字段。
 - `actuators`：有序的 `name`、`unit`、`position`、`target`、`min`、`max`。关节位置用弧度；Panda 最后一项执行器的 **target/min/max 用 0–255 控制量，position 用单指米数**，不能直接将该 position 作为动作。其余执行器目标和实际位置均用弧度。
 - 机械臂本体状态还包含 TCP 位姿、关节速度、关节限制与动作范围。Gaia 的 `hand_joints` 是 15 项名称、实际角度和范围。
 - 不提供物体真值位置或场景评价器输出。策略通过图像和本体状态预测。
@@ -58,6 +58,25 @@
 RoboCasa365 沿用 `actuator_targets` 响应结构，`joint_names` 必须使用观察中的 12 个原生命令名称，依次为 `arm_dx, arm_dy, arm_dz, arm_drx, arm_dry, arm_drz, gripper_command, base_vx_command, base_vy_command, base_yaw_command, torso_command, base_mode`。这是 `[-1,1]` 归一化控制量，**不是关节角**；控制器执行官方缩放，超范围请求会被拒绝。`dt_s` 为 0.05–0.5 秒，须为 0.05 秒的整数倍。
 
 观察中的 `native_action_space` 描述该合同，`actuators.unit` 为 `normalized_command`，未提供的 `actual` / `position` 保留空值。实际机械臂关节、底盘位姿与躯干状态在 `joints`、`mobile_base`、`torso` 中分别记录。工作台视觉 Agent 当前使用固定底盘的 TCP 控制；导航及完整移动操作使用原生策略或手动命令。详见[RoboCasa365 指南](docs/robocasa365.md)。
+
+### OmniGibson 原生整机动作
+
+当 `observation.backend.action_mode == "native"` 时，使用 `action_type: "native"`，不要把控制向量当作关节角或 TCP 位姿。响应字段：
+
+| 字段 | 合同 |
+| --- | --- |
+| `protocol` | `embodied-policy-v1` |
+| `action_type` | `native` |
+| `action_names` | 原样复制 `observation.native_action_spec.names`，顺序必须相同 |
+| `actions` | 1–50 帧完整向量，每帧长度与名称数一致，数值在声明的 low/high 内 |
+| `dt_s` | 原生 `native_action_spec.dt_s` 的正整数倍，且不超过 0.5 秒 |
+| `robot_id` | 可省略，或 `robot0` |
+
+整机控制组可包括底盘、躯干、头部、双臂和夹爪。`control_groups` 保存官方控制器类型和配置；零命令不一定表示保持原位。请根据完整控制语义训练或适配策略，不能直接复用 SO-101 的 SmolVLA 动作映射。
+
+相机数量与名称动态返回；深度字段 `depth` 使用 `encoding=npy-float32`、米单位和 `data_base64`，加载 NumPy 时须 `allow_pickle=False`。零深度表示无有效测量，标定和图像位姿随观察保存。策略请求中不包含用于评分的物体真值、BDDL 满足情况或 Q 分数。
+
+普通 Agent 和组合决策也支持该整机合同。交互 API 与上游 BEHAVIOR WebSocket 评测协议各自独立；官方评估器需要实现上游协议的策略服务，详见 [OmniGibson 接入指南](docs/omnigibson.md)。
 
 ## 末端动作响应
 

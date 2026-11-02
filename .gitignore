@@ -13,6 +13,8 @@ dist/
 .venv-isaacsim/
 .venv-robodojo/
 .venv-robocasa365/
+.venv-omnigibson/
+.venv-harnesspai/
 runs/
 __pycache__/
 vendor/

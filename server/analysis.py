@@ -9,7 +9,7 @@ from .runlog import LIVE_RUNS, list_runs, run_folder, live_snapshot
 from .run_management import record_labels
 from .pricing import estimate_quote
 from .costing import calculate_call_cost, aggregate_costs
-from .telemetry import reasoning_text, response_text, usage_tokens, effective_reasoning
+from .telemetry import reasoning_text, response_text, usage_tokens, effective_reasoning, normalize_routing
 
 TOKEN_FIELDS = ('input_tokens', 'output_tokens', 'reasoning_tokens', 'total_tokens')
 BATCH_KINDS = {'comparison', 'research_experiment'}
@@ -56,6 +56,24 @@ def _identity(metadata, calls):
     model = ' + '.join(models) if models else metadata.get('model') or config.get('model')
     effort = ' + '.join(efforts) if efforts else effective_reasoning(config)
     return model, effort or 'unspecified'
+
+
+def _harness_identity(metadata, calls=()):
+    # Recovery can replace the main harness mid-run. Repair's own harness is an
+    # auxiliary service and must not turn every assisted run into a mixed method.
+    actual = sorted({call['harness'] for call in calls
+                     if call.get('phase') in ('agent_inference', 'planning')
+                     and call.get('harness') in ('workbench', 'codex_cli', 'claude_code', 'dsh', 'http')})
+    if actual:
+        return ' + '.join(actual)
+    config = (metadata.get('recipe') or {}).get('agent') or metadata.get('settings') or {}
+    harness = metadata.get('harness') or config.get('harness')
+    if harness in ('workbench', 'codex_cli', 'claude_code', 'dsh', 'http'):
+        return harness
+    # Historical providers encoded the harness. Keep their original meaning.
+    provider = config.get('provider') or metadata.get('provider')
+    return {'codex': 'codex_cli', 'custom': 'http', 'openai': 'workbench',
+            'compatible': 'workbench', 'anthropic': 'workbench'}.get(provider)
 
 
 def _environment_identity(result, events, folder, issues):
@@ -153,6 +171,8 @@ def analyze_run(run_id, *, _ancestors=()):
     recipe = result.get('recipe') or {}
     fallback_config = recipe.get('agent') or recipe.get('policy') or result.get('settings') or {}
     for call in ordered:
+        call.setdefault('trace_id', run_id)
+        call['routing'] = normalize_routing(call.get('routing')) if isinstance(call.get('routing'), dict) else normalize_routing(None)
         for field in (*TOKEN_FIELDS, 'inference_s'): call[field] = _number(call.get(field))
         returned_tokens = usage_tokens(call.get('usage'))
         for field in TOKEN_FIELDS:
@@ -165,6 +185,8 @@ def analyze_run(run_id, *, _ancestors=()):
         if not isinstance(recorded_cost, dict) or recorded_cost.get('status') in ('partial', 'unavailable'):
             quote = saved_price if isinstance(saved_price, dict) and saved_price.get('status') in ('ready', 'stale') else estimate_quote(
                 {**fallback_config, 'provider': call.get('provider') or result.get('provider') or fallback_config.get('provider', fallback_config.get('kind')),
+                 'harness': call.get('harness', fallback_config.get('harness')),
+                 'harness_url': call.get('harness_url', fallback_config.get('harness_url')),
                  'model': call.get('model') or result.get('model') or fallback_config.get('model')})
             resolved = calculate_call_cost(call, quote)
             call['cost'] = resolved
@@ -178,6 +200,12 @@ def analyze_run(run_id, *, _ancestors=()):
                     resolved['warnings'].append('按原调用价格与原始用量补齐官方节假日条件重新估算；旧费用保留在 recorded_cost，未改写原日志。')
                 else:
                     resolved['warnings'].append('按原调用价格快照与原始用量重新计算；旧费用保留在 recorded_cost，未改写原日志。')
+        # Old complete price snapshots remain intact; attach correlation in the
+        # analysis view so declared gateway totals can exclude child estimates.
+        for field in ('call_id', 'parent_call_id', 'trace_id', 'decision_id', 'billing_scope'):
+            if call.get(field) is not None: call['cost'][field] = call[field]
+        call['cost'].setdefault('evidence_type', 'subscription_reference' if call['cost'].get('has_reference') else
+            'price_estimate' if call['cost'].get('billable_calls') else 'local_no_api_fee' if call['cost'].get('local_calls') else 'unknown')
     rows = result.get('rows') or [event['data'] for event in events if event.get('event') == 'trial_result']
     children = []; child_analyses = []; seen = set()
     for row in rows:
@@ -239,13 +267,20 @@ def analyze_run(run_id, *, _ancestors=()):
     environment = _environment_identity(result, events, folder, issues)
     from .experiment_costs import attribution
     cost_attribution = attribution(run_id, ordered, cost, child_analyses if result.get('kind') in BATCH_KINDS else ())
+    configuration_changes = [{'timestamp': event.get('timestamp'), **event.get('data', {})}
+        for event in events if event.get('event') == 'configuration_change']
     return {'run_id': run_id, **record_labels({**result, 'run_id': run_id, 'started_at': started_at}),
         **environment,
         'kind': result.get('kind'), 'status': result.get('status', 'interrupted'),
         'message': result.get('message'), 'task': result.get('task'), 'model': model, 'reasoning': effort,
+        'harness': _harness_identity(result, ordered),
+        'configuration_changed': bool(result.get('configuration_changed') or configuration_changes),
+        'configuration_changes': configuration_changes,
         'started_at': started_at, 'ended_at': ended_at, 'elapsed_s': elapsed,
         'metrics': result.get('metrics'), 'video': (result.get('artifacts') or {}).get('video'),
         'benchmark': result.get('benchmark'), 'record_origin': result.get('record_origin'),
+        'harnesspai': result.get('harnesspai'),
+        'native_split_validation': result.get('native_split_validation'),
         'native_videos': (result.get('artifacts') or {}).get('native_videos', []),
         'completion_verifications': [{'timestamp': event.get('timestamp'), **event.get('data', {})}
             for event in events if event.get('event') == 'completion_verification'],
@@ -272,13 +307,13 @@ def analyze_experiments(*, task=None, model=None, reasoning=None, kind=None, lim
         if run['status'] == 'running': excluded_active += 1; continue
         if run['kind'] not in BATCH_KINDS and run['kind'] != 'benchmark':
             context = tuple(run[field] for field in ENVIRONMENT_FIELDS)
-            groups[(*context, run['model'], run['reasoning'], run['kind'], run['task'])].append(run)
+            groups[(*context, run['model'], run['reasoning'], run['kind'], run['task'], run['harness'])].append(run)
     grouped = []
     for identity, members in groups.items():
-        model_name, effort, run_kind, run_task = identity[-4:]
-        group = {**dict(zip(ENVIRONMENT_FIELDS, identity[:-4])),
+        model_name, effort, run_kind, run_task, harness = identity[-5:]
+        group = {**dict(zip(ENVIRONMENT_FIELDS, identity[:-5])),
                  'backend': {field: members[0][field] for field in ENVIRONMENT_FIELDS[:4]},
-                 'model': model_name, 'reasoning': effort, 'kind': run_kind, 'task': run_task, 'runs': len(members),
+                 'model': model_name, 'reasoning': effort, 'kind': run_kind, 'task': run_task, 'harness': harness, 'runs': len(members),
                  'succeeded': sum(bool((run.get('metrics') or {}).get('success')) and run['status'] not in ('error', 'stopped', 'cancelled', 'interrupted', 'running') for run in members),
                  'cancelled': sum(run['status'] in ('stopped', 'cancelled') for run in members),
                  'failed': sum(run['status'] not in ('running', 'stopped', 'cancelled') and (run['status'] in ('error', 'interrupted') or not bool((run.get('metrics') or {}).get('success'))) for run in members)}
@@ -294,5 +329,5 @@ def analyze_experiments(*, task=None, model=None, reasoning=None, kind=None, lim
         grouped.append(group)
     return {'runs': runs[:limit], 'groups': grouped, 'matched_runs': len(runs), 'returned_runs': min(limit, len(runs)),
             'aggregation_scope': 'leaf_runs_only', 'excluded_active_runs': excluded_active, 'issues': issues,
-            'grouping_fields': [*ENVIRONMENT_FIELDS, 'model', 'reasoning', 'kind', 'task'],
-            'message': '仅在相同后端及版本、评价来源及版本、机器人、场景、评价任务内按模型与推理强度聚合；不同种子作为重复样本。历史环境缺失保留 unknown。聚合扫描所有历史记录，列表按 limit 截取；父批次不重复计费，缺失值不按零计算。'}
+            'grouping_fields': [*ENVIRONMENT_FIELDS, 'model', 'reasoning', 'kind', 'task', 'harness'],
+            'message': '仅在相同后端及版本、评价来源及版本、机器人、场景、评价任务和 harness 内按模型与推理强度聚合；不同种子作为重复样本。历史环境缺失保留 unknown。聚合扫描所有历史记录，列表按 limit 截取；父批次不重复计费，缺失值不按零计算。'}

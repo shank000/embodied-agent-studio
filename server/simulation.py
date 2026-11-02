@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import base64
 import hashlib
+import json
 import math
 import re
 import xml.etree.ElementTree as ET
@@ -363,7 +364,11 @@ class Simulation:
         mujoco.mj_step(self.model, self.data)
         self.physics_steps += 1
         self.evaluator.update(self)
-        if (self.run_deadline is not None and self.data.time >= self.run_deadline - 1e-8) or (self.stop_on_success and self.evaluator.success):
+        if self.evaluator.graph and self.evaluator.graph.terminal_failure:
+            self.cancel_motion()
+            self.paused = True
+            self.task.update(status='failed', message='任务规则触发终止；本次实验已结束。')
+        elif (self.run_deadline is not None and self.data.time >= self.run_deadline - 1e-8) or (self.stop_on_success and self.evaluator.success):
             self.cancel_motion()
             self.paused = True
             self.task['status'] = 'verified' if self.stop_on_success and self.evaluator.success else 'limit'
@@ -462,9 +467,13 @@ class Simulation:
         values = np.empty(mujoco.mj_stateSize(self.model, spec))
         mujoco.mj_getState(self.model, self.data, values, spec)
         identity = f'{self.model_id}:{self.scene_id}:{self.seed}:{self.task_id}:{self.active_robot}'.encode() + values.tobytes()
+        evaluator_state = self.evaluator.checkpoint()
+        if evaluator_state is not None:
+            identity += json.dumps(evaluator_state, sort_keys=True, allow_nan=False).encode()
         return {'model': self.model_id, 'scene_id': self.scene_id, 'seed': self.seed, 'task_id': self.task_id,
                 'active_robot': self.active_robot, 'backend': self.backend_identity(),
-                'state': values.tolist(), 'state_id': hashlib.sha256(identity).hexdigest()[:16]}
+                'state': values.tolist(), 'evaluator_state': evaluator_state,
+                'state_id': hashlib.sha256(identity).hexdigest()[:16]}
 
     def trajectory_frame(self):
         spec = mujoco.mjtState.mjSTATE_INTEGRATION
@@ -473,7 +482,8 @@ class Simulation:
         return {'time': float(self.data.time), 'backend': self.backend_identity(), 'active_robot': self.active_robot, 'integration_state': values.tolist(),
                 'qpos': self.data.qpos.tolist(), 'qvel': self.data.qvel.tolist(),
                 'ctrl': self.data.ctrl.tolist(), 'actuator_force': self.data.actuator_force.tolist(),
-                'contacts': int(self.data.ncon), 'evaluation': self.evaluator.snapshot()}
+                'contacts': int(self.data.ncon), 'evaluation': self.evaluator.snapshot(),
+                'evaluator_state': self.evaluator.checkpoint()}
 
     def replay_frame(self, frame):
         self.validate_record_backend(frame)
@@ -489,6 +499,8 @@ class Simulation:
         mujoco.mj_setState(self.model, self.data, values, spec)
         mujoco.mj_forward(self.model, self.data)
         self.evaluator = TaskEvaluator(self, self.task_id)
+        if frame.get('evaluator_state'):
+            self.evaluator.restore(frame['evaluator_state'])
         self.playback = {'time': float(self.data.time), 'frame_index': frame.get('index'),
                          'recorded_evaluation': frame.get('evaluation')}
         self.task = {'status': 'idle', 'title': '记录状态回放 · 未重新推理或执行动作',
@@ -507,6 +519,8 @@ class Simulation:
         self.run_deadline = None; self.stop_on_success = False
         self.task = {'status': 'idle', 'title': '对比实验初始状态', 'steps': [], 'step': -1, 'progress': 0}
         self.physics_steps = 0; self.evaluator = TaskEvaluator(self, self.task_id)
+        if checkpoint.get('evaluator_state'):
+            self.evaluator.restore(checkpoint['evaluator_state'])
         return {'state_id': checkpoint['state_id']}
 
     def observe(self):
@@ -568,7 +582,9 @@ class Simulation:
         if self.run_deadline is not None:
             deadline = min(deadline, self.run_deadline)
         try:
-            while not self.evaluator.success and self.data.time + self.model.opt.timestep <= deadline + 1e-9:
+            while (not self.evaluator.success
+                   and not (self.evaluator.graph and self.evaluator.graph.terminal_failure)
+                   and self.data.time + self.model.opt.timestep <= deadline + 1e-9):
                 self.step()
                 if on_step is not None: on_step()
         finally:

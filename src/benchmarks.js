@@ -24,7 +24,7 @@ function field(label,id,type='text',value=''){
 function button(label,className='secondary'){const node=element('button',className,label);node.type='button';return node;}
 function note(text,error=false){if(!nodes)return;nodes.message.textContent=text;nodes.message.classList.toggle('error',error);nodes.message.setAttribute('role',error?'alert':'status');}
 function report(error){note(error?.message||String(error),true);context.toast?.(error?.message||String(error));}
-function controllerBusy(){return !!(platformState?.backend_switching||['agent','policy','comparison','research','composition','experiment','repair'].some(key=>platformState?.[key]?.active));}
+function controllerBusy(){return !!(platformState?.backend_switching||['agent','policy','comparison','research','composition','experiment','repair','harnesspai'].some(key=>platformState?.[key]?.active));}
 
 async function request(path='',payload){
   const response=await fetch(API+path,payload===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

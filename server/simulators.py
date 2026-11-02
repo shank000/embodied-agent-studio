@@ -16,8 +16,12 @@ EVALUATORS = {'mujoco': ('mujoco_privileged_state', 'task-evaluation-v2'),
               'ai2thor': ('ai2thor_native_task', 'ai2thor-task-v1'),
               'isaac': ('isaaclab_newton_state', 'isaaclab-task-v1'),
               'isaacsim': ('isaacsim_privileged_state', 'isaaclab-task-v1'),
-              'robocasa365': ('robocasa_official_state', 'robocasa365-task-v1')}
+              'robocasa365': ('robocasa_official_state', 'robocasa365-task-v1'),
+              'robodojo': ('robodojo_official_state', 'robodojo-task-v1'),
+              'omnigibson': ('omnigibson_bddl_state', 'omnigibson-bddl-v1')}
 RUNTIMES = {
+    'omnigibson': ('omnigibson', 'BEHAVIOR / OmniGibson', 'omnigibson_backend', 'OmniGibsonSimulation', 'https://behavior.stanford.edu/'),
+    'robodojo': ('isaacsim', 'RoboDojo', 'robodojo_backend', 'RoboDojoSimulation', 'https://robodojo-benchmark.com/doc/usage/quick-evaluation/'),
     'robocasa365': ('robocasa', 'RoboCasa365', 'robocasa_backend', 'RoboCasaSimulation', 'https://robocasa.ai/'),
     'genesis': ('genesis_world', 'Genesis World', 'genesis_backend', 'GenesisSimulation', 'https://genesis-world.readthedocs.io/'),
     'maniskill': ('mani_skill', 'ManiSkill / SAPIEN', 'maniskill_backend', 'ManiSkillSimulation', 'https://maniskill.readthedocs.io/'),
@@ -42,6 +46,18 @@ def runtime_python(engine_id):
 
 
 def runtime_info(engine_id):
+    if engine_id == 'omnigibson':
+        from .omnigibson import readiness, runtime_config, RELEASE
+        status = readiness()
+        config = runtime_config() or {}
+        return {**config, 'kind': 'native', 'installed': status['ready'],
+                'version': RELEASE if config else None, 'readiness': status}
+    if engine_id == 'robodojo':
+        from .robodojo import readiness, runtime_config
+        status = readiness()
+        config = runtime_config() or {}
+        return {**config, 'kind': config.get('kind', 'native'), 'installed': status['ready'],
+                'version': '5.1.0' if status['ready'] else None, 'readiness': status}
     python = runtime_python(engine_id)
     marker = ROOT / f'.venv-{engine_id}' / 'runtime.json'
     if marker.is_file():
@@ -79,7 +95,18 @@ def runtime_command(engine_id, generation_base=0, python_path=None, runtime_scri
         return [str(python), '-u', str(script), '--engine', engine_id,
                 '--generation-base', str(generation_base)]
     value = runtime_info(engine_id)
+    if engine_id == 'omnigibson' and value['installed']:
+        from .omnigibson import probe_runtime, readiness, runtime_config
+        config = runtime_config()
+        status = readiness({**config, 'probe': probe_runtime(config)})
+        value = {**value, 'installed': status['ready'], 'readiness': status}
     if not value['installed']:
+        if engine_id == 'omnigibson':
+            missing = [item['label'] + '：' + item['detail'] for item in value['readiness']['checks'] if item['status'] != 'passed']
+            raise ValueError('OmniGibson 原生运行尚未就绪：' + '；'.join(missing) + '。请按 docs/omnigibson.md 准备独立运行环境。')
+        if engine_id == 'robodojo':
+            missing = [item['label'] for item in value['readiness']['checks'] if item['status'] != 'passed']
+            raise ValueError('RoboDojo 原生运行尚未就绪：'+ '、'.join(missing) + '。请按 docs/robodojo.md 在 Linux GPU 主机配置运行时；当前环境保持不变。')
         raise ValueError(f'未找到 {RUNTIMES[engine_id][1]} 独立运行环境。请按 docs/simulators.md 安装并完成资源准备。')
     arguments = ['--engine', engine_id, '--generation-base', str(generation_base)]
     if value['kind'] == 'wsl':
@@ -99,14 +126,19 @@ def backend_identity(engine_id='mujoco', version=None):
         version = mujoco.__version__
     source, evaluator = EVALUATORS[engine_id]
     discrete = engine_id in ('alfworld', 'alfworld_thor', 'ai2thor')
+    capabilities = (['load','scene','reset','pause','stop','instruction','environment_action','observe','verify_task',
+                     'run_limits','checkpoint','restore','replay_frame','render_suspend'] if discrete else
+                    COMMON + (['demo', 'flags', 'gravity', 'drop'] if engine_id == 'mujoco' else []))
+    if engine_id in ('libero', 'robocasa365', 'robodojo', 'omnigibson'):
+        module = importlib.import_module('.backends.'+RUNTIMES[engine_id][2], __package__)
+        capabilities = list(module.CAPABILITIES)
     return {'engine_id': engine_id, 'engine_version': version,
             'evaluator_source': source, 'evaluator_version': evaluator,
-            'state_schema': {'ai2thor': 'ai2thor-integration-v2', 'alfworld_thor': 'alfworld-thor-lowlevel-v1'}.get(engine_id, f'{engine_id}-integration-v1'),
-            'control_frame': None if discrete else 'world_z_up_m_wxyz',
-            'action_mode': ('text' if engine_id == 'alfworld' else 'discrete') if discrete else 'tcp_pose',
-            'capabilities': (['load','scene','reset','pause','stop','instruction','environment_action','observe','verify_task',
-                              'run_limits','checkpoint','restore','replay_frame','render_suspend'] if discrete else
-                             COMMON + (['demo', 'flags', 'gravity', 'drop'] if engine_id == 'mujoco' else []))}
+            'state_schema': {'ai2thor': 'ai2thor-integration-v2', 'alfworld_thor': 'alfworld-thor-lowlevel-v1', 'robodojo':'robodojo-interactive-v1'}.get(engine_id, f'{engine_id}-integration-v1'),
+            'control_frame': None if discrete or engine_id == 'omnigibson' else 'world_z_up_m_wxyz',
+            'action_mode': 'native' if engine_id == 'omnigibson' else ('text' if engine_id == 'alfworld' else 'discrete') if discrete else 'tcp_pose',
+            'capabilities': capabilities,
+            **({'camera_names': ['head', 'left_wrist', 'right_wrist']} if engine_id == 'robodojo' else {})}
 
 
 def supported_catalog(engine_id='mujoco'):
@@ -121,6 +153,9 @@ def supported_catalog(engine_id='mujoco'):
     if engine_id == 'robocasa365':
         from .backends.robocasa_catalog import MODELS, SCENES, TASKS
         return MODELS, SCENES, TASKS
+    if engine_id == 'omnigibson':
+        from .backends.omnigibson_catalog import catalog
+        return catalog()
     if engine_id != 'genesis':
         module = importlib.import_module('.backends.'+RUNTIMES[engine_id][2], __package__)
         return module.MODELS, module.SCENES, module.TASKS
@@ -143,6 +178,8 @@ def catalog(active='mujoco', session_id=None):
          'requirements': '工作台主 Python 环境', 'docs': 'https://mujoco.readthedocs.io/'},
     ]
     descriptions = {
+        'omnigibson': ('BEHAVIOR 家庭任务、R1Pro 移动双臂、原生相机与 BDDL 目标评价；通过真实控制动作执行。', '独立 BEHAVIOR v3.9.4 / Python 3.11 / Isaac Sim 5.1；至少 32 GB 内存、16 GB 显存及官方资产。配置与验收见 docs/omnigibson.md。'),
+        'robodojo': ('官方双 ARX X5 任务、原生三相机与任务评价；交互研究与官方批量评测分别记录。', '独立 Linux GPU / Isaac Sim 5.1 / 官方配套 IsaacLab、CuRobo 与资产。配置见 docs/robodojo.md；原生验收尚待运行环境。'),
         'robocasa365': ('官方 65 项原子与 300 项复合厨房任务；移动 PandaOmron、三相机和原生成功判据。', '独立 Python 3.11 .venv-robocasa365；需准备所选场景与物品资产，详见 docs/robocasa365.md。'),
         'genesis': ('原生 Genesis 物理、Panda、三相机与 IK；桌面三项任务。', '独立 .venv-genesis；首次加载编译物理内核。'),
         'maniskill': ('官方 PickCube / PushCube；SAPIEN/PhysX、原生图像和官方成功判据。', '独立 .venv-maniskill；Windows CPU 物理 + Vulkan，Linux 可用 GPU。'),
@@ -162,21 +199,27 @@ def catalog(active='mujoco', session_id=None):
         description, requirement = descriptions[engine_id]
         values.append({'id': engine_id, 'name': name, 'version': info.get('version'),
                        'implemented': implemented, 'installed': installed,
-                       'status': 'unavailable' if error else 'available' if implemented and installed else 'not_installed',
+                       'status': 'unavailable' if error else 'available' if implemented and installed else 'not_ready' if engine_id == 'omnigibson' else 'not_installed',
                        'description': description, 'requirements': requirement, 'docs': docs,
-                       'runtime_kind': info.get('kind'), 'error': error})
+                       'runtime_kind': info.get('kind'), 'error': error,
+                       **({'readiness': info['readiness']} if 'readiness' in info else {})})
     for item in values:
         if item['implemented']:
             models, scenes, _ = supported_catalog(item['id'])
             item.update(models=list(models), scenes=list(scenes), capabilities=backend_identity(item['id'])['capabilities'])
         else:
             item.update(models=[], scenes=[], capabilities=[])
-    # A benchmark owns a separate rollout lifecycle. Expose its entry beside
-    # simulators without registering it as a switchable interactive backend.
-    values.append({'id': 'robodojo', 'name': 'RoboDojo', 'kind': 'benchmark',
-                   'status': 'external_runtime', 'implemented': True, 'installed': None,
-                   'description': '使用 Isaac Sim 5.1 的双臂任务基准，独立评测流程；打开后配置任务、检查运行环境和查看结果。',
-                   'requirements': '原生运行需要独立 Linux GPU、Isaac Sim 5.1 和 XPolicyLab；本机可准备计划和导入结果。打开入口不会切换当前仿真。',
-                   'docs': 'https://robodojo-benchmark.com/doc/usage/quick-evaluation/',
-                   'models': [], 'scenes': [], 'capabilities': ['plan', 'import_results']})
+    for item in values:
+        item['integration'] = {
+            'mode': 'interactive_research',
+            'native_validation': 'runtime_preflight_only' if item['installed'] else 'not_recorded',
+            'note': '安装或依赖预检不等于任务实测通过；当前画面以实际加载结果为准。',
+            'limitations': (['交互研究不生成官方榜单分数。', '仅原生相机预设；不支持自由视角、物理检查点恢复或配对回放。',
+                             'Linux GPU 原生首帧、动作与终局仍待实机验收。'] if item['id'] == 'robodojo' else
+                            ['已接入平台接口；原生场景、动作、BDDL 终局尚待资源充足的主机验收。',
+                             '任务目录不代表全部任务已验收；控制模式固定为原生物理动作，不自动改用符号原语。',
+                             '检查点能力以当前后端声明为准；不宣称任意物体转换场景可精确恢复。'] if item['id'] == 'omnigibson' else
+                            ['文字环境没有三维相机。'] if item['id'] == 'alfworld' else [])}
+        if item['id'] == 'robodojo':
+            item['benchmark_entry'] = True
     return {'active': active, 'session_id': session_id, 'backends': values}

@@ -1,0 +1,14 @@
+#harnesspai-panel{margin:20px 0;padding:24px;min-width:0}
+#harnesspai-panel fieldset{border:0;padding:0;margin:0;min-width:0}
+#hp-source{font-family:ui-monospace,Consolas,monospace;line-height:1.65;font-size:14px;tab-size:4;resize:vertical;white-space:pre;overflow:auto;min-height:220px}
+#harnesspai-panel label{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+#harnesspai-panel .record-video-option{flex-direction:row;align-items:flex-start}
+#harnesspai-panel .rsi-actions{flex-wrap:wrap}
+.harnesspai-trial{border:1px solid var(--border,#dbe6df);border-radius:12px;padding:16px;margin:12px 0;overflow-wrap:anywhere}
+.harnesspai-trial summary{cursor:pointer;font-weight:650;line-height:1.7}
+.harnesspai-trial video{width:100%;max-width:760px;border-radius:8px;margin-top:12px}
+.harnesspai-trial ul{padding-left:22px;line-height:1.8}
+.harnesspai-links{display:flex;gap:16px;flex-wrap:wrap}
+.harnesspai-links a{color:var(--green,#34664c)}
+#result-harnesspai{padding:20px 0}
+@media(max-width:700px){#harnesspai-panel{padding:16px}#harnesspai-panel .rsi-fields{grid-template-columns:1fr}}

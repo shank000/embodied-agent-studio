@@ -1,0 +1,57 @@
+[
+  {
+    "file": "ep-launch-recovery.jpg",
+    "source_url": "https://winniechen2002.github.io/Agent-bench-website/assets/posters/launch-recovery-reference.jpg",
+    "source_page": "https://winniechen2002.github.io/Agent-bench-website/",
+    "attribution": "Chen Feng / AgentBench",
+    "description": "Official poster for privileged developer reference, dual Panda; not scored agent attempt.",
+    "retrieved_at": "2026-10-29T18:37:06.999307+00:00",
+    "sha256": "f7a7fe1fbb1e7b3c2d78d9505ce4ce10914d64f4e8d14d8d1d966738a9d93ee2",
+    "bytes": 69427,
+    "modifications": "None: original bytes; displayed at responsive CSS width."
+  },
+  {
+    "file": "ep-kongming-assembly.jpg",
+    "source_url": "https://winniechen2002.github.io/Agent-bench-website/assets/posters/kongming-assembly.jpg",
+    "source_page": "https://winniechen2002.github.io/Agent-bench-website/",
+    "attribution": "Chen Feng / AgentBench",
+    "description": "Official poster for dual Panda six-piece assembly reference, not a scored agent attempt.",
+    "retrieved_at": "2026-10-29T18:37:07.004446+00:00",
+    "sha256": "8739181791119d9e5a40d83b1e0a53ad50282b26044140995993f26914d36c85",
+    "bytes": 31196,
+    "modifications": "None: original bytes; displayed at responsive CSS width."
+  },
+  {
+    "file": "robocasa-layout1-style1.png",
+    "source_url": "https://robocasa.ai/docs/build/html/static/target_scenes/layout1_style1.png",
+    "source_page": "https://robocasa.ai/docs/build/html/assets/scenes.html",
+    "attribution": "RoboCasa core team",
+    "description": "Official target kitchen: One Wall / Industrial, layout 1 style 1. Source HTML declares static path rewrite.",
+    "retrieved_at": "2026-10-29T18:37:08.669284+00:00",
+    "sha256": "3413882fd57c609f134d049dda20c126453baad3449edfba91d2075a3392221c",
+    "bytes": 631220,
+    "modifications": "None: original bytes; displayed at responsive CSS width."
+  },
+  {
+    "file": "robocasa-layout8-style8.png",
+    "source_url": "https://robocasa.ai/docs/build/html/static/target_scenes/layout8_style8.png",
+    "source_page": "https://robocasa.ai/docs/build/html/assets/scenes.html",
+    "attribution": "RoboCasa core team",
+    "description": "Official target kitchen: G-shaped / Rustic, layout 8 style 8. Source HTML declares static path rewrite.",
+    "retrieved_at": "2026-10-29T18:37:11.499668+00:00",
+    "sha256": "0526bc865e9c606506714d9099830dbe23c8ca806e8210c425781ba3d6f54074",
+    "bytes": 601495,
+    "modifications": "None: original bytes; displayed at responsive CSS width."
+  },
+  {
+    "file": "maniskill-teaser.jpg",
+    "source_url": "https://raw.githubusercontent.com/mani-skill/ManiSkill/main/figures/teaser.jpg",
+    "source_page": "https://github.com/mani-skill/ManiSkill",
+    "attribution": "ManiSkill contributors",
+    "description": "Official ray-traced scene/robot overview; scene datasets AI2THOR and ReplicaCAD.",
+    "retrieved_at": "2026-10-29T18:37:13.530448+00:00",
+    "sha256": "cc7e9b031db396d0fdb972672f23a8d4cbc591dd822e9d6044f362e612b3a3e0",
+    "bytes": 1317676,
+    "modifications": "None: original bytes; displayed at responsive CSS width."
+  }
+]

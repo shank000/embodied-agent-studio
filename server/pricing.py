@@ -107,6 +107,10 @@ class PriceCatalog:
     def quote(self, settings, *, basis='recorded_snapshot'):
         provider = settings.get('provider', settings.get('kind'))
         model = settings.get('model')
+        if settings.get('harness') == 'http':
+            return {'status': 'unavailable', 'provider': provider, 'model': model,
+                    'harness': 'http', 'billing_kind': 'unpriced', 'currency': 'USD', 'basis': basis,
+                    'message': '外部 HTTP harness 的用量可能包含多次模型或工具调用；缺少逐调用计费证据，不能直接按所选模型单价合算。'}
         endpoint = settings.get('base_url') or settings.get('endpoint') or settings.get('url') or ''
         host = urlsplit(endpoint).hostname
         billing_kind = 'api'
