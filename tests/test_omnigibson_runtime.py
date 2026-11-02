@@ -34,8 +34,11 @@ class OmniGibsonRuntimeTests(unittest.TestCase):
         self.probe = {'signature': omnigibson._signature(self.config), 'packages_ready': True,
                       'revision': omnigibson.REVISION, 'gpu': {'name': 'NVIDIA RTX test', 'memory_mib': 24576}}
 
-    def readiness(self, config=None, memory=64):
-        with patch.object(omnigibson, 'total_memory_gib', return_value=memory):
+    def readiness(self, config=None, memory=64, platform='linux'):
+        # This complete native-runtime fixture represents a supported Linux
+        # host, regardless of the operating system running the contract tests.
+        with patch.object(omnigibson.sys, 'platform', platform), \
+             patch.object(omnigibson, 'total_memory_gib', return_value=memory):
             return omnigibson.readiness(config or {**self.config, 'probe': self.probe})
 
     def test_readiness_never_launches_sdk_and_distinguishes_unverified_native_run(self):
@@ -44,6 +47,15 @@ class OmniGibsonRuntimeTests(unittest.TestCase):
         self.assertTrue(result['ready'])
         self.assertEqual(result['native_validation'], 'not_recorded')
         self.assertIn('仍待验收', result['message'])
+
+    def test_macos_remains_unavailable_even_with_complete_runtime_fixture(self):
+        with patch.object(subprocess, 'Popen', side_effect=AssertionError('No subprocess for catalog')):
+            result = self.readiness(platform='darwin')
+        self.assertFalse(result['ready'])
+        missing = [item for item in result['checks'] if item['status'] != 'passed']
+        self.assertEqual(missing, [{'id': 'os', 'label': 'Windows / Linux', 'status': 'missing', 'detail': 'darwin'}])
+        self.assertEqual(result['native_validation'], 'not_recorded')
+        self.assertIn('不会改用其他引擎', result['message'])
 
     def test_low_resources_remain_unavailable_with_specific_reasons(self):
         self.probe['gpu']['memory_mib'] = 8192
@@ -102,6 +114,7 @@ class OmniGibsonRuntimeTests(unittest.TestCase):
     def test_registered_paths_are_preserved_and_read_only_check_does_not_write(self):
         marker = self.root/'config/runtime.json'
         with patch.object(omnigibson, 'RUNTIME_FILE', marker), patch.object(omnigibson, 'probe_runtime', return_value=self.probe), \
+             patch.object(omnigibson.sys, 'platform', 'linux'), \
              patch.object(omnigibson, 'total_memory_gib', return_value=64):
             self.assertTrue(omnigibson.configure(self.config)['ready'])
             before = marker.read_bytes()

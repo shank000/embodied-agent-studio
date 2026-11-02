@@ -421,7 +421,7 @@ $('#agent-config-form').addEventListener('submit',async event=>{event.preventDef
   if(capabilityLoading)throw new Error('模型能力正在读取，请稍候再应用。');
   const harness=$('#config-harness').value,provider=$('#config-provider').value,error=harnessCompatibility(harness,provider)||harnessReasoningError(harness,selectedReasoning(),{provider,baseUrl:$('#config-base-url').value,thinking:$('#config-deepseek-thinking').value});if(error)throw new Error(error);
   agentConfig=await agentApi('config',{harness,provider,model:$('#config-model').value.trim(),base_url:$('#config-base-url').value.trim(),api_key:$('#config-api-key').value,
-    harness_url:$('#config-harness-url').value.trim(),harness_api_key:$('#config-harness-api-key').value,forward_model_key:harness==='http'&&$('#config-forward-model-key').checked,
+    harness_url:harness==='http'?$('#config-harness-url').value.trim():'',harness_api_key:harness==='http'?$('#config-harness-api-key').value:'',forward_model_key:harness==='http'&&$('#config-forward-model-key').checked,
     reasoning:selectedReasoning(),reasoning_native:true,deepseek_thinking:$('#config-deepseek-thinking').value,
     max_output_tokens:$('#config-output-tokens').disabled?(agentConfig?.max_output_tokens??16384):Number($('#config-output-tokens').value),max_rounds:Number($('#config-rounds').value)||null,timeout_s:Number($('#config-timeout').value)});
   $('#config-api-key').value='';$('#config-harness-api-key').value='';updateConfigSummary();$('#agent-config-dialog').close();toast('Harness 与模型配置已应用。');

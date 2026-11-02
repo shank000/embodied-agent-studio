@@ -94,6 +94,33 @@ test('Claude Code and dsh save and reopen independent model connection and token
   }
 });
 
+test('unfinished HTTP harness drafts do not block saving a different CLI harness',async()=>{
+  for(const [harness,provider] of [['claude_code','anthropic'],['dsh','openai']]){
+    const ui=setup({...defaults,harness:'http',provider});await ui.open();
+    ui.element('config-harness-url').value='unfinished-http-url';
+    ui.element('config-harness-api-key').value='unused-harness-draft-key';
+    ui.element('config-forward-model-key').checked=true;
+    ui.element('config-api-key').value='chosen-model-key';
+    ui.element('config-harness').value=harness;await ui.trigger('config-harness');
+    assert.equal(ui.element('harness-http-fields').hidden,true);
+    assert.equal(ui.element('apply-agent-config').disabled,false);
+    // Switching back before saving must keep the user's unfinished draft.
+    ui.element('config-harness').value='http';await ui.trigger('config-harness');
+    assert.equal(ui.element('config-harness-url').value,'unfinished-http-url');
+    assert.equal(ui.element('config-harness-api-key').value,'unused-harness-draft-key');
+    ui.element('config-harness').value=harness;await ui.trigger('config-harness');
+    await ui.submit();
+    const sent=ui.calls.find(call=>call.path==='config'&&call.body).body;
+    assert.equal(sent.harness,harness);assert.equal(sent.provider,provider);
+    assert.equal(sent.harness_url,'');assert.equal(sent.harness_api_key,'');
+    assert.equal(sent.forward_model_key,false);
+    assert.equal(sent.base_url,defaults.base_url);assert.equal(sent.model,defaults.model);
+    assert.equal(sent.api_key,'chosen-model-key');
+    assert.equal(ui.element('agent-config-dialog').open,false);
+    assert.equal(ui.element('config-harness-url').value,'unfinished-http-url');
+  }
+});
+
 test('new CLI harnesses block mismatched protocols without changing entered model fields',async()=>{
   for(const [harness,provider] of [['claude_code','openai'],['claude_code','compatible'],['claude_code','codex'],['dsh','codex'],['dsh','custom']]){
     const ui=setup({...defaults,harness:'workbench',provider});await ui.open();
